@@ -1,8 +1,10 @@
+import fs from "fs"
+import path from "path"
 import { Router, Response, NextFunction } from "express"
 import type { RowDataPacket } from "mysql2"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
-import { listTeacherContent, getTeacherContent, updateTeacherContent } from "../services/teachingStore"
+import { listTeacherContent, getTeacherContent, updateTeacherContent, privateStorageRoot } from "../services/teachingStore"
 
 const router = Router()
 router.use(authMiddleware)
@@ -393,6 +395,91 @@ router.get("/teacher-stats/:teacherId/topics", adminOnly, async (req: AuthReques
       hasAssignment: Number(r.has_assignment) > 0,
     })),
   })
+})
+
+/* ── GET /api/admin/teacher-stats/:teacherId/topics/:topicKey — bitta
+   mavzuning haqiqiy materiallari (fayl/havola/test/topshiriq) ────────── */
+router.get("/teacher-stats/:teacherId/topics/:topicKey", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const teacherId = Number(req.params.teacherId)
+  const topicKey = req.params.topicKey
+  if (!Number.isFinite(teacherId) || teacherId <= 0 || !topicKey) {
+    res.status(400).json({ success: false, message: "Noto'g'ri parametrlar" }); return
+  }
+
+  const items = await listTeacherContent({ teacherUserId: teacherId, topicKey, isActive: true })
+
+  res.json({
+    success: true,
+    data: items
+      .filter(i => !(i.type === "mavzu" && i.kind === "topic"))
+      .map(i => ({
+        id: i.id,
+        kind: i.kind,
+        type: i.type,
+        title: i.title,
+        fileName: i.file?.originalName ?? null,
+        fileUrl: i.file ? `/api/admin/content/${i.id}/file` : null,
+        meetingLink: i.meetingLink ?? null,
+        maxScore: i.maxScore,
+        deadline: i.deadline,
+      })),
+  })
+})
+
+/* ── GET /api/admin/content/:id/file — admin uchun istalgan o'qituvchi
+   kontenti faylini ko'rish/yuklab olish (nazorat maqsadida) ─────────── */
+router.get("/content/:id/file", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  const content = Number.isFinite(id) ? await getTeacherContent(id) : null
+  if (!content || !content.file) {
+    res.status(404).json({ success: false, message: "Fayl topilmadi" }); return
+  }
+  const absolutePath = path.join(privateStorageRoot(), content.file.relativePath.replace(/^\/+/, ""))
+  if (!fs.existsSync(absolutePath)) {
+    res.status(404).json({ success: false, message: "Fayl topilmadi" }); return
+  }
+  res.setHeader("Content-Type", content.file.mimeType || "application/octet-stream")
+  res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(content.file.originalName)}"`)
+  fs.createReadStream(absolutePath).pipe(res)
+})
+
+/* ── POST /api/admin/send-report-telegram — tayyor PDF hisobotni
+   Telegram botiga (fayl sifatida) yuborish ─────────────────────────── */
+router.post("/send-report-telegram", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
+  const filename = typeof body.filename === "string" && body.filename.trim() ? body.filename.trim() : "hisobot.pdf"
+  const caption  = typeof body.caption === "string" ? body.caption.trim() : ""
+  const pdfBase64 = typeof body.pdfBase64 === "string" ? body.pdfBase64 : ""
+
+  if (!pdfBase64) {
+    res.status(400).json({ success: false, message: "pdfBase64 majburiy" }); return
+  }
+
+  const botToken = process.env.TELEGRAM_BOT_TOKEN
+  const chatId   = process.env.TELEGRAM_CHAT_ID
+  if (!botToken || !chatId) {
+    res.status(503).json({ success: false, message: "Telegram bot sozlanmagan" }); return
+  }
+
+  try {
+    const buffer = Buffer.from(pdfBase64, "base64")
+    const form = new FormData()
+    form.set("chat_id", chatId)
+    if (caption) form.set("caption", caption.slice(0, 1024))
+    form.set("document", new Blob([buffer], { type: "application/pdf" }), filename)
+
+    const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
+      method: "POST",
+      body: form,
+    })
+    const json = await resp.json() as { ok: boolean; description?: string }
+    if (!json.ok) {
+      res.status(502).json({ success: false, message: `Telegram xatosi: ${json.description ?? "noma'lum"}` }); return
+    }
+    res.json({ success: true, message: "Hisobot Telegramga yuborildi" })
+  } catch (e) {
+    res.status(502).json({ success: false, message: `Telegramga ulanib bo'lmadi: ${e instanceof Error ? e.message : "noma'lum"}` })
+  }
 })
 
 /* ── GET /api/admin/teacher-stats/:teacherId/students ──────────────── */
