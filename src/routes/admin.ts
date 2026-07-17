@@ -5,6 +5,7 @@ import type { RowDataPacket } from "mysql2"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
 import { listTeacherContent, getTeacherContent, updateTeacherContent, privateStorageRoot } from "../services/teachingStore"
+import { listQuestions } from "../services/examStore"
 
 const router = Router()
 router.use(authMiddleware)
@@ -441,6 +442,18 @@ router.get("/content/:id/file", adminOnly, async (req: AuthRequest, res: Respons
   res.setHeader("Content-Type", content.file.mimeType || "application/octet-stream")
   res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(content.file.originalName)}"`)
   fs.createReadStream(absolutePath).pipe(res)
+})
+
+/* ── GET /api/admin/content/:id/questions — test savollarini (to'g'ri
+   javob bilan) ko'rish, nazorat maqsadida ────────────────────────── */
+router.get("/content/:id/questions", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  const content = Number.isFinite(id) ? await getTeacherContent(id) : null
+  if (!content || content.type !== "exam") {
+    res.status(404).json({ success: false, message: "Test topilmadi" }); return
+  }
+  const questions = await listQuestions(content.id)
+  res.json({ success: true, data: questions })
 })
 
 /* ── POST /api/admin/send-report-telegram — tayyor PDF hisobotni
