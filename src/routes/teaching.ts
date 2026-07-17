@@ -1087,6 +1087,43 @@ router.get("/content/:id", async (req: AuthRequest, res: Response): Promise<void
   res.json({ success: true, data: presentForStudent(content) })
 })
 
+/* ── Avtomatik bildirishnoma: platforma ("Xabarnomalar") + best-effort
+   Telegram nusxasi (umumiy bot-guruhga — shaxsiy chat_id hali yo'q). ── */
+async function notifyUser(userId: number, type: "system" | "teacher" | "schedule" | "reminder", title: string, body: string) {
+  notifications.push({
+    id: randomUUID(),
+    type,
+    title,
+    body,
+    time: new Date().toLocaleString("uz-UZ"),
+    read: false,
+    userId: String(userId),
+  })
+  const botToken = process.env.TELEGRAM_BOT_TOKEN
+  const chatId = process.env.TELEGRAM_CHAT_ID
+  if (!botToken || !chatId) return
+  try {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: `🔔 <b>${title}</b>\n${body}`, parse_mode: "HTML" }),
+    })
+  } catch { /* best-effort — asosiy oqimga ta'sir qilmaydi */ }
+}
+
+/** Guruhdagi (platformadan foydalangan) talabalarga yangi material haqida xabar beradi. */
+async function notifyGroupStudents(groupId: number, title: string, body: string) {
+  try {
+    const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
+      "SELECT DISTINCT user_id FROM lms_platform_sessions WHERE group_id = ? AND role = 'student'",
+      [groupId]
+    )
+    for (const row of rows) {
+      await notifyUser(Number(row.user_id), "teacher", title, body)
+    }
+  } catch { /* best-effort */ }
+}
+
 /* ── POST /content — yangi darslik/topshiriq/imtihon yaratish ──────── */
 router.post("/content", async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.user?.role !== "employee") {
@@ -1159,9 +1196,14 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
     delivered: meta.delivered,
   }
 
+  const isRealMaterial = meta.type === "mavzu" && !!meta.kind && meta.kind !== "topic"
+
   if (isJson) {
     const record = await createTeacherContent({ ...baseInput, file: null })
     res.status(201).json({ success: true, data: record })
+    if (isRealMaterial) {
+      void notifyGroupStudents(meta.groupId, "Yangi material qo'shildi", `${meta.subjectName} fanidan yangi material: ${meta.title}`)
+    }
     return
   }
 
@@ -1170,6 +1212,9 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
   if (!file) return
   const record = await createTeacherContent({ ...baseInput, file })
   res.status(201).json({ success: true, data: record })
+  if (isRealMaterial) {
+    void notifyGroupStudents(meta.groupId, "Yangi material qo'shildi", `${meta.subjectName} fanidan yangi material: ${meta.title}`)
+  }
 })
 
 /* ── POST /content/:id/files — qo'shimcha fayl biriktirish (bir nechta) ── */
@@ -1342,6 +1387,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
       file: null,
     })
     res.status(201).json({ success: true, data: submission })
+    void notifyUser(content.teacherUserId, "reminder", "Yangi topshiriq keldi", `${fullNameOf(req.user)} — ${content.title}`)
     return
   }
 
@@ -1410,6 +1456,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
       file,
     })
     res.status(201).json({ success: true, data: submission })
+    void notifyUser(content.teacherUserId, "reminder", "Yangi topshiriq keldi", `${fullNameOf(req.user)} — ${content.title}`)
   })
 
   req.pipe(stream)
@@ -1477,6 +1524,7 @@ router.put("/submissions/:id/grade", async (req: AuthRequest, res: Response): Pr
 
   const updated = await gradeSubmission(submission.id, teacherUserId(req.user), grade, textValue(body.feedback) || null)
   res.json({ success: true, data: updated })
+  void notifyUser(submission.studentUserId, "teacher", "Baho qo'yildi", `${content.title}: ${grade}${content.maxScore ? ` / ${content.maxScore}` : ""} ball`)
 })
 
 /* ── Savol rasmlari ─────────────────────────────────────────────────── */
