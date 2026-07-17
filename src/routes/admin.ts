@@ -289,7 +289,7 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
         CONCAT('O\\'qituvchi #', tc.teacher_user_id)
       ) AS full_name,
       COALESCE(MAX(hu.updated_at), MAX(ps.login_at))                                 AS last_seen,
-      COUNT(DISTINCT tc.topic_key)                                                     AS mavzular,
+      COUNT(DISTINCT CASE WHEN NOT (tc.type='mavzu' AND tc.kind='topic') THEN tc.topic_key ELSE NULL END) AS mavzular,
       COUNT(DISTINCT CASE WHEN tc.kind='video_lesson' THEN tc.topic_key ELSE NULL END) AS videolar,
       COUNT(DISTINCT CASE WHEN tc.kind='audio'        THEN tc.topic_key ELSE NULL END) AS audiolar,
       COUNT(DISTINCT CASE WHEN tc.kind='theory'       THEN tc.topic_key ELSE NULL END) AS taqdimotlar,
@@ -352,7 +352,7 @@ router.get("/teacher-stats/:teacherId/students", adminOnly, async (req: AuthRequ
   // Content totals for this teacher
   const [tcRows] = await pool.query<RowDataPacket[]>(`
     SELECT
-      COUNT(DISTINCT topic_key)                                                        AS total_content,
+      COUNT(DISTINCT CASE WHEN NOT (type='mavzu' AND kind='topic') THEN topic_key ELSE NULL END) AS total_content,
       COUNT(DISTINCT CASE WHEN kind='video_lesson' THEN topic_key ELSE NULL END)      AS total_videos,
       COUNT(DISTINCT CASE WHEN type='exam'         THEN topic_key ELSE NULL END)      AS total_exams,
       COUNT(DISTINCT CASE WHEN type='assignment'   THEN topic_key ELSE NULL END)      AS total_assignments
