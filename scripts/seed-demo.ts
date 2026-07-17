@@ -12,6 +12,7 @@
  * O'chirish (keyinroq demolarni olib tashlash uchun):
  *   npx ts-node scripts/seed-demo.ts --remove
  */
+import "dotenv/config"
 import bcrypt from "bcryptjs"
 import { pool, initDatabase } from "../src/services/db"
 

@@ -6,7 +6,7 @@ const router = Router()
 router.use(authMiddleware)
 
 router.get("/", (req: AuthRequest, res: Response) => {
-  const userId = req.user!.id
+  const userId = String(req.user!.id)
   const data = notifications.filter((n) => n.userId === "all" || n.userId === userId)
   res.json({ success: true, data, unread: data.filter((n) => !n.read).length })
 })
@@ -19,7 +19,7 @@ router.patch("/:id/read", (req: AuthRequest, res: Response): void => {
 })
 
 router.patch("/read-all", (req: AuthRequest, res: Response) => {
-  const userId = req.user!.id
+  const userId = String(req.user!.id)
   notifications.forEach((n) => { if (n.userId === "all" || n.userId === userId) n.read = true })
   res.json({ success: true, message: "Barchasi o'qildi deb belgilandi" })
 })
