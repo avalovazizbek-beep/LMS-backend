@@ -63,7 +63,7 @@ const HEMIS_OAUTH_STUDENT_CLIENT_SECRET =
   (process.env.HEMIS_OAUTH_STUDENT_CLIENT_SECRET || HEMIS_OAUTH_CLIENT_SECRET).trim()
 const HEMIS_OAUTH_REDIRECT_URI =
   (process.env.HEMIS_OAUTH_REDIRECT_URI ||
-    `${stripTrailingSlash(FRONTEND_URL)}/login/oauth/callback`).trim()
+    `${stripTrailingSlash(FRONTEND_URL)}/lms-samisi/login/oauth/callback`).trim()
 const HEMIS_OAUTH_EMPLOYEE_REDIRECT_URI =
   (process.env.HEMIS_OAUTH_EMPLOYEE_REDIRECT_URI || HEMIS_OAUTH_REDIRECT_URI).trim()
 const HEMIS_OAUTH_TUTOR_REDIRECT_URI =
@@ -672,11 +672,11 @@ function normalizeConfiguredRedirectUri(role: OAuthRole = "employee") {
   try {
     const url = new URL(configuredRedirectUriForRole(role))
     if (url.protocol !== "http:" && url.protocol !== "https:") {
-      return `${stripTrailingSlash(FRONTEND_URL)}/login/oauth/callback`
+      return `${stripTrailingSlash(FRONTEND_URL)}/lms-samisi/login/oauth/callback`
     }
     return url.toString()
   } catch {
-    return `${stripTrailingSlash(FRONTEND_URL)}/login/oauth/callback`
+    return `${stripTrailingSlash(FRONTEND_URL)}/lms-samisi/login/oauth/callback`
   }
 }
 
@@ -2625,7 +2625,7 @@ router.get("/oauth/:role", async (req, res: Response) => {
   const oauthError = textValue(req.query.error)
   const oauthDescription = textValue(req.query.error_description, req.query.message)
   if (oauthError) {
-    const callbackUrl = new URL("/login/oauth/callback", FRONTEND_URL)
+    const callbackUrl = new URL("/lms-samisi/login/oauth/callback", FRONTEND_URL)
     callbackUrl.searchParams.set("error", oauthError)
     if (oauthDescription) callbackUrl.searchParams.set("message", oauthDescription)
     res.redirect(callbackUrl.toString())
@@ -2640,7 +2640,7 @@ router.get("/oauth/:role", async (req, res: Response) => {
 
   const statePayload = readOAuthState(req.query.state, requestedRole, redirectUri)
   if (!statePayload) {
-    const callbackUrl = new URL("/login/oauth/callback", FRONTEND_URL)
+    const callbackUrl = new URL("/lms-samisi/login/oauth/callback", FRONTEND_URL)
     callbackUrl.searchParams.set("error", "invalid_state")
     callbackUrl.searchParams.set("message", "HEMIS OAuth state yaroqsiz yoki eskirgan")
     res.redirect(callbackUrl.toString())
@@ -2651,13 +2651,13 @@ router.get("/oauth/:role", async (req, res: Response) => {
     const result = await createOAuthSession(requestedRole, code, redirectUri, statePayload.expectedLogin)
     void saveUserToDb(result.token, result.role)
     void syncTeacherFromHemis(result.token)
-    const callbackUrl = new URL("/login/oauth/callback", FRONTEND_URL)
+    const callbackUrl = new URL("/lms-samisi/login/oauth/callback", FRONTEND_URL)
     callbackUrl.searchParams.set("token", result.token)
     callbackUrl.searchParams.set("role", result.role)
     res.redirect(callbackUrl.toString())
   } catch (err) {
     console.error("[HEMIS oauth redirect]", extractMessage(err), (err as AxiosError)?.response?.data)
-    const callbackUrl = new URL("/login/oauth/callback", FRONTEND_URL)
+    const callbackUrl = new URL("/lms-samisi/login/oauth/callback", FRONTEND_URL)
     callbackUrl.searchParams.set("error", "oauth_failed")
     callbackUrl.searchParams.set("message", extractMessage(err, "HEMIS OAuth orqali kirishda xatolik"))
     const details = (err as { details?: unknown }).details
