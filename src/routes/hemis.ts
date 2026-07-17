@@ -2,6 +2,7 @@ import { Router, Response } from "express"
 import type mysql from "mysql2/promise"
 import axios, { AxiosError } from "axios"
 import jwt from "jsonwebtoken"
+import bcrypt from "bcryptjs"
 import archiver from "archiver"
 import { randomBytes } from "crypto"
 import fs from "fs"
@@ -2519,6 +2520,41 @@ router.post("/auto-login", async (req, res: Response) => {
     res.status(400).json({ success: false, message: "Login va parol kerak" })
     return
   }
+
+  // ── Demo/test hisob tekshiruvi — HEMIS'ga umuman murojaat qilmasdan ──
+  try {
+    const [demoRows] = await pool.query<mysql.RowDataPacket[]>(
+      "SELECT * FROM lms_demo_accounts WHERE username = ? LIMIT 1", [login]
+    )
+    const demo = demoRows[0]
+    if (demo && (await bcrypt.compare(password, String(demo.password_hash)))) {
+      const hemisId = Number(demo.hemis_id)
+      const teacherGroupIds = demo.teacher_group_ids
+        ? (typeof demo.teacher_group_ids === "string" ? JSON.parse(demo.teacher_group_ids) : demo.teacher_group_ids)
+        : []
+      const token = demo.role === "student"
+        ? jwt.sign(
+            {
+              id: hemisId, userId: hemisId, hemisToken: "demo-token", role: "student",
+              username: demo.full_name, fullName: demo.full_name,
+              groupId: demo.group_id != null ? Number(demo.group_id) : null,
+              studentAuthMode: "password",
+            },
+            JWT_SECRET, { expiresIn: "2d" }
+          )
+        : jwt.sign(
+            {
+              id: hemisId, userId: hemisId, hemisToken: "demo-token", role: "employee",
+              username: demo.full_name, fullName: demo.full_name, isEmployee: true,
+              employeeHemisBase: HEMIS_EMPLOYEE, employeeProfilePath: "/v1/account/me", employeeAuthMode: "password",
+              teacherGroupIds, employeeType: "O'qituvchi",
+            },
+            JWT_SECRET, { expiresIn: "2d" }
+          )
+      res.json({ success: true, token, role: demo.role, source: "demo" })
+      return
+    }
+  } catch { /* demo tekshiruvi muvaffaqiyatsiz bo'lsa — real HEMIS urinishiga o'tamiz */ }
 
   const details: string[] = []
   try {
