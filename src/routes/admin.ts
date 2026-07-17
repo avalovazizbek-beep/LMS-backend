@@ -342,6 +342,59 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
   res.json({ success: true, data })
 })
 
+/* ── GET /api/admin/teacher-stats/:teacherId/topics — o'qituvchining
+   mavzu/kontent ro'yxati (talabalar emas — faqat nom va biriktirilgan
+   material turlari) ──────────────────────────────────────────────── */
+router.get("/teacher-stats/:teacherId/topics", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const teacherId = Number(req.params.teacherId)
+  if (!Number.isFinite(teacherId) || teacherId <= 0) {
+    res.status(400).json({ success: false, message: "Noto'g'ri o'qituvchi ID" }); return
+  }
+
+  const [rows] = await pool.query<RowDataPacket[]>(`
+    SELECT
+      tc.topic_key,
+      COALESCE(MAX(CASE WHEN tc.kind='topic' THEN tc.title END), MIN(tc.title)) AS title,
+      MAX(tc.subject_name) AS subject_name,
+      MAX(tc.group_id) AS group_id,
+      MAX(g.name) AS group_name,
+      MAX(tc.created_at) AS created_at,
+      SUM(tc.kind='video_lesson') AS has_video,
+      SUM(tc.kind='audio')        AS has_audio,
+      SUM(tc.kind='theory')       AS has_theory,
+      SUM(tc.kind='qollanma')     AS has_qollanma,
+      SUM(tc.kind='youtube')      AS has_youtube,
+      SUM(tc.type='exam')         AS has_test,
+      SUM(tc.type='assignment')   AS has_assignment
+    FROM lms_teacher_content tc
+    LEFT JOIN lms_groups g ON g.id = tc.group_id
+    WHERE tc.teacher_user_id = ? AND tc.is_active = 1 AND tc.topic_key IS NOT NULL
+    GROUP BY tc.topic_key
+    HAVING has_video > 0 OR has_audio > 0 OR has_theory > 0 OR has_qollanma > 0
+        OR has_youtube > 0 OR has_test > 0 OR has_assignment > 0
+    ORDER BY created_at DESC
+    LIMIT 500
+  `, [teacherId])
+
+  res.json({
+    success: true,
+    data: rows.map(r => ({
+      topicKey: String(r.topic_key),
+      title: String(r.title ?? r.topic_key),
+      subjectName: r.subject_name ? String(r.subject_name) : null,
+      groupId: r.group_id != null ? Number(r.group_id) : null,
+      groupName: r.group_name ? String(r.group_name) : null,
+      hasVideo: Number(r.has_video) > 0,
+      hasAudio: Number(r.has_audio) > 0,
+      hasTheory: Number(r.has_theory) > 0,
+      hasQollanma: Number(r.has_qollanma) > 0,
+      hasYoutube: Number(r.has_youtube) > 0,
+      hasTest: Number(r.has_test) > 0,
+      hasAssignment: Number(r.has_assignment) > 0,
+    })),
+  })
+})
+
 /* ── GET /api/admin/teacher-stats/:teacherId/students ──────────────── */
 router.get("/teacher-stats/:teacherId/students", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
   const teacherId = Number(req.params.teacherId)
