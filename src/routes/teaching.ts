@@ -2,10 +2,12 @@ import fs from "fs"
 import os from "os"
 import path from "path"
 import { execFile } from "child_process"
+import { randomUUID } from "crypto"
 import jwt from "jsonwebtoken"
 import express, { Router, Response } from "express"
 import { authMiddleware, requireRole, AuthRequest, AuthUser } from "../middleware/auth"
 import { pool } from "../services/db"
+import { notifications } from "../db/data"
 import { parseNumber } from "../services/meetingStore"
 import { syncTeacherFromHemis, employeeTeachesGroup } from "./hemis"
 import {
@@ -840,6 +842,8 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
       qollanma: (TeacherContentRecord & { progress: ContentProgress | null; sectionLocked: boolean }) | null
       test: (TeacherContentRecord & { submission: SubmissionRecord | null; maxScore: number; sectionLocked: boolean }) | null
       assignment: (TeacherContentRecord & { submission: SubmissionRecord | null; sectionLocked: boolean }) | null
+      /** Qo'shimcha YouTube video — ixtiyoriy, ketma-ket qulflash zanjiriga kirmaydi */
+      youtube: (TeacherContentRecord & { sectionLocked: boolean }) | null
     }
   }> = []
 
@@ -853,6 +857,7 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
     const qollanma = group.find((i) => i.type === "mavzu" && i.kind === "qollanma") ?? null
     const test = group.find((i) => i.type === "exam") ?? null
     const assignment = group.find((i) => i.type === "assignment") ?? null
+    const youtube = group.find((i) => i.type === "mavzu" && i.kind === "youtube") ?? null
 
     const title = marker?.title ?? group[0].title
 
@@ -906,6 +911,8 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
     const qollanmaSection = qollanma ? { ...presentForStudent(qollanma), progress: qollanmaProgress, sectionLocked: computeSectionLocked("qollanma") } : null
     const testSection     = test     ? { ...presentForStudent(test),     submission: testSubmission, maxScore, sectionLocked: computeSectionLocked("test") }             : null
     const assignmentSection = assignment ? { ...presentForStudent(assignment), submission: assignmentSubmission, sectionLocked: computeSectionLocked("assignment") }    : null
+    // Youtube — ixtiyoriy bonus material, hech qachon qulflanmaydi (ketma-ket zanjirga kirmaydi)
+    const youtubeSection = youtube ? { ...presentForStudent(youtube), sectionLocked: false } : null
 
     const completed =
       (!videoSection    || !!videoSection.progress?.completed) &&
@@ -920,7 +927,7 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
       title,
       locked: !previousCompleted,
       completed,
-      sections: { video: videoSection, audio: audioSection, theory: theorySection, qollanma: qollanmaSection, test: testSection, assignment: assignmentSection },
+      sections: { video: videoSection, audio: audioSection, theory: theorySection, qollanma: qollanmaSection, test: testSection, assignment: assignmentSection, youtube: youtubeSection },
     })
 
     previousCompleted = completed
@@ -2270,14 +2277,41 @@ router.post("/notify-student", async (req: AuthRequest, res: Response): Promise<
   const studentName = textValue(body.studentName)
   const message     = textValue(body.message)
   const stats       = body.stats as Record<string, unknown> | undefined
+  const studentUserIdRaw = body.studentUserId
+  const studentUserId = typeof studentUserIdRaw === "number"
+    ? studentUserIdRaw
+    : typeof studentUserIdRaw === "string" && studentUserIdRaw.trim() && Number.isFinite(Number(studentUserIdRaw))
+      ? Number(studentUserIdRaw)
+      : null
 
   if (!studentName || !message) {
     res.status(400).json({ success: false, message: "studentName va message majburiy" }); return
   }
 
+  // Platforma ichidagi xabarnoma — talaba LMS'ga kirganda "Xabarnomalar" bo'limida
+  // ko'radi. Telegram sozlanmagan/xato bo'lsa ham bu mustaqil ishlaydi.
+  let platformNotified = false
+  if (studentUserId !== null) {
+    const subjectLine = stats?.subject ? ` (${textValue(stats.subject)})` : ""
+    notifications.push({
+      id: randomUUID(),
+      type: "teacher",
+      title: `O'qituvchidan xabar${subjectLine}`,
+      body: message,
+      time: new Date().toLocaleString("uz-UZ"),
+      read: false,
+      userId: String(studentUserId),
+    })
+    platformNotified = true
+  }
+
   const botToken = process.env.TELEGRAM_BOT_TOKEN
   const chatId   = process.env.TELEGRAM_CHAT_ID
   if (!botToken || !chatId) {
+    if (platformNotified) {
+      res.json({ success: true, message: "Platformaga xabar yuborildi (Telegram sozlanmagan)" })
+      return
+    }
     res.status(503).json({ success: false, message: "Telegram bot sozlanmagan (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID kerak)" }); return
   }
 
@@ -2310,10 +2344,18 @@ router.post("/notify-student", async (req: AuthRequest, res: Response): Promise<
     })
     const json = await resp.json() as { ok: boolean; description?: string }
     if (!json.ok) {
+      if (platformNotified) {
+        res.json({ success: true, message: `Platformaga yuborildi (Telegram xatosi: ${json.description ?? "noma'lum"})` })
+        return
+      }
       res.status(502).json({ success: false, message: `Telegram xatosi: ${json.description ?? "noma'lum"}` }); return
     }
-    res.json({ success: true, message: "Xabar yuborildi" })
+    res.json({ success: true, message: platformNotified ? "Telegram va platformaga yuborildi" : "Xabar yuborildi" })
   } catch (e) {
+    if (platformNotified) {
+      res.json({ success: true, message: "Platformaga yuborildi (Telegramga ulanib bo'lmadi)" })
+      return
+    }
     res.status(502).json({ success: false, message: `Telegram ga ulanib bo'lmadi: ${e instanceof Error ? e.message : "noma'lum"}` })
   }
 })

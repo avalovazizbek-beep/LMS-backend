@@ -22,6 +22,7 @@ import {
   getMeeting,
   getRecordingWithMeeting,
   joinMeeting,
+  recordFacePresence,
   listMeetingsForUser,
   listRecordingsForMeeting,
   listRecordingsForUser,
@@ -300,6 +301,30 @@ router.post("/:id/join-token", async (req: AuthRequest, res: Response): Promise<
       socketUrl: process.env.MEETING_SOCKET_URL || `http://localhost:${process.env.PORT || 5000}`,
     },
   })
+})
+
+/* Talaba meeting davomida face-api.js orqali har necha soniyada
+   kamerada yuzi ko'ringan-ko'rinmaganini shu yerga yuboradi. Davomat
+   holati bunga qarab meeting tugaganda hisoblanadi (syncMeetingAttendanceToMain). */
+router.post("/:id/face-ping", async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = meetingId(req)
+  const user = await resolveMeetingUser(req.user)
+  const meeting = id === null ? null : await getMeeting(id)
+
+  if (!meeting) {
+    res.status(404).json({ success: false, message: "Meeting topilmadi" })
+    return
+  }
+  if (meeting.status !== "live") {
+    res.status(409).json({ success: false, message: "Meeting faol emas" })
+    return
+  }
+
+  const visible = Boolean(req.body?.visible)
+  const intervalSeconds = Number(req.body?.intervalSeconds) || 15
+  await recordFacePresence(meeting.id, user.id, visible, intervalSeconds)
+
+  res.json({ success: true })
 })
 
 router.get("/:id/attendance", async (req: AuthRequest, res: Response): Promise<void> => {

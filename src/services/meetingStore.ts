@@ -96,6 +96,13 @@ export interface CreateMeetingInput {
 
 const JWT_SECRET = process.env.MEETING_JWT_SECRET || process.env.JWT_SECRET || "secret"
 
+/** Talaba "keldi" deb hisoblanishi uchun, meeting davomiyligining kamida
+ *  shuncha ulushida kamerada yuzi ko'rinib turishi kerak (masalan 80
+ *  daqiqalik darsda kamida 60 daqiqa = 0.75). */
+const FACE_ATTENDANCE_THRESHOLD_RATIO = 0.75
+/** Bitta face-ping so'rovida qo'shiladigan maksimal soniya (suiiste'mol/soxta so'rovlardan himoya) */
+const MAX_FACE_PING_SECONDS = 60
+
 const defaultSettings: MeetingSettings = {
   allowCamera: true,
   allowMicrophone: true,
@@ -382,30 +389,41 @@ export async function endMeeting(meeting: MeetingRecord): Promise<MeetingRecord>
   return meeting
 }
 
-/** Meeting tugaganda barcha kirgan talabalarni (group_id bor) lms_attendance ga yozadi */
+/** Meeting tugaganda barcha kirgan talabalarni (group_id bor) lms_attendance ga yozadi.
+ *  "Keldi" faqat kamerada yuzi meeting davomiyligining kamida
+ *  FACE_ATTENDANCE_THRESHOLD_RATIO ulushida ko'rinib turgan bo'lsa qo'yiladi —
+ *  faqat join qilingani (kamerasiz/kamera oldida o'tirmasdan) yetarli emas. */
 async function syncMeetingAttendanceToMain(meeting: MeetingRecord): Promise<void> {
   if (!meeting.subjectName) return
 
   const lessonDate = new Date(meeting.startTime).toISOString().slice(0, 10)
   const subjectName = meeting.subjectName
+  const durationSeconds = Math.max(60, Math.round((Date.now() - new Date(meeting.startTime).getTime()) / 1000))
+  const requiredSeconds = durationSeconds * FACE_ATTENDANCE_THRESHOLD_RATIO
 
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    `SELECT user_id, group_id, full_name
+    `SELECT user_id, group_id, full_name, face_visible_seconds
      FROM lms_meeting_attendance
      WHERE meeting_id = ? AND group_id IS NOT NULL`,
     [meeting.id]
   )
 
   for (const row of rows) {
+    const facePresent = Number(row.face_visible_seconds) >= requiredSeconds
+    const status = facePresent ? "present" : "absent"
+    const comment = facePresent
+      ? "Meeting orqali (Face ID tasdiqlandi)"
+      : "Meeting'ga kirdi, lekin Face ID orqali davomat tasdiqlanmadi"
     await pool.query(
       `INSERT INTO lms_attendance
          (group_id, subject_name, lesson_date, student_user_id, student_full_name,
           status, comment, marked_by_user_id)
-       VALUES (?, ?, ?, ?, ?, 'present', 'Meeting orqali avtomatik', 0)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0)
        ON DUPLICATE KEY UPDATE
-         status            = 'present',
+         status            = VALUES(status),
+         comment           = VALUES(comment),
          student_full_name = VALUES(student_full_name)`,
-      [Number(row.group_id), subjectName, lessonDate, Number(row.user_id), String(row.full_name)]
+      [Number(row.group_id), subjectName, lessonDate, Number(row.user_id), String(row.full_name), status, comment]
     )
   }
 
@@ -415,6 +433,24 @@ async function syncMeetingAttendanceToMain(meeting: MeetingRecord): Promise<void
       [meeting.id]
     )
   }
+}
+
+/** Talabaning meeting davomida kamerada yuzi ko'ringan vaqtini qo'shadi
+ *  (frontend har necha soniyada face-api.js orqali tekshirib yuboradi). */
+export async function recordFacePresence(
+  meetingId: number,
+  userId: number,
+  visible: boolean,
+  intervalSeconds: number
+): Promise<void> {
+  if (!visible) return
+  const seconds = Math.max(1, Math.min(MAX_FACE_PING_SECONDS, Math.round(intervalSeconds) || 0))
+  if (!seconds) return
+  await pool.query(
+    `UPDATE lms_meeting_attendance SET face_visible_seconds = face_visible_seconds + ?
+     WHERE meeting_id = ? AND user_id = ?`,
+    [seconds, meetingId, userId]
+  )
 }
 
 export async function joinMeeting(meeting: MeetingRecord, user: MeetingUser): Promise<AttendanceSummary | null> {
@@ -439,19 +475,9 @@ export async function joinMeeting(meeting: MeetingRecord, user: MeetingUser): Pr
     )
   }
 
-  // Talaba online darsga kirsa lms_attendance ga "keldi" deb yoz
-  if (user.role === "student" && user.groupId && meeting.subjectName?.trim()) {
-    try {
-      const today = new Date().toISOString().slice(0, 10)
-      await pool.query(
-        `INSERT INTO lms_attendance
-           (group_id, subject_name, lesson_date, student_user_id, student_full_name, status, comment, marked_by_user_id)
-         VALUES (?, ?, ?, ?, ?, 'present', 'Online dars', ?)
-         ON DUPLICATE KEY UPDATE status = 'present', comment = COALESCE(comment, 'Online dars')`,
-        [user.groupId, meeting.subjectName.trim(), today, user.id, user.fullName ?? `Talaba #${user.id}`, meeting.createdByUserId]
-      )
-    } catch { /* ignore — main functionality not affected */ }
-  }
+  // Eslatma: bu yerda darhol lms_attendance'ga "keldi" deb yozilmaydi —
+  // yakuniy davomat holati faqat meeting tugaganda, Face ID orqali kamerada
+  // ko'ringan vaqt nisbati asosida syncMeetingAttendanceToMain() da hisoblanadi.
 
   const summaries = await getAttendance(meeting.id)
   return summaries.find(s => s.userId === user.id) ?? null

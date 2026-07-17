@@ -183,12 +183,14 @@ export async function initDatabase() {
       user_id                 INT NOT NULL,
       group_id                INT NULL,
       full_name               VARCHAR(255) NOT NULL,
+      face_visible_seconds    INT NOT NULL DEFAULT 0,
       synced_to_main_backend  BOOLEAN NOT NULL DEFAULT FALSE,
       created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       UNIQUE KEY uq_attendance_user (meeting_id, user_id),
       CONSTRAINT fk_att_meeting FOREIGN KEY (meeting_id) REFERENCES lms_meetings(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
+  await execIgnoreDuplicate(`ALTER TABLE lms_meeting_attendance ADD COLUMN face_visible_seconds INT NOT NULL DEFAULT 0 AFTER full_name`)
 
   await exec(`
     CREATE TABLE IF NOT EXISTS lms_meeting_attendance_sessions (

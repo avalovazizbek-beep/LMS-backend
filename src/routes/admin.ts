@@ -297,7 +297,7 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
       COUNT(DISTINCT CASE WHEN tc.type='exam'         THEN tc.topic_key ELSE NULL END) AS testlar,
       COUNT(DISTINCT CASE WHEN tc.type='assignment'   THEN tc.topic_key ELSE NULL END) AS amaliy,
       COUNT(DISTINCT tc.group_id)                                                      AS guruhlar,
-      COUNT(DISTINCT cp.student_user_id)                                               AS students_completed,
+      COUNT(DISTINCT COALESCE(cp.student_user_id, ma.user_id))                         AS students_completed,
       COUNT(DISTINCT sub.student_user_id)                                              AS students_submitted,
       COUNT(DISTINCT m.id)                                                             AS meeting_count
     FROM lms_teacher_content tc
@@ -314,6 +314,8 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
       ON sub.content_id = tc.id
     LEFT JOIN lms_meetings m
       ON m.created_by_user_id = tc.teacher_user_id
+    LEFT JOIN lms_meeting_attendance ma
+      ON ma.meeting_id = m.id AND ma.group_id IS NOT NULL
     WHERE tc.is_active = 1
     GROUP BY tc.teacher_user_id
     ORDER BY mavzular DESC, last_seen DESC
@@ -377,6 +379,13 @@ router.get("/teacher-stats/:teacherId/students", adminOnly, async (req: AuthRequ
       SELECT p.student_user_id, NULL
       FROM lms_content_progress p
       JOIN lms_teacher_content t3 ON t3.id = p.content_id AND t3.teacher_user_id = ? AND t3.is_active = 1
+      UNION ALL
+      -- Faqat meeting orqali qatnashgan (video/test progressi bo'lmagan) talabalar ham
+      -- ro'yxatga kirsin — aks holda "meetinglar ko'p, talabalar 0" ko'rinishi chiqadi.
+      SELECT ma.user_id, ma.full_name
+      FROM lms_meeting_attendance ma
+      JOIN lms_meetings m ON m.id = ma.meeting_id AND m.created_by_user_id = ?
+      WHERE ma.group_id IS NOT NULL
     ) sl
     LEFT JOIN lms_content_progress cp
       ON cp.student_user_id = sl.student_user_id
@@ -388,7 +397,7 @@ router.get("/teacher-stats/:teacherId/students", adminOnly, async (req: AuthRequ
     GROUP BY sl.student_user_id
     ORDER BY done_topics DESC, done_submissions DESC
     LIMIT 500
-  `, [teacherId, teacherId, teacherId, teacherId])
+  `, [teacherId, teacherId, teacherId, teacherId, teacherId])
 
   res.json({
     success: true,
@@ -548,6 +557,68 @@ router.get("/attendance/detail", adminOnly, async (req: AuthRequest, res: Respon
   })) })
 })
 
+/* ── GET /api/admin/attendance/students — guruh+fan bo'yicha talabalar
+   ro'yxati, har birining umumiy davomat foizi bilan ──────────────────── */
+router.get("/attendance/students", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const groupId = req.query.groupId ? Number(req.query.groupId) : null
+  const subject = typeof req.query.subject === "string" ? req.query.subject.trim() : ""
+
+  if (!groupId || !subject) {
+    res.status(400).json({ success: false, message: "groupId, subject majburiy" }); return
+  }
+
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT a.student_user_id, MAX(a.student_full_name) AS student_full_name,
+            COUNT(*) AS total,
+            SUM(CASE WHEN a.status='present' THEN 1 ELSE 0 END) AS present,
+            SUM(CASE WHEN a.status='absent'  THEN 1 ELSE 0 END) AS absent,
+            SUM(CASE WHEN a.status='excused' THEN 1 ELSE 0 END) AS excused,
+            SUM(CASE WHEN a.status='late'    THEN 1 ELSE 0 END) AS late
+     FROM lms_attendance a
+     WHERE a.group_id = ? AND LOWER(a.subject_name) = LOWER(?)
+     GROUP BY a.student_user_id
+     ORDER BY student_full_name`,
+    [groupId, subject]
+  )
+
+  res.json({ success: true, data: rows.map(r => ({
+    studentId: Number(r.student_user_id),
+    studentName: String(r.student_full_name),
+    total: Number(r.total),
+    present: Number(r.present),
+    absent: Number(r.absent),
+    excused: Number(r.excused),
+    late: Number(r.late),
+    presentPct: Number(r.total) > 0 ? Math.round((Number(r.present) / Number(r.total)) * 100) : 0,
+  })) })
+})
+
+/* ── GET /api/admin/attendance/student-detail — bitta talabaning
+   guruh+fan bo'yicha sana-sana davomat tarixi ─────────────────────────── */
+router.get("/attendance/student-detail", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const groupId   = req.query.groupId ? Number(req.query.groupId) : null
+  const subject   = typeof req.query.subject === "string" ? req.query.subject.trim() : ""
+  const studentId = req.query.studentId ? Number(req.query.studentId) : null
+
+  if (!groupId || !subject || !studentId) {
+    res.status(400).json({ success: false, message: "groupId, subject, studentId majburiy" }); return
+  }
+
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT a.lesson_date, a.status, a.comment
+     FROM lms_attendance a
+     WHERE a.group_id = ? AND LOWER(a.subject_name) = LOWER(?) AND a.student_user_id = ?
+     ORDER BY a.lesson_date DESC`,
+    [groupId, subject, studentId]
+  )
+
+  res.json({ success: true, data: rows.map(r => ({
+    lessonDate: r.lesson_date instanceof Date ? r.lesson_date.toISOString().slice(0, 10) : String(r.lesson_date),
+    status: String(r.status),
+    comment: r.comment ?? null,
+  })) })
+})
+
 /* ── GET /api/admin/teacher-journal ─────────────────────────────────── */
 router.get("/teacher-journal", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
   const teacherId = req.query.teacherId ? Number(req.query.teacherId) : null
@@ -646,36 +717,47 @@ router.get("/teacher-journal", adminOnly, async (req: AuthRequest, res: Response
 
 /* ── POST /api/admin/hemis-sync — LMS natijalarini HEMIS ga yuklash ─── */
 router.post("/hemis-sync", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
-  // Collect grades to sync to HEMIS
-  const [gradeRows] = await pool.query<RowDataPacket[]>(`
-    SELECT
-      pg.group_id, pg.subject_name, pg.grade_type, pg.student_user_id,
-      MAX(hu.full_name) AS student_name, pg.grade
-    FROM lms_period_grades pg
-    LEFT JOIN hemis_users hu ON CAST(hu.hemis_id AS UNSIGNED) = pg.student_user_id
-    WHERE pg.grade IS NOT NULL
-    ORDER BY pg.group_id, pg.subject_name, pg.grade_type
-    LIMIT 1000
-  `)
+  try {
+    // Collect grades to sync to HEMIS
+    const [gradeRows] = await pool.query<RowDataPacket[]>(`
+      SELECT
+        pg.group_id, pg.subject_name, pg.grade_type, pg.student_user_id,
+        MAX(hu.full_name) AS student_name, pg.grade
+      FROM lms_period_grades pg
+      LEFT JOIN hemis_users hu ON CAST(hu.hemis_id AS UNSIGNED) = pg.student_user_id
+      WHERE pg.grade IS NOT NULL
+      ORDER BY pg.group_id, pg.subject_name, pg.grade_type
+      LIMIT 1000
+    `)
 
-  const [attRows] = await pool.query<RowDataPacket[]>(`
-    SELECT group_id, subject_name, lesson_date,
-      SUM(CASE WHEN status='present' THEN 1 ELSE 0 END) AS present,
-      COUNT(*) AS total
-    FROM lms_attendance
-    GROUP BY group_id, subject_name, lesson_date
-    LIMIT 500
-  `)
+    const [attRows] = await pool.query<RowDataPacket[]>(`
+      SELECT group_id, subject_name, lesson_date,
+        SUM(CASE WHEN status='present' THEN 1 ELSE 0 END) AS present,
+        COUNT(*) AS total
+      FROM lms_attendance
+      GROUP BY group_id, subject_name, lesson_date
+      LIMIT 500
+    `)
 
-  res.json({
-    success: true,
-    message: "Ma'lumotlar to'plandi. HEMIS API integratsiyasi sozlanmagan.",
-    data: {
-      grades: gradeRows.length,
-      attendanceDays: attRows.length,
-      note: "HEMIS API endpoint va tokenni sozlang",
-    },
-  })
+    // HEMIS hozircha tashqi tizimlardan baho/davomat qabul qiladigan ochiq
+    // yozish (POST) endpointini bermagan — shuning uchun bu yerda faqat
+    // LMS tarafidagi ma'lumotlar to'planadi, HEMIS'ga jo'natilmaydi.
+    res.json({
+      success: true,
+      message: "Ma'lumotlar to'plandi. HEMIS hali tashqi tizimlardan yozishga ruxsat bermaydi.",
+      data: {
+        grades: gradeRows.length,
+        attendanceDays: attRows.length,
+        note: "HEMIS API endpoint va tokenni sozlang",
+      },
+    })
+  } catch (err) {
+    console.error("[admin] hemis-sync xato:", err)
+    res.status(500).json({
+      success: false,
+      message: err instanceof Error ? err.message : "HEMIS sync vaqtida xatolik yuz berdi",
+    })
+  }
 })
 
 /* ── GET /api/admin/sessions ─── kirish tarixi ──────────────────────── */
