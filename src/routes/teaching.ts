@@ -275,15 +275,50 @@ function receiveUploadedFile(req: AuthRequest, res: Response): Promise<ContentFi
   })
 }
 
-function streamPrivateFile(res: Response, relativePath: string, originalName: string, mimeType: string) {
+/* Video/audio elementlar (ayniqsa iOS Safari va mobil brauzerlar) HTTP
+   Range so'rovlari (masalan "Range: bytes=0-1") orqali faylni probe qiladi
+   va 206 Partial Content javobini kutadi — shu qo'llab-quvvatlanmasa,
+   mobil qurilmalarda video/audio umuman ochilmaydi (desktop brauzerlar
+   ko'pincha shunga qaramay to'liq faylni yuklab ishlatib yuboradi). */
+function streamPrivateFile(req: AuthRequest, res: Response, relativePath: string, originalName: string, mimeType: string) {
   const absolutePath = path.join(privateStorageRoot(), relativePath.replace(/^\/+/, ""))
   if (!fs.existsSync(absolutePath)) {
     res.status(404).json({ success: false, message: "Fayl topilmadi" })
     return
   }
-  res.setHeader("Content-Type", mimeType || "application/octet-stream")
-  res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(originalName)}"`)
-  fs.createReadStream(absolutePath).pipe(res)
+
+  const stat = fs.statSync(absolutePath)
+  const fileSize = stat.size
+  const contentType = mimeType || "application/octet-stream"
+  const disposition = `inline; filename="${encodeURIComponent(originalName)}"`
+  const range = req.headers.range
+
+  res.setHeader("Accept-Ranges", "bytes")
+  res.setHeader("Content-Type", contentType)
+  res.setHeader("Content-Disposition", disposition)
+
+  if (!range) {
+    res.setHeader("Content-Length", fileSize)
+    fs.createReadStream(absolutePath).pipe(res)
+    return
+  }
+
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range)
+  if (!match) {
+    res.status(416).setHeader("Content-Range", `bytes */${fileSize}`).end()
+    return
+  }
+  const start = match[1] ? parseInt(match[1], 10) : 0
+  const end = match[2] ? parseInt(match[2], 10) : fileSize - 1
+  if (Number.isNaN(start) || Number.isNaN(end) || start > end || end >= fileSize) {
+    res.status(416).setHeader("Content-Range", `bytes */${fileSize}`).end()
+    return
+  }
+
+  res.status(206)
+  res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`)
+  res.setHeader("Content-Length", end - start + 1)
+  fs.createReadStream(absolutePath, { start, end }).pipe(res)
 }
 
 router.get("/content/:id/file", async (req: AuthRequest, res: Response): Promise<void> => {
@@ -316,7 +351,7 @@ router.get("/content/:id/file", async (req: AuthRequest, res: Response): Promise
     }
   }
 
-  streamPrivateFile(res, content.file.relativePath, content.file.originalName, content.file.mimeType)
+  streamPrivateFile(req, res, content.file.relativePath, content.file.originalName, content.file.mimeType)
 })
 
 const PPTX_EXTRACT_PY = `
@@ -665,7 +700,7 @@ router.get("/content/:id/files/:fileId", async (req: AuthRequest, res: Response)
     }
   }
 
-  streamPrivateFile(res, file.relativePath, file.originalName, file.mimeType)
+  streamPrivateFile(req, res, file.relativePath, file.originalName, file.mimeType)
 })
 
 router.get("/submissions/:id/file", async (req: AuthRequest, res: Response): Promise<void> => {
@@ -688,7 +723,7 @@ router.get("/submissions/:id/file", async (req: AuthRequest, res: Response): Pro
     return
   }
 
-  streamPrivateFile(res, submission.file.relativePath, submission.file.originalName, submission.file.mimeType)
+  streamPrivateFile(req, res, submission.file.relativePath, submission.file.originalName, submission.file.mimeType)
 })
 
 /* ── keyingi barcha yo'nalishlar JWT talab qiladi ─────────────────── */

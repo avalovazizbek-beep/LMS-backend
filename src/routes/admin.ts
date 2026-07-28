@@ -439,9 +439,41 @@ router.get("/content/:id/file", adminOnly, async (req: AuthRequest, res: Respons
   if (!fs.existsSync(absolutePath)) {
     res.status(404).json({ success: false, message: "Fayl topilmadi" }); return
   }
-  res.setHeader("Content-Type", content.file.mimeType || "application/octet-stream")
+
+  /* Video elementlar (ayniqsa iOS Safari/mobil brauzerlar) HTTP Range
+     so'rovi orqali faylni probe qiladi va 206 Partial Content kutadi —
+     shu bo'lmasa mobilda video umuman ochilmaydi. */
+  const stat = fs.statSync(absolutePath)
+  const fileSize = stat.size
+  const mimeType = content.file.mimeType || "application/octet-stream"
+  const range = req.headers.range
+
+  res.setHeader("Accept-Ranges", "bytes")
+  res.setHeader("Content-Type", mimeType)
   res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(content.file.originalName)}"`)
-  fs.createReadStream(absolutePath).pipe(res)
+
+  if (!range) {
+    res.setHeader("Content-Length", fileSize)
+    fs.createReadStream(absolutePath).pipe(res)
+    return
+  }
+
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range)
+  if (!match) {
+    res.status(416).setHeader("Content-Range", `bytes */${fileSize}`).end()
+    return
+  }
+  const start = match[1] ? parseInt(match[1], 10) : 0
+  const end = match[2] ? parseInt(match[2], 10) : fileSize - 1
+  if (Number.isNaN(start) || Number.isNaN(end) || start > end || end >= fileSize) {
+    res.status(416).setHeader("Content-Range", `bytes */${fileSize}`).end()
+    return
+  }
+
+  res.status(206)
+  res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`)
+  res.setHeader("Content-Length", end - start + 1)
+  fs.createReadStream(absolutePath, { start, end }).pipe(res)
 })
 
 /* ── GET /api/admin/content/:id/questions — test savollarini (to'g'ri
