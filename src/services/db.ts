@@ -436,7 +436,6 @@ export async function initDatabase() {
   await ensureColumn("lms_submissions", "attempts_used", "INT NOT NULL DEFAULT 1")
   await ensureColumn("lms_submissions", "question_ids", "TEXT NULL DEFAULT NULL")
   await ensureColumn("lms_submissions", "option_perms", "TEXT NULL DEFAULT NULL")
-  await ensureColumn("lms_exam_sessions", "option_perms", "TEXT NULL DEFAULT NULL")
 
   // ── lms_meetings: fan nomi (subjectName) ──
   await ensureColumn("lms_meetings", "subject_name", "VARCHAR(255) NULL")
@@ -523,6 +522,7 @@ export async function initDatabase() {
       INDEX idx_exam_session_student (student_user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
+  await ensureColumn("lms_exam_sessions", "option_perms", "TEXT NULL DEFAULT NULL")
 
   // ── Admin ruxsatnomalar: kimga qanday LMS roli berilgan ──
   await execSafe(`
