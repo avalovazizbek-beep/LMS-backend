@@ -272,7 +272,7 @@ export async function syncTeacherFromHemis(token: string) {
     const fullName = textValue(user.fullName, (user as unknown as Record<string, unknown>).name as string)
     if (fullName && userId > 0) {
       try {
-        void recordPlatformSession(userId, fullName, null, "employee")
+        await recordPlatformSession(userId, fullName, null, "employee")
         await pool.query(
           `UPDATE lms_platform_sessions SET full_name = ?
            WHERE user_id = ? AND role = 'employee' AND (full_name IS NULL OR full_name = '' OR full_name NOT LIKE '% %')`,
