@@ -825,6 +825,9 @@ async function hemisOAuthAccessToken(role: OAuthRole, code: string, redirectUri:
       const oauthError = textValue(e?.response?.data?.error, e?.response?.data?.message)
       const oauthDescription = textValue(e?.response?.data?.error_description)
       errors.push(`${attempt.name}: ${e?.response?.status ?? "no-status"} ${[oauthError, oauthDescription].filter(Boolean).join(" - ") || extractMessage(err)}`)
+      console.warn(
+        `[HEMIS oauth token debug] attempt=${attempt.name} url=${tokenUrl} sentBody=${attempt.body.toString()} status=${e?.response?.status} fullResponseData=${JSON.stringify(e?.response?.data)}`
+      )
     }
   }
 
