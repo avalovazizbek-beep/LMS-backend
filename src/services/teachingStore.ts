@@ -859,21 +859,43 @@ export interface UpsertContentProgressInput {
 }
 
 /** Talaba video/audio/hujjat ko'rish jarayonini yangilaydi — pozitsiya va sahifalar faqat ortib boradi. */
+// Server-side anti-cheat: a single progress update can't advance the
+// watched position by more than this many seconds beyond what was already
+// recorded. Legitimate playback saves progress every ~5s (see
+// LockedMediaPlayer's SAVE_INTERVAL_MS), even at 2x speed that's ~10s of
+// real progress per save — this cap gives generous slack for network
+// jitter/buffering without letting a forged request (e.g. a raw fetch()
+// from devtools claiming positionSeconds near the end) fake full playback.
+const MAX_POSITION_JUMP_SECONDS = 30
+
 export async function upsertContentProgress(input: UpsertContentProgressInput): Promise<ContentProgress> {
   const existing = await getContentProgress(input.contentId, input.studentUserId)
-
-  const maxPositionSeconds = Math.max(existing?.maxPositionSeconds ?? 0, input.positionSeconds ?? 0)
+  const priorMax = existing?.maxPositionSeconds ?? 0
   const durationSeconds = input.durationSeconds ?? existing?.durationSeconds ?? null
+
+  let reportedPosition = input.positionSeconds ?? 0
+  if (durationSeconds != null) reportedPosition = Math.min(reportedPosition, durationSeconds)
+  // Ignore (don't ratchet up on) implausible forward jumps rather than trusting them outright.
+  const maxPositionSeconds = reportedPosition > priorMax + MAX_POSITION_JUMP_SECONDS
+    ? priorMax
+    : Math.max(priorMax, reportedPosition)
+
   const totalPages = input.totalPages ?? existing?.totalPages ?? null
   const pagesRead = Array.from(new Set([...(existing?.pagesRead ?? []), ...(input.pagesRead ?? [])])).sort((a, b) => a - b)
 
+  // "completed" is derived from objective, server-tracked progress whenever
+  // one exists (watched duration or pages read) — the client's own
+  // `completed: true` flag is trusted only for content with neither signal
+  // (e.g. a plain downloadable guide), since there's nothing else to verify
+  // it against. This closes the gap where a forged request could otherwise
+  // mark a video/document "done" without ever actually watching/reading it.
   let completed = existing?.completed ?? false
-  if (input.forceCompleted) {
-    completed = true
-  } else if (durationSeconds != null) {
+  if (durationSeconds != null) {
     completed = maxPositionSeconds >= durationSeconds - 2
   } else if (totalPages != null) {
     completed = pagesRead.length >= totalPages
+  } else if (input.forceCompleted) {
+    completed = true
   }
 
   await pool.query(
