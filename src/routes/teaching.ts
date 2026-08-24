@@ -154,6 +154,7 @@ interface ContentMeta {
   deadline: string
   maxScore: number | null
   attemptsCount: number | null
+  questionDisplayCount: number | null
   language: string
   completionPoints: number | null
   durationMinutes: number | null
@@ -182,6 +183,7 @@ function readContentMeta(source: Record<string, unknown>): ContentMeta {
     deadline: textValue(source.deadline),
     maxScore: numberValue(source.maxScore ?? source.max_score),
     attemptsCount: numberValue(source.attemptsCount ?? source.attempts_count),
+    questionDisplayCount: numberValue(source.questionDisplayCount ?? source.question_display_count),
     language: textValue(source.language),
     completionPoints: numberValue(source.completionPoints ?? source.completion_points),
     durationMinutes: numberValue(source.durationMinutes ?? source.duration_minutes),
@@ -505,17 +507,66 @@ def get_slide_bg(z, slide_name, slide_tree, theme):
     except: pass
     return '#ffffff'
 
+def ph_key(sp):
+    # (type, idx) identifying a placeholder shape, or None if not a placeholder
+    nvPr = sp.find('.//{'+PNS+'}nvSpPr/{'+PNS+'}nvPr')
+    if nvPr is None: return None
+    ph = nvPr.find('{'+PNS+'}ph')
+    if ph is None: return None
+    return (ph.get('type','body'), ph.get('idx',''))
+
+def shape_xfrm(sp):
+    xfrm = sp.find('.//{'+NS+'}xfrm')
+    if xfrm is None: return None
+    off = xfrm.find('{'+NS+'}off')
+    ext = xfrm.find('{'+NS+'}ext')
+    if off is None or ext is None: return None
+    return (si(off.get('x')), si(off.get('y')), si(ext.get('cx')), si(ext.get('cy')))
+
+def layout_path_for_slide(z, slide_name):
+    try:
+        rel_path = slide_name.replace('ppt/slides/slide','ppt/slides/_rels/slide')+'.rels'
+        for rel in ET.fromstring(z.read(rel_path)):
+            if 'slideLayout' in rel.get('Type',''):
+                return resolve_rel_path(slide_name, rel.get('Target',''))
+    except: pass
+    return None
+
+def layout_xfrm_map(z, layout_path):
+    # (type, idx) -> xfrm, for every placeholder defined on the slide's layout —
+    # slides usually only set an explicit xfrm on shapes whose position differs
+    # from the layout; title/body placeholders inherit it silently otherwise.
+    m = {}
+    if not layout_path: return m
+    try:
+        lt = ET.fromstring(z.read(layout_path))
+        for sp in lt.iter('{'+PNS+'}sp'):
+            key = ph_key(sp)
+            xfrm = shape_xfrm(sp)
+            if key is not None and xfrm is not None:
+                m[key] = xfrm
+    except: pass
+    return m
+
 def parse_slide(z, name, sw, sh, theme):
     tree = ET.fromstring(z.read(name))
     bg = get_slide_bg(z, name, tree, theme)
+    lmap = layout_xfrm_map(z, layout_path_for_slide(z, name))
     shapes = []
     for sp in tree.iter('{'+PNS+'}sp'):
-        xfrm = sp.find('.//{'+NS+'}xfrm')
-        if xfrm is None: continue
-        off = xfrm.find('{'+NS+'}off')
-        ext = xfrm.find('{'+NS+'}ext')
-        if off is None or ext is None: continue
-        x,y,w,h = si(off.get('x')),si(off.get('y')),si(ext.get('cx')),si(ext.get('cy'))
+        pos = shape_xfrm(sp)
+        if pos is None:
+            key = ph_key(sp)
+            if key is not None:
+                pos = lmap.get(key)
+                if pos is None:
+                    # idx often differs slide-to-layout; fall back to type match
+                    for k2, v2 in lmap.items():
+                        if k2[0] == key[0]:
+                            pos = v2
+                            break
+        if pos is None: continue
+        x,y,w,h = pos
         fill = first_fill_clr(sp, theme)
         paras = []
         for para in sp.iter('{'+NS+'}p'):
@@ -1231,6 +1282,7 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
     deadline: meta.deadline || null,
     maxScore: meta.maxScore,
     attemptsCount: meta.attemptsCount,
+    questionDisplayCount: meta.questionDisplayCount,
     language: meta.language || null,
     completionPoints: meta.completionPoints,
     durationMinutes: meta.durationMinutes,
@@ -2180,7 +2232,22 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
     return
   }
 
-  const contentIds = allContent.filter(c => c.topicKey).map(c => c.id)
+  // "Oraliq nazorat" / "Yakuniy nazorat" — standalone MCQ exams (no topicKey,
+  // so invisible to the topic columns above) whose scores should feed
+  // ON1/ON2/YN automatically instead of requiring a duplicate manual entry.
+  // Ordered by availableFrom: 1st oraliq exam -> ON1, 2nd -> ON2, 1st yakuniy -> YN.
+  const oraliqContent = allContent
+    .filter(c => c.controlType === "oraliq")
+    .sort((a, b) => new Date(a.availableFrom).getTime() - new Date(b.availableFrom).getTime())
+  const yakuniyContent = allContent
+    .filter(c => c.controlType === "yakuniy")
+    .sort((a, b) => new Date(a.availableFrom).getTime() - new Date(b.availableFrom).getTime())
+  const periodExamContent = [...oraliqContent, ...yakuniyContent]
+
+  const contentIds = Array.from(new Set([
+    ...allContent.filter(c => c.topicKey).map(c => c.id),
+    ...periodExamContent.map(c => c.id),
+  ]))
   const studentIds = roster.map(s => s.studentUserId)
 
   const [progressList, submissionList, periodGradeList, attList] = await Promise.all([
@@ -2199,6 +2266,16 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
 
   const periodMap = new Map<string, number | null>()
   for (const g of periodGradeList) periodMap.set(`${g.studentUserId}:${g.gradeType}`, g.grade)
+
+  // Manual ON/YN entries are the fallback; a real submitted exam always wins.
+  // Result is a 0-100 percentage, matching how ON1/ON2/YN are already entered/displayed.
+  function periodScoreFromExam(exam: TeacherContentRecord, studentUserId: number): number | null {
+    const grade = subMap.get(`${exam.id}:${studentUserId}`)
+    if (grade == null) return null
+    const earned = normalizeGrade(grade, exam.maxScore)
+    const max = exam.maxScore && exam.maxScore > 0 ? exam.maxScore : 100
+    return Math.min(100, Math.round((earned / max) * 100 * 10) / 10)
+  }
 
   const attMap = new Map<number, number>()
   for (const a of attList) {
@@ -2232,9 +2309,12 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
       ? Math.round(submittedPcts.reduce((a, b) => a + b, 0) / submittedPcts.length * 10) / 10
       : null
 
-    const on1 = periodMap.get(`${s.studentUserId}:ON1`) ?? null
-    const on2 = periodMap.get(`${s.studentUserId}:ON2`) ?? null
-    const yn  = periodMap.get(`${s.studentUserId}:YN`)  ?? null
+    const on1 = (oraliqContent[0] ? periodScoreFromExam(oraliqContent[0], s.studentUserId) : null)
+      ?? periodMap.get(`${s.studentUserId}:ON1`) ?? null
+    const on2 = (oraliqContent[1] ? periodScoreFromExam(oraliqContent[1], s.studentUserId) : null)
+      ?? periodMap.get(`${s.studentUserId}:ON2`) ?? null
+    const yn  = (yakuniyContent[0] ? periodScoreFromExam(yakuniyContent[0], s.studentUserId) : null)
+      ?? periodMap.get(`${s.studentUserId}:YN`)  ?? null
 
     return {
       userId: s.studentUserId,

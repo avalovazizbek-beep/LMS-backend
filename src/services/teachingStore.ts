@@ -394,6 +394,7 @@ export interface CreateContentInput {
   deadline?: string | null
   maxScore?: number | null
   attemptsCount?: number | null
+  questionDisplayCount?: number | null
   language?: string | null
   completionPoints?: number | null
   durationMinutes?: number | null
@@ -409,8 +410,8 @@ export async function createTeacherContent(input: CreateContentInput): Promise<T
     `INSERT INTO lms_teacher_content
       (uuid, type, teacher_user_id, group_id, subject_name, topic_key, title, description, kind, control_type, resource_type,
        file_name, original_name, mime_type, file_size, relative_path, public_url, meeting_link,
-       available_from, deadline, max_score, attempts_count, language, duration_minutes, training_load, completion_points, lesson_date, delivered)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       available_from, deadline, max_score, attempts_count, question_display_count, language, duration_minutes, training_load, completion_points, lesson_date, delivered)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       uuid,
       input.type,
@@ -434,6 +435,7 @@ export async function createTeacherContent(input: CreateContentInput): Promise<T
       input.deadline ? toMysqlDate(new Date(input.deadline)) : null,
       input.maxScore ?? null,
       input.attemptsCount ?? null,
+      input.questionDisplayCount ?? null,
       input.language?.trim() || null,
       input.durationMinutes ?? null,
       input.trainingLoad ?? null,
