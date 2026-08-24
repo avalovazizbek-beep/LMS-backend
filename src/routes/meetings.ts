@@ -9,6 +9,7 @@ import { authMiddleware, AuthRequest, AuthUser } from "../middleware/auth"
 let _io: SocketIOServer | null = null
 export function setSocketIO(io: SocketIOServer) { _io = io }
 import { sanitizeFilename } from "../services/teachingStore"
+import { closeMeetingRouter } from "../services/mediasoupService"
 import { pool } from "../services/db"
 import { randomUUID } from "crypto"
 import {
@@ -244,6 +245,7 @@ router.post("/:id/end", async (req: AuthRequest, res: Response): Promise<void> =
 
   const ended = await endMeeting(meeting)
   _io?.to(`meeting:${meeting.id}`).emit("meeting:ended", { meetingId: meeting.id })
+  closeMeetingRouter(meeting.id)
 
   // Auto-save ended meeting as a subject resource if it has a subject
   if (meeting.subjectName) {
@@ -414,6 +416,7 @@ router.patch("/:id/done", async (req: AuthRequest, res: Response): Promise<void>
 
   const done = await endMeeting(meeting)
   _io?.to(`meeting:${meeting.id}`).emit("meeting:ended", { meetingId: meeting.id })
+  closeMeetingRouter(meeting.id)
   res.json({ success: true, data: toMeetingResponse(done, user) })
 })
 
