@@ -608,13 +608,21 @@ router.get("/content/:id/pptx-rich-slides", async (req: AuthRequest, res: Respon
   const absPath = path.join(privateStorageRoot(), content.file.relativePath.replace(/^\/+/, ""))
   if (!fs.existsSync(absPath)) { res.json({ count: 0, slides: [] }); return }
 
-  execFile("python", ["-c", PPTX_RICH_PY, absPath], { timeout: 20000 }, (err, stdout) => {
-    try {
-      res.json(JSON.parse(stdout || "{}"))
-    } catch {
-      res.json({ count: 0, slides: [] })
-    }
-  })
+  // "python3" is the standard binary name on Linux (prod); Windows dev
+  // machines often only have "python". Try both instead of hardcoding one.
+  const pythonCandidates = ["python3", "python"]
+  const tryPython = (i: number) => {
+    if (i >= pythonCandidates.length) { res.json({ count: 0, slides: [] }); return }
+    execFile(pythonCandidates[i], ["-c", PPTX_RICH_PY, absPath], { timeout: 20000 }, (err, stdout) => {
+      if (err && (err as NodeJS.ErrnoException).code === "ENOENT") { tryPython(i + 1); return }
+      try {
+        res.json(JSON.parse(stdout || "{}"))
+      } catch {
+        res.json({ count: 0, slides: [] })
+      }
+    })
+  }
+  tryPython(0)
 })
 
 /* ── GET /content/:id/pptx-as-pdf — PPTX → PDF conversion (LibreOffice) ── */
