@@ -2663,12 +2663,59 @@ router.get("/oauth/:role", async (req, res: Response) => {
     return
   }
 
-  const statePayload = readOAuthState(req.query.state, requestedRole, redirectUri)
+  const state = textValue(req.query.state) ?? ""
+
+  // Render an interstitial page instead of exchanging the code directly on
+  // this GET response. Corporate proxies / antivirus / link-scanners fetch
+  // GET redirect URLs in the background to inspect them, which silently
+  // burns single-use OAuth codes before the real browser gets to use them
+  // (HEMIS confirmed this via "Authorization code has been revoked" on the
+  // very first exchange attempt). A plain GET response with no script is
+  // inert to those scanners; only a real browser executes the inline
+  // fetch() below, which performs the actual (single) token exchange via
+  // POST — something scanners don't do.
+  res.type("html").send(`<!doctype html>
+<html><head><meta charset="utf-8"><title>HEMIS orqali kirish</title></head>
+<body style="font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f6f9ff;color:#012970">
+<p>Tizimga kirilmoqda...</p>
+<script>
+fetch(${JSON.stringify(`/api/hemis/oauth/exchange/${requestedRole}`)}, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ code: ${JSON.stringify(code)}, state: ${JSON.stringify(state)} })
+})
+  .then(function (r) { return r.json() })
+  .then(function (data) { window.location.href = data.redirect })
+  .catch(function () {
+    window.location.href = ${JSON.stringify(new URL(OAUTH_CALLBACK_PATH, FRONTEND_URL).toString())} + "?error=oauth_failed&message=" + encodeURIComponent("Tarmoq xatosi")
+  })
+</script>
+</body></html>`)
+})
+
+router.post("/oauth/exchange/:role", async (req, res: Response) => {
+  const requestedRole = normalizeOAuthRole(req.params.role) || "employee"
+  if (requestedRole === "auto") {
+    res.status(400).json({ success: false, message: "Server-side OAuth uchun role employee yoki student bo'lishi kerak" })
+    return
+  }
+
+  const redirectUri = configuredOAuthRedirectUri(requestedRole)
+  const code = oauthCodeValue(req.body?.code)
+  const callbackUrl = new URL(OAUTH_CALLBACK_PATH, FRONTEND_URL)
+
+  if (!code) {
+    callbackUrl.searchParams.set("error", "invalid_request")
+    callbackUrl.searchParams.set("message", "OAuth code topilmadi")
+    res.json({ redirect: callbackUrl.toString() })
+    return
+  }
+
+  const statePayload = readOAuthState(req.body?.state, requestedRole, redirectUri)
   if (!statePayload) {
-    const callbackUrl = new URL(OAUTH_CALLBACK_PATH, FRONTEND_URL)
     callbackUrl.searchParams.set("error", "invalid_state")
     callbackUrl.searchParams.set("message", "HEMIS OAuth state yaroqsiz yoki eskirgan")
-    res.redirect(callbackUrl.toString())
+    res.json({ redirect: callbackUrl.toString() })
     return
   }
 
@@ -2676,20 +2723,18 @@ router.get("/oauth/:role", async (req, res: Response) => {
     const result = await createOAuthSession(requestedRole, code, redirectUri, statePayload.expectedLogin)
     void saveUserToDb(result.token, result.role)
     void syncTeacherFromHemis(result.token)
-    const callbackUrl = new URL(OAUTH_CALLBACK_PATH, FRONTEND_URL)
     callbackUrl.searchParams.set("token", result.token)
     callbackUrl.searchParams.set("role", result.role)
-    res.redirect(callbackUrl.toString())
+    res.json({ redirect: callbackUrl.toString() })
   } catch (err) {
-    console.error("[HEMIS oauth redirect]", extractMessage(err), (err as AxiosError)?.response?.data)
-    const callbackUrl = new URL(OAUTH_CALLBACK_PATH, FRONTEND_URL)
+    console.error("[HEMIS oauth exchange]", extractMessage(err), (err as AxiosError)?.response?.data)
     callbackUrl.searchParams.set("error", "oauth_failed")
     callbackUrl.searchParams.set("message", extractMessage(err, "HEMIS OAuth orqali kirishda xatolik"))
     const details = (err as { details?: unknown }).details
     if (Array.isArray(details) && details.length) {
       callbackUrl.searchParams.set("details", details.map(String).join("; "))
     }
-    res.redirect(callbackUrl.toString())
+    res.json({ redirect: callbackUrl.toString() })
   }
 })
 
