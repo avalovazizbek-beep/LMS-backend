@@ -775,66 +775,49 @@ async function hemisOAuthAccessToken(role: OAuthRole, code: string, redirectUri:
 
   const oauthBase = oauthBaseForRole(role)
   const tokenUrl = `${oauthBase}/oauth/access-token`
-  const baseBody = {
+  // OAuth authorization codes are single-use — Passport revokes the code on
+  // the first presentation to this endpoint, success or not. Trying a second
+  // auth-method fallback here would always fail with "code already revoked",
+  // masking the real error. Send exactly one, RFC-standard request instead.
+  const body = new URLSearchParams({
     grant_type: "authorization_code",
     redirect_uri: redirectUri,
     code,
+    client_id: clientId,
+  })
+  const headers = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    Accept: "application/json",
+    Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
   }
-  const attempts = [
-    {
-      name: "body-client-secret",
-      body: new URLSearchParams({
-        ...baseBody,
-        client_id: clientId,
-        client_secret: clientSecret,
-      }),
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    },
-    {
-      name: "basic-auth",
-      body: new URLSearchParams({
-        ...baseBody,
-        client_id: clientId,
-      }),
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "application/json",
-        Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
-      },
-    },
-  ]
-  const errors: string[] = []
 
-  for (const attempt of attempts) {
-    try {
-      const { data } = await axios.post(tokenUrl, attempt.body.toString(), { headers: attempt.headers })
-      const payload = asRecord(asRecord(data).data || data)
-      const accessToken = textValue(payload.access_token, payload.token)
-      if (!accessToken) {
-        throw Object.assign(new Error("HEMIS OAuth access token qaytmadi"), { data })
-      }
-
-      return {
-        oauthBase,
-        accessToken,
-        refreshToken: textValue(payload.refresh_token),
-        expiresIn: numberValue(payload.expires_in),
-      }
-    } catch (err) {
-      const e = err as AxiosError<{ error?: string; error_description?: string; message?: string }>
-      const oauthError = textValue(e?.response?.data?.error, e?.response?.data?.message)
-      const oauthDescription = textValue(e?.response?.data?.error_description)
-      errors.push(`${attempt.name}: ${e?.response?.status ?? "no-status"} ${[oauthError, oauthDescription].filter(Boolean).join(" - ") || extractMessage(err)}`)
-      console.warn(
-        `[HEMIS oauth token debug] attempt=${attempt.name} url=${tokenUrl} sentBody=${attempt.body.toString()} status=${e?.response?.status} fullResponseData=${JSON.stringify(e?.response?.data)}`
-      )
+  try {
+    const { data } = await axios.post(tokenUrl, body.toString(), { headers })
+    const payload = asRecord(asRecord(data).data || data)
+    const accessToken = textValue(payload.access_token, payload.token)
+    if (!accessToken) {
+      throw Object.assign(new Error("HEMIS OAuth access token qaytmadi"), { data })
     }
-  }
 
-  throw Object.assign(
-    new Error("HEMIS OAuth client authentication failed. Client ID/client code yoki OAuth redirect URL HEMISdagi klient sozlamasiga mos emas"),
-    { details: errors }
-  )
+    return {
+      oauthBase,
+      accessToken,
+      refreshToken: textValue(payload.refresh_token),
+      expiresIn: numberValue(payload.expires_in),
+    }
+  } catch (err) {
+    const e = err as AxiosError<{ error?: string; error_description?: string; message?: string; hint?: string }>
+    const oauthError = textValue(e?.response?.data?.error, e?.response?.data?.message)
+    const oauthDescription = textValue(e?.response?.data?.error_description, e?.response?.data?.hint)
+    const detail = `${e?.response?.status ?? "no-status"} ${[oauthError, oauthDescription].filter(Boolean).join(" - ") || extractMessage(err)}`
+    console.warn(
+      `[HEMIS oauth token debug] url=${tokenUrl} status=${e?.response?.status} fullResponseData=${JSON.stringify(e?.response?.data)}`
+    )
+    throw Object.assign(
+      new Error("HEMIS OAuth client authentication failed. Client ID/client code yoki OAuth redirect URL HEMISdagi klient sozlamasiga mos emas"),
+      { details: [detail] }
+    )
+  }
 }
 
 function oauthFieldsForRole(role: OAuthRole) {
