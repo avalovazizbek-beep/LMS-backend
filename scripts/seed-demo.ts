@@ -21,6 +21,8 @@ const GROUP_IDS = [9901, 9902]
 const GROUP_NAMES = ["DEMO-101", "DEMO-102"]
 const STUDENTS_PER_GROUP = 3
 const DEMO_PASSWORD = "demo12345"
+const DEMO_SUBJECT = "Demo fan"
+const PERIOD_GRADE_TYPES = ["ON1", "ON2", "YN"] as const
 
 async function remove() {
   await initDatabase()
@@ -28,6 +30,10 @@ async function remove() {
   await pool.query("DELETE FROM hemis_users WHERE hemis_id = ? OR CAST(hemis_id AS UNSIGNED) BETWEEN 9601 AND 9699", [String(TEACHER_ID)])
   await pool.query("DELETE FROM lms_platform_sessions WHERE user_id = ? OR user_id BETWEEN 9601 AND 9699", [TEACHER_ID])
   await pool.query("DELETE FROM lms_teacher_groups WHERE user_id = ?", [TEACHER_ID])
+  await pool.query("DELETE FROM lms_teacher_subjects WHERE user_id = ?", [TEACHER_ID])
+  await pool.query("DELETE FROM lms_teacher_schedule WHERE teacher_user_id = ?", [TEACHER_ID])
+  await pool.query("DELETE FROM lms_grades WHERE group_id IN (?, ?)", GROUP_IDS)
+  await pool.query("DELETE FROM lms_period_grades WHERE group_id IN (?, ?)", GROUP_IDS)
   await pool.query("DELETE FROM lms_groups WHERE id IN (?, ?)", GROUP_IDS)
   console.log("Demo hisoblar o'chirildi.")
   await pool.end()
@@ -71,8 +77,23 @@ async function seed() {
   )
   credentials.push({ role: "O'qituvchi", name: teacherName, group: null, username: teacherUsername, password: DEMO_PASSWORD })
 
+  // 2b) Fan biriktirish — o'qituvchining "Mavzular" bo'limida fan chiqishi uchun
+  await pool.query(
+    `INSERT INTO lms_teacher_subjects (user_id, subject_name) VALUES (?, ?)
+     ON DUPLICATE KEY UPDATE subject_name = VALUES(subject_name)`,
+    [TEACHER_ID, DEMO_SUBJECT]
+  )
+  for (const gid of GROUP_IDS) {
+    await pool.query(
+      `INSERT INTO lms_teacher_schedule (teacher_user_id, group_id, subject_name, week_day, start_time, end_time, room)
+       VALUES (?, ?, ?, 'Dushanba', '09:00', '10:20', '101-xona')`,
+      [TEACHER_ID, gid, DEMO_SUBJECT]
+    )
+  }
+
   // 3) Talabalar (har guruhda 3 tadan)
   let studentId = 9601
+  const students: { id: number; name: string; groupId: number }[] = []
   for (let g = 0; g < GROUP_IDS.length; g++) {
     for (let s = 1; s <= STUDENTS_PER_GROUP; s++) {
       const name = `Demo Talaba ${g + 1}-${s}`
@@ -94,8 +115,30 @@ async function seed() {
         [username, passwordHash, studentId, name, GROUP_IDS[g]]
       )
       credentials.push({ role: "Talaba", name, group: GROUP_NAMES[g], username, password: DEMO_PASSWORD })
+      students.push({ id: studentId, name, groupId: GROUP_IDS[g] })
       studentId++
     }
+  }
+
+  // 4) Namunaviy natijalar — admin panelida ko'rinishi uchun
+  const today = new Date().toISOString().slice(0, 10)
+  for (const student of students) {
+    for (const gradeType of PERIOD_GRADE_TYPES) {
+      const grade = 60 + Math.floor(Math.random() * 35) // 60-94 oralig'ida
+      await pool.query(
+        `INSERT INTO lms_period_grades (group_id, subject_name, student_user_id, grade_type, grade, teacher_user_id)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE grade = VALUES(grade)`,
+        [student.groupId, DEMO_SUBJECT, student.id, gradeType, grade, TEACHER_ID]
+      )
+    }
+    const lessonGrade = 3 + Math.floor(Math.random() * 3) // 3-5
+    await pool.query(
+      `INSERT INTO lms_grades (group_id, subject_name, lesson_date, student_user_id, student_full_name, grade, marked_by_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE grade = VALUES(grade)`,
+      [student.groupId, DEMO_SUBJECT, today, student.id, student.name, lessonGrade, TEACHER_ID]
+    )
   }
 
   console.log("\n=== DEMO HISOBLAR TAYYOR — login sahifasida shu login/parol bilan kiring ===\n")
