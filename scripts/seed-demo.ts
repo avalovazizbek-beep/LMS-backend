@@ -23,7 +23,9 @@ const GROUP_NAMES = ["DEMO-101", "DEMO-102"]
 const STUDENTS_PER_GROUP = 3
 const DEMO_PASSWORD = "demo12345"
 const DEMO_SUBJECT = "Demo fan"
-const PERIOD_GRADE_TYPES = ["ON1", "ON2", "YN"] as const
+// Only ON1 is seeded — a fresh demo should look like a class mid-semester
+// (one assessment done), not one where every field is already filled in.
+const PERIOD_GRADE_TYPES = ["ON1"] as const
 
 async function remove() {
   await initDatabase()
