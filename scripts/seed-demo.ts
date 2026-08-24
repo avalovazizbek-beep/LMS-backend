@@ -14,6 +14,7 @@
  */
 import "dotenv/config"
 import bcrypt from "bcryptjs"
+import type mysql from "mysql2/promise"
 import { pool, initDatabase } from "../src/services/db"
 
 const TEACHER_ID = 9501
@@ -34,6 +35,7 @@ async function remove() {
   await pool.query("DELETE FROM lms_teacher_schedule WHERE teacher_user_id = ?", [TEACHER_ID])
   await pool.query("DELETE FROM lms_grades WHERE group_id IN (?, ?)", GROUP_IDS)
   await pool.query("DELETE FROM lms_period_grades WHERE group_id IN (?, ?)", GROUP_IDS)
+  await pool.query("DELETE FROM lms_teacher_content WHERE teacher_user_id = ?", [TEACHER_ID])
   await pool.query("DELETE FROM lms_groups WHERE id IN (?, ?)", GROUP_IDS)
   console.log("Demo hisoblar o'chirildi.")
   await pool.end()
@@ -120,9 +122,49 @@ async function seed() {
     }
   }
 
+  // 3b) Mavzu + imtihon kontenti — "Talabalar ballari jurnali"da ustunlar va
+  // baholar shu kontent (lms_teacher_content + lms_submissions) orqali
+  // hisoblanadi, shuning uchun bo'sh bo'lmasligi uchun kamida bitta kerak.
+  const now = new Date()
+  const availableFrom = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+  const contentIdsByGroup = new Map<number, { mavzuId: number; examId: number }>()
+  for (const gid of GROUP_IDS) {
+    const topicKey = `demo-topic-${gid}`
+    const mavzuUuid = `10000000-0000-4000-8000-${String(gid).padStart(12, "0")}`
+    const examUuid = `20000000-0000-4000-8000-${String(gid).padStart(12, "0")}`
+
+    await pool.query(
+      `INSERT INTO lms_teacher_content
+        (uuid, type, teacher_user_id, group_id, subject_name, topic_key, title, available_from)
+       VALUES (?, 'mavzu', ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE title = VALUES(title), available_from = VALUES(available_from)`,
+      [mavzuUuid, TEACHER_ID, gid, DEMO_SUBJECT, topicKey, "1-mavzu", availableFrom]
+    )
+    await pool.query(
+      `INSERT INTO lms_teacher_content
+        (uuid, type, teacher_user_id, group_id, subject_name, topic_key, title, available_from, max_score)
+       VALUES (?, 'exam', ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE title = VALUES(title), available_from = VALUES(available_from), max_score = VALUES(max_score)`,
+      [examUuid, TEACHER_ID, gid, DEMO_SUBJECT, topicKey, "1-mavzu imtihoni", availableFrom, 100]
+    )
+    // ON DUPLICATE KEY UPDATE doesn't reliably return insertId for the
+    // existing-row case across MySQL versions — look the ids up explicitly.
+    const [[mavzuRow]] = await pool.query<mysql.RowDataPacket[]>("SELECT id FROM lms_teacher_content WHERE uuid = ?", [mavzuUuid])
+    const [[examRow]] = await pool.query<mysql.RowDataPacket[]>("SELECT id FROM lms_teacher_content WHERE uuid = ?", [examUuid])
+    contentIdsByGroup.set(gid, { mavzuId: Number(mavzuRow.id), examId: Number(examRow.id) })
+  }
+
   // 4) Namunaviy natijalar — admin panelida ko'rinishi uchun
   const today = new Date().toISOString().slice(0, 10)
   for (const student of students) {
+    const examId = contentIdsByGroup.get(student.groupId)!.examId
+    const examGrade = 60 + Math.floor(Math.random() * 40) // 60-99
+    await pool.query(
+      `INSERT INTO lms_submissions (content_id, student_user_id, student_full_name, group_id, grade, graded_at, graded_by_user_id)
+       VALUES (?, ?, ?, ?, ?, NOW(), ?)
+       ON DUPLICATE KEY UPDATE grade = VALUES(grade), graded_at = VALUES(graded_at)`,
+      [examId, student.id, student.name, student.groupId, examGrade, TEACHER_ID]
+    )
     for (const gradeType of PERIOD_GRADE_TYPES) {
       const grade = 60 + Math.floor(Math.random() * 35) // 60-94 oralig'ida
       await pool.query(

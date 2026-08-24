@@ -30,10 +30,24 @@ export async function getGroupRoster(groupId: number): Promise<RosterStudent[]> 
     () => fetchGroupRoster(groupId),
     ROSTER_CACHE_TTL_MS
   )
-  return data.map((s) => ({
-    studentUserId: studentUserId({ id: s.hemisId }),
-    fullName: s.fullName,
-    studentIdNumber: s.studentIdNumber,
+  if (data.length) {
+    return data.map((s) => ({
+      studentUserId: studentUserId({ id: s.hemisId }),
+      fullName: s.fullName,
+      studentIdNumber: s.studentIdNumber,
+    }))
+  }
+  // HEMIS has no record of this group (e.g. a locally-seeded demo group,
+  // or a transient lookup miss) — fall back to whoever has actually
+  // logged into the platform under it.
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT DISTINCT user_id, full_name FROM lms_platform_sessions WHERE group_id = ? AND role = 'student'`,
+    [groupId]
+  )
+  return rows.map((r) => ({
+    studentUserId: Number(r.user_id),
+    fullName: String(r.full_name),
+    studentIdNumber: null,
   }))
 }
 
