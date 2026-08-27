@@ -89,6 +89,25 @@ router.post("/register", async (req: AuthRequest, res: Response) => {
       )
     }
 
+    // Reject if this face is already registered under a DIFFERENT account —
+    // prevents one person registering the same face on multiple student
+    // accounts (exam-proctoring integrity).
+    const [others] = await pool.query<mysql.RowDataPacket[]>(
+      "SELECT descriptors FROM face_registrations WHERE username != ?", [un]
+    )
+    for (const row of others) {
+      const otherDescriptors: number[][] = JSON.parse(row.descriptors)
+      const isSamePerson = descriptors.some((candidate) => bestDist(candidate, otherDescriptors) <= THRESHOLD)
+      if (isSamePerson) {
+        res.status(409).json({
+          success: false,
+          message: "Bu yuz allaqachon boshqa hisobda ro'yxatdan o'tgan",
+          duplicateFace: true,
+        })
+        return
+      }
+    }
+
     await pool.query(
       `INSERT INTO face_registrations (username, display_name, descriptors)
        VALUES (?, ?, ?)
