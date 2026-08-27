@@ -5,6 +5,11 @@ export interface AuthUser {
   id?: string | number
   userId?: string | number
   username?: string
+  // The actual HEMIS login/ID typed at sign-in — stable across devices and
+  // sessions, unlike `username` (which is display-name-derived and can vary
+  // in formatting between HEMIS API responses). Use this for anything that
+  // needs to recognize the same person across logins, e.g. face_registrations.
+  hemisLogin?: string
   fullName?: string
   role: string
   hemisToken?: string

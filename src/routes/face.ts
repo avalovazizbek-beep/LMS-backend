@@ -9,6 +9,14 @@ router.use(authMiddleware)
 
 const THRESHOLD = 0.62
 
+// Identity key for face_registrations/face_requests — prefer the actual
+// HEMIS login (stable across devices/sessions) over the display-name-derived
+// `username`, which can vary in formatting between HEMIS API responses and
+// made the same person look "unregistered" when logging in elsewhere.
+function identityKey(req: AuthRequest): string | undefined {
+  return req.user?.hemisLogin || req.user?.username
+}
+
 function euclidean(a: number[], b: number[]): number {
   return Math.sqrt(a.reduce((s, v, i) => s + (v - b[i]) ** 2, 0))
 }
@@ -18,7 +26,7 @@ function bestDist(candidate: number[], stored: number[][]): number {
 
 /* ── GET /api/face/status ─────────────────────────────────────────── */
 router.get("/status", async (req: AuthRequest, res: Response) => {
-  const un = req.user?.username
+  const un = identityKey(req)
   if (!un) { res.status(401).json({ success: false }); return }
 
   try {
@@ -49,7 +57,7 @@ router.get("/status", async (req: AuthRequest, res: Response) => {
 
 /* ── POST /api/face/register ──────────────────────────────────────── */
 router.post("/register", async (req: AuthRequest, res: Response) => {
-  const un          = req.user?.username
+  const un          = identityKey(req)
   const displayName = req.user?.username
   if (!un) { res.status(401).json({ success: false }); return }
 
@@ -96,7 +104,7 @@ router.post("/register", async (req: AuthRequest, res: Response) => {
 
 /* ── POST /api/face/verify ────────────────────────────────────────── */
 router.post("/verify", async (req: AuthRequest, res: Response) => {
-  const un = req.user?.username
+  const un = identityKey(req)
   if (!un) { res.status(401).json({ success: false }); return }
 
   const { descriptor } = req.body as { descriptor: number[] }
@@ -126,7 +134,7 @@ router.post("/verify", async (req: AuthRequest, res: Response) => {
 
 /* ── POST /api/face/re-register-request ──────────────────────────── */
 router.post("/re-register-request", async (req: AuthRequest, res: Response) => {
-  const un = req.user?.username
+  const un = identityKey(req)
   if (!un) { res.status(401).json({ success: false }); return }
 
   try {
