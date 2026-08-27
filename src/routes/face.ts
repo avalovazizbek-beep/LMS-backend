@@ -23,6 +23,27 @@ function euclidean(a: number[], b: number[]): number {
 function bestDist(candidate: number[], stored: number[][]): number {
   return Math.min(...stored.map(d => euclidean(candidate, d)))
 }
+// Average distance across every candidate×stored pair — used for cross-account
+// duplicate detection. bestDist (the single closest pair) is too easily
+// triggered by one noisy sample matching by chance out of many comparisons;
+// averaging requires consistent similarity across the whole set, which is
+// much stronger evidence of "same person" and avoids blocking a legitimate
+// different person's registration.
+function averageDist(candidates: number[][], stored: number[][]): number {
+  let total = 0
+  let count = 0
+  for (const c of candidates) {
+    for (const s of stored) {
+      total += euclidean(c, s)
+      count += 1
+    }
+  }
+  return count ? total / count : Infinity
+}
+// Stricter than THRESHOLD (0.62, used for live verify) — a false positive
+// here blocks a legitimate registration, which is worse than a false
+// negative letting a genuine duplicate slip through.
+const DUPLICATE_THRESHOLD = 0.5
 
 /* ── GET /api/face/status ─────────────────────────────────────────── */
 router.get("/status", async (req: AuthRequest, res: Response) => {
@@ -97,7 +118,7 @@ router.post("/register", async (req: AuthRequest, res: Response) => {
     )
     for (const row of others) {
       const otherDescriptors: number[][] = JSON.parse(row.descriptors)
-      const isSamePerson = descriptors.some((candidate) => bestDist(candidate, otherDescriptors) <= THRESHOLD)
+      const isSamePerson = averageDist(descriptors, otherDescriptors) <= DUPLICATE_THRESHOLD
       if (isSamePerson) {
         res.status(409).json({
           success: false,
