@@ -2,7 +2,7 @@
  * Demo (test) hisoblar yaratish — HEMIS orqali kirmasdan, LOGIN + PAROL bilan
  * haqiqiy login sahifasi orqali sinash uchun.
  *
- * Yaratadi: 1 ta demo o'qituvchi, 2 ta guruh, har guruhda 3 tadan (jami 6 ta) talaba.
+ * Yaratadi: 1 ta demo o'qituvchi, 2 ta guruh — DEMO-101'da 30 ta, DEMO-102'da 3 ta (jami 33 ta) talaba.
  * Login sahifasidagi "HEMIS Login" / "Parol" maydonlariga shu ma'lumotlarni kiritib
  * kirish mumkin — backend ularni HEMIS'ga umuman murojaat qilmasdan tanийди.
  *
@@ -20,7 +20,10 @@ import { pool, initDatabase } from "../src/services/db"
 const TEACHER_ID = 9501
 const GROUP_IDS = [9901, 9902]
 const GROUP_NAMES = ["DEMO-101", "DEMO-102"]
-const STUDENTS_PER_GROUP = 3
+// Per-group student count, indexed the same as GROUP_IDS/GROUP_NAMES —
+// DEMO-101 scaled up to a realistic full-class size for meeting/attendance
+// testing, DEMO-102 stays small.
+const STUDENTS_PER_GROUP = [30, 3]
 const DEMO_PASSWORD = "demo12345"
 const DEMO_SUBJECT = "Demo fan"
 // Only ON1 is seeded — a fresh demo should look like a class mid-semester
@@ -95,11 +98,11 @@ async function seed() {
     )
   }
 
-  // 3) Talabalar (har guruhda 3 tadan)
+  // 3) Talabalar (guruh boshiga STUDENTS_PER_GROUP[g] tadan)
   let studentId = 9601
   const students: { id: number; name: string; groupId: number }[] = []
   for (let g = 0; g < GROUP_IDS.length; g++) {
-    for (let s = 1; s <= STUDENTS_PER_GROUP; s++) {
+    for (let s = 1; s <= STUDENTS_PER_GROUP[g]; s++) {
       const name = `Demo Talaba ${g + 1}-${s}`
       const username = `demo_student${g + 1}_${s}`
       await pool.query(
