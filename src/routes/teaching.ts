@@ -77,6 +77,7 @@ import {
   getGradeForGroupDate,
   getGroupGradeHistory,
 } from "../services/gradeStore"
+import { getActiveRetakeGrant, consumeRetakeGrant } from "../services/retakeStore"
 
 const router = Router()
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
@@ -1716,9 +1717,11 @@ router.get("/content/:id/questions", async (req: AuthRequest, res: Response): Pr
   // Oldingi urinishni va limitni tekshirish
   const prevSubmission = await getSubmissionForStudent(content.id, sIdForSession)
   const maxAttempts = content.attemptsCount && content.attemptsCount > 0 ? content.attemptsCount : null
+  // Admin qayta urinish ruxsati bergan bo'lsa (retake grant), limitga qaramasdan o'tkaziladi
+  const activeGrant = maxAttempts !== null ? await getActiveRetakeGrant(content.id, sIdForSession) : null
   const attemptsLeft = maxAttempts === null
     ? true
-    : (prevSubmission ? prevSubmission.attemptsUsed < maxAttempts : true)
+    : (prevSubmission ? prevSubmission.attemptsUsed < maxAttempts : true) || !!activeGrant
 
   if (prevSubmission && !attemptsLeft) {
     res.status(403).json({ success: false, message: `Urinishlar soni tugadi (${maxAttempts} ta)` })
@@ -1877,7 +1880,9 @@ router.post("/content/:id/exam-submit", async (req: AuthRequest, res: Response):
 
   // Urinishlar limitini tekshirish (0 yoki null = cheksiz)
   const maxAttempts = content.attemptsCount && content.attemptsCount > 0 ? content.attemptsCount : null
-  if (existing && maxAttempts !== null && existing.attemptsUsed >= maxAttempts) {
+  // Admin qayta urinish ruxsati bergan bo'lsa (retake grant), limitga qaramasdan o'tkaziladi
+  const activeGrant = maxAttempts !== null ? await getActiveRetakeGrant(content.id, sId) : null
+  if (existing && maxAttempts !== null && existing.attemptsUsed >= maxAttempts && !activeGrant) {
     res.status(409).json({
       success: false,
       message: `Siz bu imtihonga ${maxAttempts} marta urinib bo'ldingiz`,
@@ -1906,6 +1911,11 @@ router.post("/content/:id/exam-submit", async (req: AuthRequest, res: Response):
   }
 
   const { submission } = await submitExamAnswers(content.id, sId, fullNameOf(req.user), studentGroupId(req.user), answers, sessionIds ?? undefined, session?.optionPerms, content.maxScore)
+
+  // Bir martalik qayta urinish ruxsati ishlatilgan bo'lsa — iste'mol qilindi deb belgilanadi
+  if (activeGrant) {
+    await consumeRetakeGrant(content.id, sId)
+  }
 
   // Sessiyani o'chirish — keyingi urinishda yangi random savollar keladi
   await deleteExamSession(content.id, sId)

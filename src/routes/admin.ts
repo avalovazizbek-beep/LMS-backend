@@ -4,8 +4,9 @@ import { Router, Response, NextFunction } from "express"
 import type { RowDataPacket } from "mysql2"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
-import { listTeacherContent, getTeacherContent, updateTeacherContent, privateStorageRoot } from "../services/teachingStore"
-import { listQuestions } from "../services/examStore"
+import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot } from "../services/teachingStore"
+import { listQuestions, isExamPassed } from "../services/examStore"
+import { grantRetake, revokeRetakeGrant } from "../services/retakeStore"
 
 const router = Router()
 router.use(authMiddleware)
@@ -1136,6 +1137,84 @@ router.patch("/content/:id/toggle", adminOnly, async (req: AuthRequest, res: Res
   if (!existing) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
   const updated = await updateTeacherContent(id, { isActive: !existing.isActive })
   res.json({ success: true, data: updated })
+})
+
+/* ── GET /api/admin/exams — barcha o'qituvchilarning imtihonlari (oddiy/oraliq/yakuniy) ── */
+router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const groupId = req.query.groupId ? Number(req.query.groupId) : null
+  const subject = typeof req.query.subject === "string" ? req.query.subject.trim() : ""
+  const controlType = typeof req.query.controlType === "string" ? req.query.controlType.trim() : ""
+
+  const where: string[] = ["tc.type = 'exam'", "tc.is_active = 1"]
+  const params: unknown[] = []
+  if (groupId) { where.push("tc.group_id = ?"); params.push(groupId) }
+  if (subject) { where.push("LOWER(tc.subject_name) = LOWER(?)"); params.push(subject) }
+  if (controlType === "none") where.push("tc.control_type IS NULL")
+  else if (controlType) { where.push("tc.control_type = ?"); params.push(controlType) }
+
+  const [rows] = await pool.query<RowDataPacket[]>(`
+    SELECT tc.id, tc.title, tc.subject_name, tc.group_id, g.name AS group_name, tc.control_type,
+           tc.teacher_user_id, tc.max_score, tc.available_from, tc.deadline,
+           COALESCE(NULLIF(TRIM(hu.full_name),''), CONCAT('O\\'qituvchi #', tc.teacher_user_id)) AS teacher_name,
+           (SELECT COUNT(*) FROM lms_submissions s WHERE s.content_id = tc.id) AS submission_count
+    FROM lms_teacher_content tc
+    LEFT JOIN lms_groups g ON g.id = tc.group_id
+    LEFT JOIN hemis_users hu ON hu.teacher_user_id = tc.teacher_user_id
+    WHERE ${where.join(" AND ")}
+    ORDER BY tc.available_from DESC
+    LIMIT 300
+  `, params)
+
+  res.json({ success: true, data: rows.map(r => ({
+    id: Number(r.id), title: String(r.title), subjectName: String(r.subject_name),
+    groupId: Number(r.group_id), groupName: r.group_name ? String(r.group_name) : `Guruh ${r.group_id}`,
+    controlType: r.control_type ?? null, teacherName: String(r.teacher_name),
+    maxScore: r.max_score == null ? null : Number(r.max_score),
+    availableFrom: r.available_from, deadline: r.deadline,
+    submissionCount: Number(r.submission_count ?? 0),
+  })) })
+})
+
+/* ── GET /api/admin/content/:id/submissions — pass/fail bilan barcha natijalar ── */
+router.get("/content/:id/submissions", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  const content = Number.isFinite(id) ? await getTeacherContent(id) : null
+  if (!content || content.type !== "exam") { res.status(404).json({ success: false, message: "Imtihon topilmadi" }); return }
+  const submissions = await listSubmissions(content.id)
+  res.json({ success: true, data: submissions.map(s => ({ ...s, passed: isExamPassed(s.grade, content.maxScore) })) })
+})
+
+/* ── POST /api/admin/content/:id/retake-grants — tanlangan (yiqilgan) talabalarga ruxsat ── */
+router.post("/content/:id/retake-grants", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  const content = Number.isFinite(id) ? await getTeacherContent(id) : null
+  if (!content || content.type !== "exam") { res.status(404).json({ success: false, message: "Imtihon topilmadi" }); return }
+
+  const body = req.body as { studentUserIds?: unknown; reason?: string }
+  const ids = Array.isArray(body.studentUserIds) ? body.studentUserIds.map(Number).filter(Number.isFinite) : []
+  if (!ids.length) { res.status(400).json({ success: false, message: "studentUserIds majburiy" }); return }
+
+  const grantedBy = textVal(String(req.user?.fullName ?? ""), String(req.user?.username ?? ""))
+  const submissions = await listSubmissions(content.id)
+  const byStudent = new Map(submissions.map(s => [s.studentUserId, s]))
+
+  let granted = 0
+  for (const studentId of ids) {
+    const sub = byStudent.get(studentId)
+    if (sub && isExamPassed(sub.grade, content.maxScore)) continue
+    await grantRetake(content.id, studentId, grantedBy || null, body.reason)
+    granted++
+  }
+  res.json({ success: true, message: `${granted} ta talabaga qayta urinish ruxsati berildi` })
+})
+
+/* ── DELETE /api/admin/content/:id/retake-grants/:studentUserId — bekor qilish ── */
+router.delete("/content/:id/retake-grants/:studentUserId", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  const studentUserId = Number(req.params.studentUserId)
+  if (!Number.isFinite(id) || !Number.isFinite(studentUserId)) { res.status(400).json({ success: false, message: "Noto'g'ri parametrlar" }); return }
+  await revokeRetakeGrant(id, studentUserId)
+  res.json({ success: true, message: "Ruxsat bekor qilindi" })
 })
 
 export default router

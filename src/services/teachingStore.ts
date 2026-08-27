@@ -658,6 +658,8 @@ export interface SubmissionRecord {
   attemptsUsed: number
   questionIds: number[] | null
   optionPerms: Record<number, number[]> | null
+  retakeGranted: boolean
+  retakeGrantedAt: string | null
 }
 
 function parseOptionPerms(value: unknown): Record<number, number[]> | null {
@@ -703,6 +705,8 @@ function mapSubmissionRow(row: mysql.RowDataPacket): SubmissionRecord {
     attemptsUsed: row.attempts_used == null ? 1 : Number(row.attempts_used),
     questionIds: parseAnswers(row.question_ids),
     optionPerms: parseOptionPerms(row.option_perms),
+    retakeGranted: row.active_grant_id != null,
+    retakeGrantedAt: row.active_grant_at ? fromMysqlDate(row.active_grant_at) : null,
   }
 }
 
@@ -771,7 +775,12 @@ export async function upsertSubmission(input: UpsertSubmissionInput): Promise<Su
 
 export async function listSubmissions(contentId: number): Promise<SubmissionRecord[]> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    "SELECT * FROM lms_submissions WHERE content_id = ? ORDER BY submitted_at DESC",
+    `SELECT s.*, g.id AS active_grant_id, g.granted_at AS active_grant_at
+     FROM lms_submissions s
+     LEFT JOIN lms_exam_retake_grants g
+       ON g.content_id = s.content_id AND g.student_user_id = s.student_user_id AND g.status = 'active'
+     WHERE s.content_id = ?
+     ORDER BY s.submitted_at DESC`,
     [contentId]
   )
   return rows.map(mapSubmissionRow)

@@ -576,6 +576,7 @@ export interface MeetingRecording {
   title: string
   subjectName: string | null
   groupIds: number[]
+  groupNames: string[]
   startTime: string
   originalName: string
   mimeType: string
@@ -598,6 +599,7 @@ async function mapRecording(row: mysql.RowDataPacket): Promise<MeetingRecording>
     title:        String(row.title),
     subjectName:  row.subject_name ?? null,
     groupIds:     await meetingGroupIds(Number(row.meeting_id)),
+    groupNames:   await meetingGroupNames(Number(row.meeting_id)),
     startTime:    fromMysqlDate(row.start_time),
     originalName: String(row.original_name),
     mimeType:     String(row.mime_type),

@@ -524,6 +524,23 @@ export async function initDatabase() {
   `)
   await ensureColumn("lms_exam_sessions", "option_perms", "TEXT NULL DEFAULT NULL")
 
+  // ── Imtihonni qayta topshirish ruxsati: admin tomonidan yiqilgan talabaga beriladi ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_exam_retake_grants (
+      id                INT AUTO_INCREMENT PRIMARY KEY,
+      content_id        INT NOT NULL,
+      student_user_id   INT NOT NULL,
+      status            ENUM('active','used','revoked') NOT NULL DEFAULT 'active',
+      granted_by        VARCHAR(255) NULL,
+      reason            VARCHAR(500) NULL,
+      granted_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      used_at           TIMESTAMP NULL,
+      revoked_at        TIMESTAMP NULL,
+      INDEX idx_retake_content_student (content_id, student_user_id, status),
+      CONSTRAINT fk_retake_content FOREIGN KEY (content_id) REFERENCES lms_teacher_content(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_exam_retake_grants")
+
   // ── Admin ruxsatnomalar: kimga qanday LMS roli berilgan ──
   await execSafe(`
     CREATE TABLE IF NOT EXISTS lms_permissions (

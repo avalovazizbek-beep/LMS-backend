@@ -2,6 +2,14 @@ import type mysql from "mysql2/promise"
 import { pool } from "./db"
 import { getSubmissionForStudent, type SubmissionRecord } from "./teachingStore"
 
+export const EXAM_PASS_RATIO = 0.6
+
+export function isExamPassed(grade: number | null | undefined, maxScore: number | null | undefined): boolean {
+  if (grade == null) return false
+  const threshold = (maxScore && maxScore > 0) ? maxScore * EXAM_PASS_RATIO : 60
+  return grade >= threshold
+}
+
 export interface ExamQuestion {
   id: number
   contentId: number
