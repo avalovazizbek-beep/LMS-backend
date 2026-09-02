@@ -283,7 +283,7 @@ function receiveUploadedFile(req: AuthRequest, res: Response): Promise<ContentFi
    va 206 Partial Content javobini kutadi — shu qo'llab-quvvatlanmasa,
    mobil qurilmalarda video/audio umuman ochilmaydi (desktop brauzerlar
    ko'pincha shunga qaramay to'liq faylni yuklab ishlatib yuboradi). */
-function streamPrivateFile(req: AuthRequest, res: Response, relativePath: string, originalName: string, mimeType: string) {
+export function streamPrivateFile(req: AuthRequest, res: Response, relativePath: string, originalName: string, mimeType: string) {
   const absolutePath = path.join(privateStorageRoot(), relativePath.replace(/^\/+/, ""))
   if (!fs.existsSync(absolutePath)) {
     res.status(404).json({ success: false, message: "Fayl topilmadi" })

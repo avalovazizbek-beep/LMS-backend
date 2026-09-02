@@ -4,9 +4,21 @@ import { Router, Response, NextFunction } from "express"
 import type { RowDataPacket } from "mysql2"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
-import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot } from "../services/teachingStore"
+import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, teacherUserId, studentUserId } from "../services/teachingStore"
 import { listQuestions, isExamPassed } from "../services/examStore"
 import { grantRetake, revokeRetakeGrant } from "../services/retakeStore"
+import {
+  listAllForAdmin as listAllAnnouncements,
+  createTextOnly as createTextOnlyAnnouncement,
+  createWithFile as createAnnouncementWithFile,
+  updateAnnouncement,
+  toggleActive as toggleAnnouncementActive,
+  deleteAnnouncement,
+  announcementUploadsDir,
+  sanitizeAnnouncementFilename,
+  mediaKindFromMime,
+  type AnnouncementAudience,
+} from "../services/announcementStore"
 
 const router = Router()
 router.use(authMiddleware)
@@ -45,7 +57,7 @@ function getHemisId(req: AuthRequest): string {
   return String(req.user?.userId ?? req.user?.id ?? req.user?.username ?? "")
 }
 
-async function isAdminUser(req: AuthRequest): Promise<boolean> {
+export async function isAdminUser(req: AuthRequest): Promise<boolean> {
   const user = req.user
   if (!user) return false
 
@@ -1215,6 +1227,151 @@ router.delete("/content/:id/retake-grants/:studentUserId", adminOnly, async (req
   if (!Number.isFinite(id) || !Number.isFinite(studentUserId)) { res.status(400).json({ success: false, message: "Noto'g'ri parametrlar" }); return }
   await revokeRetakeGrant(id, studentUserId)
   res.json({ success: true, message: "Ruxsat bekor qilindi" })
+})
+
+/* ── E'lonlar (admin panel: yaratish/tahrirlash/o'chirish) ────────────── */
+const ANNOUNCEMENT_MAX_BYTES = Number(process.env.ANNOUNCEMENT_MAX_BYTES || 300 * 1024 * 1024)
+const ANNOUNCEMENT_BLOCKED_EXTENSIONS = new Set([".exe", ".bat", ".cmd", ".sh", ".msi", ".com", ".scr", ".ps1", ".vbs"])
+
+function announcementCreatorId(req: AuthRequest): number {
+  return req.user?.role === "employee" ? teacherUserId(req.user) : studentUserId(req.user)
+}
+
+function announcementCreatorName(req: AuthRequest): string {
+  return textVal(String(req.user?.fullName ?? ""), String(req.user?.username ?? "")) || "Admin"
+}
+
+function validAudience(value: unknown): AnnouncementAudience | null {
+  return value === "student" || value === "employee" || value === "all" ? value : null
+}
+
+router.get("/announcements", adminOnly, async (_req: AuthRequest, res: Response) => {
+  res.json({ success: true, data: await listAllAnnouncements() })
+})
+
+router.post("/announcements", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const body = req.body || {}
+  const audience = validAudience(body.audience)
+  if (!audience) { res.status(400).json({ success: false, message: "audience noto'g'ri" }); return }
+  const title = textVal(body.title)
+  const message = textVal(body.message)
+  if (!title && !message) { res.status(400).json({ success: false, message: "Sarlavha yoki matn kiritilishi kerak" }); return }
+
+  const record = await createTextOnlyAnnouncement({
+    title: title || undefined,
+    message: message || undefined,
+    audience,
+    createdByUserId: announcementCreatorId(req),
+    createdByName: announcementCreatorName(req),
+  })
+  res.status(201).json({ success: true, data: record })
+})
+
+router.post("/announcements/upload", adminOnly, (req: AuthRequest, res: Response): void => {
+  const audience = validAudience(req.query.audience || req.headers["x-announcement-audience"])
+  if (!audience) { res.status(400).json({ success: false, message: "audience noto'g'ri" }); return }
+
+  const originalName = textVal(String(req.query.filename ?? ""), String(req.headers["x-file-name"] ?? "")) || "file"
+  const ext = path.extname(originalName).toLowerCase()
+  if (ext && ANNOUNCEMENT_BLOCKED_EXTENSIONS.has(ext)) {
+    res.status(400).json({ success: false, message: "Bu turdagi fayl yuklab bo'lmaydi" })
+    return
+  }
+
+  const contentLength = Number(req.headers["content-length"] || 0)
+  if (contentLength > ANNOUNCEMENT_MAX_BYTES) {
+    res.status(413).json({ success: false, message: "Fayl hajmi juda katta" })
+    return
+  }
+
+  const title = textVal(String(req.query.title ?? ""), String(req.headers["x-announcement-title"] ?? ""))
+  const message = textVal(String(req.query.message ?? ""), String(req.headers["x-announcement-message"] ?? ""))
+  const mimeType = textVal(String(req.headers["content-type"] ?? "")) || "application/octet-stream"
+
+  const storedName = sanitizeAnnouncementFilename(originalName)
+  const relativePath = `announcements/${storedName}`
+  const absolutePath = path.join(announcementUploadsDir(), storedName)
+  const stream = fs.createWriteStream(absolutePath)
+  let written = 0
+  let done = false
+
+  function fail(status: number, msg: string) {
+    if (done) return
+    done = true
+    req.unpipe(stream)
+    stream.destroy()
+    fs.rm(absolutePath, { force: true }, () => undefined)
+    res.status(status).json({ success: false, message: msg })
+  }
+
+  req.on("data", (chunk: Buffer) => {
+    written += chunk.length
+    if (written > ANNOUNCEMENT_MAX_BYTES) fail(413, "Fayl hajmi juda katta")
+  })
+  req.on("error", () => fail(400, "Fayl yuklashda xatolik"))
+  stream.on("error", () => fail(500, "Fayl saqlanmadi"))
+
+  stream.on("finish", async () => {
+    if (done) return
+    done = true
+    try {
+      const record = await createAnnouncementWithFile({
+        title: title || undefined,
+        message: message || undefined,
+        audience,
+        createdByUserId: announcementCreatorId(req),
+        createdByName: announcementCreatorName(req),
+        file: {
+          fileName: storedName,
+          originalName,
+          mimeType,
+          size: written,
+          relativePath,
+          mediaKind: mediaKindFromMime(mimeType),
+        },
+      })
+      res.status(201).json({ success: true, data: record })
+    } catch {
+      fs.rm(absolutePath, { force: true }, () => undefined)
+      res.status(500).json({ success: false, message: "E'lon saqlanmadi" })
+    }
+  })
+
+  req.pipe(stream)
+})
+
+router.put("/announcements/:id", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) { res.status(400).json({ success: false, message: "Noto'g'ri ID" }); return }
+  const body = req.body || {}
+  const patch: { title?: string | null; message?: string | null; audience?: AnnouncementAudience } = {}
+  if (typeof body.title === "string") patch.title = body.title || null
+  if (typeof body.message === "string") patch.message = body.message || null
+  const audience = validAudience(body.audience)
+  if (body.audience !== undefined) {
+    if (!audience) { res.status(400).json({ success: false, message: "audience noto'g'ri" }); return }
+    patch.audience = audience
+  }
+
+  const record = await updateAnnouncement(id, patch)
+  if (!record) { res.status(404).json({ success: false, message: "E'lon topilmadi" }); return }
+  res.json({ success: true, data: record })
+})
+
+router.patch("/announcements/:id/toggle", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) { res.status(400).json({ success: false, message: "Noto'g'ri ID" }); return }
+  const record = await toggleAnnouncementActive(id)
+  if (!record) { res.status(404).json({ success: false, message: "E'lon topilmadi" }); return }
+  res.json({ success: true, data: record })
+})
+
+router.delete("/announcements/:id", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) { res.status(400).json({ success: false, message: "Noto'g'ri ID" }); return }
+  const removed = await deleteAnnouncement(id)
+  if (!removed) { res.status(404).json({ success: false, message: "E'lon topilmadi" }); return }
+  res.json({ success: true, message: "E'lon o'chirildi" })
 })
 
 export default router

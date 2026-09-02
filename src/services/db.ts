@@ -567,6 +567,44 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_settings")
 
+  // ── E'lonlar (admin tomonidan yaratiladigan, talaba/xodim/hammaga mo'ljallangan) ──
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_announcements (
+      id                  INT AUTO_INCREMENT PRIMARY KEY,
+      title               VARCHAR(255) NULL,
+      message             TEXT NULL,
+      audience            ENUM('student','employee','all') NOT NULL DEFAULT 'all',
+      file_name           VARCHAR(255) NULL,
+      original_name       VARCHAR(255) NULL,
+      mime_type           VARCHAR(120) NULL,
+      file_size           BIGINT NULL,
+      relative_path       VARCHAR(500) NULL,
+      media_kind          ENUM('image','video','file') NULL,
+      is_active           TINYINT(1) NOT NULL DEFAULT 1,
+      created_by_user_id  INT NOT NULL,
+      created_by_name     VARCHAR(255) NULL,
+      created_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_announcements_audience_active (audience, is_active),
+      INDEX idx_announcements_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
+  // E'lonni foydalanuvchi tomonidan yopilgani — doimiy, shu user uchun bir marta
+  // (is_active qayta yoqilganda ham qayta chiqmasligi uchun bu jadval TOZALANMAYDI)
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_announcement_dismissals (
+      id              INT AUTO_INCREMENT PRIMARY KEY,
+      announcement_id INT NOT NULL,
+      user_id         INT NOT NULL,
+      dismissed_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_announcement_dismissal (announcement_id, user_id),
+      INDEX idx_dismissal_user (user_id),
+      CONSTRAINT fk_dismissal_announcement FOREIGN KEY (announcement_id)
+        REFERENCES lms_announcements(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
   // ── Demo/test hisoblar — login+parol bilan HEMIS'siz kirish (faqat sinov uchun) ──
   await exec(`
     CREATE TABLE IF NOT EXISTS lms_demo_accounts (

@@ -20,6 +20,7 @@ import hemisRoutes from "./routes/hemis"
 import teachingRoutes from "./routes/teaching"
 import faceRoutes from "./routes/face"
 import adminRoutes from "./routes/admin"
+import announcementsRoutes from "./routes/announcements"
 import {
   getAttendance,
   getMeeting,
@@ -79,6 +80,7 @@ app.use("/api/hemis", hemisRoutes)
 app.use("/api/teaching", teachingRoutes)
 app.use("/api/face", faceRoutes)
 app.use("/api/admin", adminRoutes)
+app.use("/api/announcements", announcementsRoutes)
 
 app.get("/health", (_req, res) => {
   res.json({
