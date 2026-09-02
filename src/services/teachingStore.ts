@@ -788,7 +788,11 @@ export async function listSubmissions(contentId: number): Promise<SubmissionReco
 
 export async function getSubmissionForStudent(contentId: number, studentUserId: number): Promise<SubmissionRecord | null> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    "SELECT * FROM lms_submissions WHERE content_id = ? AND student_user_id = ?",
+    `SELECT s.*, g.id AS active_grant_id, g.granted_at AS active_grant_at
+     FROM lms_submissions s
+     LEFT JOIN lms_exam_retake_grants g
+       ON g.content_id = s.content_id AND g.student_user_id = s.student_user_id AND g.status = 'active'
+     WHERE s.content_id = ? AND s.student_user_id = ?`,
     [contentId, studentUserId]
   )
   return rows.length ? mapSubmissionRow(rows[0]) : null
