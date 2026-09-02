@@ -12,6 +12,10 @@ import { localResourcesAsHemisResources } from "../services/localResourceStore"
 import { withHemisCache, upsertHemisUser, pool } from "../services/db"
 import { recordPlatformSession } from "../services/attendanceStore"
 import {
+  isDemoUser, mockStudentMe, mockEmployeeMe, mockSchedule, mockAttendance,
+  mockGrades, mockPerformance, mockDocuments, mockCertificates, mockContractList,
+} from "../services/demoHemis"
+import {
   teacherUserId,
   studentUserId,
   weekDayName,
@@ -2981,6 +2985,7 @@ function getHemisToken(req: AuthRequest, res: Response): string | null {
 router.get("/me", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
+  if (isDemoUser(req.user)) { res.json({ success: true, data: mockStudentMe(req.user), source: "demo" }); return }
   try {
     const r = await withHemisCache(reqUserId(req), "me",
       () => hemisGet(HEMIS, "/v1/account/me", hToken), TTL_24H)
@@ -2994,6 +2999,7 @@ router.get("/me", async (req: AuthRequest, res: Response) => {
 router.get("/employee-me", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
+  if (isDemoUser(req.user)) { res.json({ success: true, data: mockEmployeeMe(req.user), source: "demo" }); return }
   if (req.user?.employeeProfile) {
     res.json({ success: true, data: req.user.employeeProfile, source: "token" })
     return
@@ -3051,6 +3057,7 @@ router.get("/semesters", async (req: AuthRequest, res: Response) => {
 router.get("/schedule", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
+  if (isDemoUser(req.user)) { res.json({ success: true, data: mockSchedule(req.user), source: "demo" }); return }
   try {
     const params: Record<string, string> = {}
     const week = req.query._week || req.query.week
@@ -3071,6 +3078,7 @@ router.get("/schedule", async (req: AuthRequest, res: Response) => {
 router.get("/attendance", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
+  if (isDemoUser(req.user)) { res.json({ success: true, data: mockAttendance(req.user), source: "demo" }); return }
   try {
     const params: Record<string, string> = {}
     const semester = req.query._semester || req.query.semester
@@ -3091,6 +3099,7 @@ router.get("/attendance", async (req: AuthRequest, res: Response) => {
 router.get("/grades", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
+  if (isDemoUser(req.user)) { res.json({ success: true, data: mockGrades(), source: "demo" }); return }
   try {
     const params: Record<string, string> = {}
     const semester = req.query._semester || req.query.semester
@@ -3131,6 +3140,7 @@ router.get("/grades", async (req: AuthRequest, res: Response) => {
 router.get("/performance", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
+  if (isDemoUser(req.user)) { res.json({ success: true, data: mockPerformance(), source: "demo" }); return }
   try {
     const params: Record<string, string> = {}
     const semester = req.query._semester || req.query.semester
@@ -3343,6 +3353,7 @@ router.get("/tasks", async (req: AuthRequest, res: Response) => {
 router.get("/contract-list", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
+  if (isDemoUser(req.user)) { res.json({ success: true, data: mockContractList(req.user), source: "demo" }); return }
   try {
     const r = await withHemisCache(reqUserId(req), "contract-list",
       () => hemisGet(HEMIS, "/v1/student/contract-list", hToken), TTL_4H)
@@ -3369,6 +3380,7 @@ router.get("/decree", async (req: AuthRequest, res: Response) => {
 router.get("/documents", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
+  if (isDemoUser(req.user)) { res.json({ success: true, data: mockDocuments(), source: "demo" }); return }
   try {
     const r = await withHemisCache(reqUserId(req), "documents",
       () => hemisGet(HEMIS, "/v1/student/document-all", hToken), TTL_4H)
@@ -3417,6 +3429,7 @@ router.get("/resources", async (req: AuthRequest, res: Response) => {
 router.get("/certificate", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
+  if (isDemoUser(req.user)) { res.json({ success: true, data: mockCertificates(), source: "demo" }); return }
   try {
     const r = await withHemisCache(reqUserId(req), "certificate",
       () => hemisGet(HEMIS, "/v1/student/certificate", hToken), TTL_4H)
