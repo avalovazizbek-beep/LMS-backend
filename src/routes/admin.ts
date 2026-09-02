@@ -4,7 +4,7 @@ import { Router, Response, NextFunction } from "express"
 import type { RowDataPacket } from "mysql2"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
-import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, teacherUserId, studentUserId } from "../services/teachingStore"
+import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, teacherUserId, studentUserId, safeMimeType } from "../services/teachingStore"
 import { listQuestions, isExamPassed } from "../services/examStore"
 import { grantRetake, revokeRetakeGrant } from "../services/retakeStore"
 import {
@@ -251,10 +251,11 @@ router.get("/stats", adminOnly, async (_req: AuthRequest, res: Response): Promis
 
 /* ── GET /api/admin/teacher-stats ──────────────────────────────────── */
 router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
-  // ── Avtomatik 1:1 moslashtirish (hemis_users ↔ lms_teacher_content) ──
-  // Agar kontentda nom topilmagan o'qituvchilar va hemis_users'da
-  // teacher_user_id=NULL bo'lgan xodimlar soni teng bo'lsa (1:1),
-  // ularni avtomatik bog'laymiz.
+  // ── Avtomatik moslashtirish (hemis_users ↔ lms_teacher_content) ──
+  // FAQAT ikkala tomonda ham bitta-bittadan nomzod qolganda bog'laymiz —
+  // aks holda (2+ va 2+) ro'yxatlarni indeks bo'yicha "zip" qilish
+  // tasodifiy to'g'ri kelib, bir o'qituvchining kontenti/statistikasi
+  // butunlay boshqa xodimga yozilib qolishi mumkin edi (avval shunday edi).
   try {
     // Kontentda bor lekin hemis_users'da mos yozuv yo'q teacher_user_id'lar
     const [unmatched] = await pool.query<RowDataPacket[]>(`
@@ -277,19 +278,17 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
       ORDER BY updated_at DESC
     `)
 
-    if (unmatched.length > 0 && unmatched.length === employees.length) {
-      for (let i = 0; i < unmatched.length; i++) {
-        const tid = Number(unmatched[i].teacher_user_id)
-        const emp = employees[i]
-        // hemis_users.teacher_user_id ni to'ldirish
-        await pool.query(`UPDATE hemis_users SET teacher_user_id = ? WHERE hemis_id = ?`, [tid, emp.hemis_id])
-        // Platform sessiyasiga ham yozish (COALESCE uchun)
-        await pool.query(
-          `INSERT INTO lms_platform_sessions (user_id, full_name, group_id, role, login_at, last_seen_at)
-           VALUES (?, ?, NULL, 'employee', NOW(), NOW())`,
-          [tid, emp.full_name]
-        )
-      }
+    if (unmatched.length === 1 && employees.length === 1) {
+      const tid = Number(unmatched[0].teacher_user_id)
+      const emp = employees[0]
+      // hemis_users.teacher_user_id ni to'ldirish
+      await pool.query(`UPDATE hemis_users SET teacher_user_id = ? WHERE hemis_id = ?`, [tid, emp.hemis_id])
+      // Platform sessiyasiga ham yozish (COALESCE uchun)
+      await pool.query(
+        `INSERT INTO lms_platform_sessions (user_id, full_name, group_id, role, login_at, last_seen_at)
+         VALUES (?, ?, NULL, 'employee', NOW(), NOW())`,
+        [tid, emp.full_name]
+      )
     }
   } catch { /* moslashtirish xatosi bo'lsa ham davom etamiz */ }
 
@@ -464,6 +463,7 @@ router.get("/content/:id/file", adminOnly, async (req: AuthRequest, res: Respons
   res.setHeader("Accept-Ranges", "bytes")
   res.setHeader("Content-Type", mimeType)
   res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(content.file.originalName)}"`)
+  res.setHeader("X-Content-Type-Options", "nosniff")
 
   if (!range) {
     res.setHeader("Content-Length", fileSize)
@@ -1286,7 +1286,7 @@ router.post("/announcements/upload", adminOnly, (req: AuthRequest, res: Response
 
   const title = textVal(String(req.query.title ?? ""), String(req.headers["x-announcement-title"] ?? ""))
   const message = textVal(String(req.query.message ?? ""), String(req.headers["x-announcement-message"] ?? ""))
-  const mimeType = textVal(String(req.headers["content-type"] ?? "")) || "application/octet-stream"
+  const mimeType = safeMimeType(originalName)
 
   const storedName = sanitizeAnnouncementFilename(originalName)
   const relativePath = `announcements/${storedName}`

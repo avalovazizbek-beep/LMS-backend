@@ -8,7 +8,7 @@ import { authMiddleware, AuthRequest, AuthUser } from "../middleware/auth"
 
 let _io: SocketIOServer | null = null
 export function setSocketIO(io: SocketIOServer) { _io = io }
-import { sanitizeFilename } from "../services/teachingStore"
+import { sanitizeFilename, safeMimeType } from "../services/teachingStore"
 import { closeMeetingRouter } from "../services/mediasoupService"
 import { pool } from "../services/db"
 import { randomUUID } from "crypto"
@@ -105,6 +105,7 @@ router.get("/recordings/:id/file", async (req: AuthRequest, res: Response): Prom
   res.setHeader("Accept-Ranges", "bytes")
   res.setHeader("Content-Type", mimeType)
   res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(found.originalName)}"`)
+  res.setHeader("X-Content-Type-Options", "nosniff")
 
   if (!range) {
     res.setHeader("Content-Length", fileSize)
@@ -539,7 +540,7 @@ router.post("/:id/recordings", async (req: AuthRequest, res: Response): Promise<
     const recording = await addRecording(meeting.id, user.id, {
       name: storedName,
       originalName,
-      mimeType: textValue(req.headers["content-type"]) || "video/webm",
+      mimeType: safeMimeType(originalName, "video/webm"),
       size: written,
       relativePath,
     })

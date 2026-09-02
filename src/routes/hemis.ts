@@ -22,6 +22,7 @@ import {
   toMysqlDateOnly,
   syncTeacherGroupsAndSchedule,
   replaceTeacherSubjects,
+  getTeacherGroupIds,
   submissionUploadsDir,
   sanitizeFilename,
   type SyncedGroup,
@@ -3270,10 +3271,28 @@ router.get("/task-submissions", async (req: AuthRequest, res: Response) => {
     const taskId  = req.query.taskId  ? String(req.query.taskId)  : null
     const groupId = req.query.groupId ? Number(req.query.groupId) : null
 
+    // Faqat o'zining guruhlaridagi talabalar topshirig'ini ko'rishi kerak —
+    // groupId berilmagan bo'lsa ham cheklovsiz butun universitet emas.
+    const myGroupIds = await getTeacherGroupIds(teacherUserId(req.user))
+    if (groupId !== null && !myGroupIds.includes(groupId)) {
+      res.status(403).json({ success: false, message: "Bu guruh sizga tegishli emas" })
+      return
+    }
+    if (!myGroupIds.length) {
+      res.json({ success: true, data: [] })
+      return
+    }
+
     const where: string[] = []
     const params: unknown[] = []
     if (taskId)  { where.push("hemis_task_id = ?"); params.push(taskId) }
-    if (groupId) { where.push("group_id = ?");      params.push(groupId) }
+    if (groupId) {
+      where.push("group_id = ?")
+      params.push(groupId)
+    } else {
+      where.push(`group_id IN (${myGroupIds.map(() => "?").join(", ")})`)
+      params.push(...myGroupIds)
+    }
 
     const [rows] = await pool.query<mysql.RowDataPacket[]>(
       `SELECT id, hemis_task_id, student_user_id, student_full_name, group_id,
@@ -3319,9 +3338,19 @@ router.get("/task-submission-file/:filename", async (req: AuthRequest, res: Resp
       return
     }
     const [row] = await pool.query<mysql.RowDataPacket[]>(
-      "SELECT original_name, mime_type FROM lms_hemis_task_submissions WHERE file_name = ? LIMIT 1",
+      "SELECT original_name, mime_type, group_id FROM lms_hemis_task_submissions WHERE file_name = ? LIMIT 1",
       [fname]
     )
+    if (!row.length) {
+      res.status(404).json({ success: false, message: "Fayl topilmadi" })
+      return
+    }
+    const submissionGroupId = row[0]?.group_id != null ? Number(row[0].group_id) : null
+    const myGroupIds = await getTeacherGroupIds(teacherUserId(req.user))
+    if (submissionGroupId === null || !myGroupIds.includes(submissionGroupId)) {
+      res.status(403).json({ success: false, message: "Bu fayl sizga tegishli emas" })
+      return
+    }
     const originalName = row[0]?.original_name ?? fname
     const mimeType     = row[0]?.mime_type ?? "application/octet-stream"
     res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(String(originalName))}"`)

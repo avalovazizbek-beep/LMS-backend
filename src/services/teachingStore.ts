@@ -87,6 +87,34 @@ export function removeStoredFile(relativePath?: string | null) {
   fs.rm(absolute, { force: true }, () => undefined)
 }
 
+/* ── Xavfsiz MIME turi — fayl kengaytmasiga qarab serverda aniqlanadi ──
+   MUHIM: mijoz yuborgan Content-Type header'iga ISHONMASLIK kerak — aks
+   holda kimdir video/hujjat o'rniga "Content-Type: text/html" bilan fayl
+   yuklab, u keyinchalik saytda ochilganda ijro etilishi mumkin (stored XSS,
+   login tokenini o'g'irlash uchun ishlatilishi mumkin). Faqat shu ro'yxatdagi
+   kengaytmalar ma'lum turga ega bo'ladi, qolgani generic binary fayl deb
+   hisoblanadi (brauzer uni ijro etmaydi, faqat yuklab oladi). */
+const SAFE_MIME_BY_EXT: Record<string, string> = {
+  ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
+  ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
+  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".m4a": "audio/mp4",
+  ".pdf": "application/pdf",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".zip": "application/zip", ".rar": "application/vnd.rar",
+  ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+  ".gif": "image/gif", ".webp": "image/webp",
+}
+
+export function safeMimeType(filename: string, fallback = "application/octet-stream"): string {
+  const ext = path.extname(filename || "").toLowerCase()
+  return SAFE_MIME_BY_EXT[ext] || fallback
+}
+
 /* ── Dedline holati ────────────────────────────────────────────────── */
 export function contentStatus(now: Date, availableFrom: string, deadline: string | null): ContentStatus {
   const start = new Date(availableFrom).getTime()

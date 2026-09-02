@@ -23,6 +23,7 @@ import {
   privateStorageRoot,
   questionImagesDir,
   sanitizeFilename,
+  safeMimeType,
   getTeacherGroupIds,
   getTeacherGroups,
   getGroupById,
@@ -267,7 +268,7 @@ function receiveUploadedFile(req: AuthRequest, res: Response): Promise<ContentFi
       resolve({
         name: storedName,
         originalName,
-        mimeType: textValue(req.headers["content-type"]) || "application/octet-stream",
+        mimeType: safeMimeType(originalName),
         size: written,
         relativePath,
         url: "",
@@ -299,6 +300,8 @@ export function streamPrivateFile(req: AuthRequest, res: Response, relativePath:
   res.setHeader("Accept-Ranges", "bytes")
   res.setHeader("Content-Type", contentType)
   res.setHeader("Content-Disposition", disposition)
+  // Brauzer Content-Type'ni "aniqlab" HTML sifatida ijro etib yubormasin
+  res.setHeader("X-Content-Type-Options", "nosniff")
 
   if (!range) {
     res.setHeader("Content-Length", fileSize)
@@ -788,6 +791,26 @@ router.get("/submissions/:id/file", async (req: AuthRequest, res: Response): Pro
 
 /* ── keyingi barcha yo'nalishlar JWT talab qiladi ─────────────────── */
 router.use(authMiddleware)
+
+/* ── GET /exam-settings — admin sozlagan global qiymatlar (Face ID
+   bloklash chegarasi, standart urinishlar soni) — istalgan login qilgan
+   foydalanuvchi o'qiy oladi, faqat admin panelida o'zgartirish mumkin. ── */
+router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
+  const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
+    "SELECT key_name, value FROM lms_settings WHERE key_name IN ('face_block_threshold', 'test_max_attempts')"
+  )
+  const raw: Record<string, string> = {}
+  for (const r of rows) raw[String(r.key_name)] = String(r.value)
+  const faceBlockThreshold = Number(raw.face_block_threshold)
+  const testMaxAttempts = Number(raw.test_max_attempts)
+  res.json({
+    success: true,
+    data: {
+      faceBlockThreshold: Number.isFinite(faceBlockThreshold) && faceBlockThreshold > 0 ? faceBlockThreshold : 5,
+      testMaxAttempts: Number.isFinite(testMaxAttempts) && testMaxAttempts > 0 ? testMaxAttempts : null,
+    },
+  })
+})
 
 /* ── GET /groups — biriktirilgan guruhlar ─────────────────────────── */
 router.get("/groups", async (req: AuthRequest, res: Response) => {
@@ -1538,7 +1561,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
     const file: ContentFile = {
       name: storedName,
       originalName,
-      mimeType: textValue(req.headers["content-type"]) || "application/octet-stream",
+      mimeType: safeMimeType(originalName),
       size: written,
       relativePath,
       url: "",

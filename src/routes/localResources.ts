@@ -2,7 +2,7 @@ import fs from "fs"
 import path from "path"
 import { randomBytes } from "crypto"
 import { Router, Response } from "express"
-import { authMiddleware, AuthRequest } from "../middleware/auth"
+import { authMiddleware, requireRole, AuthRequest } from "../middleware/auth"
 import {
   addLocalResource,
   listLocalResources,
@@ -11,6 +11,7 @@ import {
   resourceUploadsDir,
   type LocalResourceKind,
 } from "../services/localResourceStore"
+import { safeMimeType } from "../services/teachingStore"
 
 const router = Router()
 const MAX_VIDEO_BYTES = Number(process.env.LOCAL_RESOURCE_MAX_BYTES || 2 * 1024 * 1024 * 1024)
@@ -66,7 +67,7 @@ router.get("/", async (req: AuthRequest, res: Response) => {
   })
 })
 
-router.post("/upload", (req: AuthRequest, res: Response): void => {
+router.post("/upload", requireRole("employee"), (req: AuthRequest, res: Response): void => {
   const subjectName = textValue(req.query.subjectName || req.headers["x-subject-name"])
   if (!subjectName) {
     res.status(400).json({ success: false, message: "subjectName majburiy" })
@@ -123,7 +124,7 @@ router.post("/upload", (req: AuthRequest, res: Response): void => {
       employeeName: uploaderName(req),
       meetingId: textValue(req.query.meetingId || req.headers["x-meeting-id"]) || undefined,
       originalName,
-      mimeType: textValue(req.headers["content-type"]) || "application/octet-stream",
+      mimeType: safeMimeType(originalName, "video/mp4"),
       size: written,
       relativePath,
       url: `/uploads${relativePath}`,
@@ -135,7 +136,7 @@ router.post("/upload", (req: AuthRequest, res: Response): void => {
   req.pipe(stream)
 })
 
-router.post("/url", async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/url", requireRole("employee"), async (req: AuthRequest, res: Response): Promise<void> => {
   const body = req.body || {}
   const subjectName = textValue(body.subjectName)
   const externalUrl = textValue(body.url)
@@ -168,7 +169,7 @@ router.post("/url", async (req: AuthRequest, res: Response): Promise<void> => {
   res.status(201).json({ success: true, data: record })
 })
 
-router.patch("/:id/toggle", async (req: AuthRequest, res: Response): Promise<void> => {
+router.patch("/:id/toggle", requireRole("employee"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = req.params.id
   const records = await listLocalResources()
   const current = records.find((item) => item.id === id)
@@ -180,7 +181,7 @@ router.patch("/:id/toggle", async (req: AuthRequest, res: Response): Promise<voi
   res.json({ success: true, data: updated })
 })
 
-router.put("/:id", async (req: AuthRequest, res: Response): Promise<void> => {
+router.put("/:id", requireRole("employee"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = req.params.id
   const body = req.body || {}
   const patch: { title?: string; comment?: string | null; externalUrl?: string | null; isActive?: boolean } = {}
@@ -197,7 +198,7 @@ router.put("/:id", async (req: AuthRequest, res: Response): Promise<void> => {
   res.json({ success: true, data: updated })
 })
 
-router.delete("/:id", async (req: AuthRequest, res: Response): Promise<void> => {
+router.delete("/:id", requireRole("employee"), async (req: AuthRequest, res: Response): Promise<void> => {
   const removed = await deleteLocalResource(req.params.id)
   if (!removed) {
     res.status(404).json({ success: false, message: "Resurs topilmadi" })

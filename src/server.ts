@@ -49,6 +49,10 @@ const ALLOWED_ORIGINS = [
   FRONTEND_ORIGIN,
   "http://localhost:3000",
   "http://localhost:3001",
+  // Ma'lum bo'lgan real frontend domenlari — FRONTEND_URL noto'g'ri
+  // sozlansa ham productionda ishlab turishi kafolatlanishi uchun.
+  "https://lms.sies.uz",
+  "https://tyutorkpi.sies.uz",
 ]
 
 app.use(cors({
@@ -56,14 +60,16 @@ app.use(cors({
     if (!origin || ALLOWED_ORIGINS.includes(origin)) {
       callback(null, true)
     } else {
-      callback(null, true)
+      callback(new Error("CORS: ruxsat etilmagan manzil"), false)
     }
   },
   credentials: true,
 }))
 app.use(express.json({ limit: "25mb" }))
 app.use(express.urlencoded({ extended: true }))
-app.use("/uploads", express.static(publicResourcePath()))
+app.use("/uploads", express.static(publicResourcePath(), {
+  setHeaders: (res) => res.setHeader("X-Content-Type-Options", "nosniff"),
+}))
 
 app.use("/api/auth", authRoutes)
 app.use("/api/users", usersRoutes)
