@@ -4,11 +4,11 @@
  * bo'limlarda (jadval, resurslar, davomat, baholar, imtihonlar, meeting,
  * Face ID) real ma'lumot ko'rinishi uchun boy tarzda to'ldiriladi.
  *
- * Yaratadi: 1 ta demo o'qituvchi, 2 ta guruh — DEMO-101'da 30 ta, DEMO-102'da 3 ta (jami 33 ta) talaba.
- * `demo_student1_1` va `demo_teacher` — video uchun "asosiy" hisoblar, eng
- * boy ma'lumot bilan (Face ID ro'yxatdan o'tgan, qayta urinish ruxsati,
- * barcha materiallar tugatilgan, meetingda ishtirok etgan). Qolganlari
- * tasodifiy taqsimlangan, yengilroq ma'lumot bilan — shunchaki ishlaydigan.
+ * Faqat 2 ta hisob yaratiladi — `demo_teacher` va `demo_student1_1` — video
+ * uchun ortiqcha hisoblar admin panelini (foydalanuvchilar ro'yxati va h.k.)
+ * chalkashtirmasligi uchun. Ikkalasi ham eng boy ma'lumot bilan: Face ID
+ * ro'yxatdan o'tgan, qayta urinish ruxsati, barcha materiallar tugatilgan,
+ * meetingda ishtirok etgan.
  *
  * Ishga tushirish:
  *   npx ts-node scripts/seed-demo.ts
@@ -23,12 +23,14 @@ import { pool, initDatabase } from "../src/services/db"
 import { grantRetake } from "../src/services/retakeStore"
 
 const TEACHER_ID = 9501
-const GROUP_IDS = [9901, 9902]
-const GROUP_NAMES = ["DEMO-101", "DEMO-102"]
-// Per-group student count, indexed the same as GROUP_IDS/GROUP_NAMES —
-// DEMO-101 scaled up to a realistic full-class size for meeting/attendance
-// testing, DEMO-102 stays small.
-const STUDENTS_PER_GROUP = [30, 3]
+const GROUP_IDS = [9901]
+const GROUP_NAMES = ["DEMO-101"]
+// Faqat 1 ta talaba — demo_student1_1 (hero hisob)
+const STUDENTS_PER_GROUP = [1]
+// remove() uchun — bu skriptning oldingi versiyalari 9902 (DEMO-102)ni ham
+// yaratgan edi; shu ro'yxat har doim TO'LIQ tozalash uchun, GROUP_IDS'dan
+// mustaqil ravishda saqlanadi (GROUP_IDS kichraytirilsa ham eski qoldiqlar tozalanadi).
+const ALL_KNOWN_GROUP_IDS = [9901, 9902]
 const DEMO_PASSWORD = "demo12345"
 const DEMO_SUBJECT = "Demo fan"
 const PERIOD_GRADE_TYPES = ["ON1"] as const
@@ -57,9 +59,10 @@ async function remove() {
   await pool.query("DELETE FROM lms_teacher_groups WHERE user_id = ?", [TEACHER_ID])
   await pool.query("DELETE FROM lms_teacher_subjects WHERE user_id = ?", [TEACHER_ID])
   await pool.query("DELETE FROM lms_teacher_schedule WHERE teacher_user_id = ?", [TEACHER_ID])
-  await pool.query("DELETE FROM lms_grades WHERE group_id IN (?, ?)", GROUP_IDS)
-  await pool.query("DELETE FROM lms_period_grades WHERE group_id IN (?, ?)", GROUP_IDS)
-  await pool.query("DELETE FROM lms_attendance WHERE group_id IN (?, ?)", GROUP_IDS)
+  const groupPlaceholders = ALL_KNOWN_GROUP_IDS.map(() => "?").join(", ")
+  await pool.query(`DELETE FROM lms_grades WHERE group_id IN (${groupPlaceholders})`, ALL_KNOWN_GROUP_IDS)
+  await pool.query(`DELETE FROM lms_period_grades WHERE group_id IN (${groupPlaceholders})`, ALL_KNOWN_GROUP_IDS)
+  await pool.query(`DELETE FROM lms_attendance WHERE group_id IN (${groupPlaceholders})`, ALL_KNOWN_GROUP_IDS)
   await pool.query("DELETE FROM face_registrations WHERE username = 'Demo Talaba 1-1'")
   // lms_meetings o'chirilishi lms_meeting_groups va lms_meeting_attendance'ni
   // FK ON DELETE CASCADE orqali avtomatik tozalaydi
@@ -67,7 +70,7 @@ async function remove() {
   // lms_teacher_content o'chirilishi lms_submissions, lms_content_progress,
   // lms_exam_retake_grants'ni FK ON DELETE CASCADE orqali avtomatik tozalaydi
   await pool.query("DELETE FROM lms_teacher_content WHERE teacher_user_id = ?", [TEACHER_ID])
-  await pool.query("DELETE FROM lms_groups WHERE id IN (?, ?)", GROUP_IDS)
+  await pool.query(`DELETE FROM lms_groups WHERE id IN (${groupPlaceholders})`, ALL_KNOWN_GROUP_IDS)
   console.log("Demo hisoblar o'chirildi.")
   await pool.end()
 }
