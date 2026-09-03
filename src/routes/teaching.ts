@@ -907,17 +907,24 @@ router.get("/my-subjects", async (req: AuthRequest, res: Response): Promise<void
 
   // Bu guruhda bazamizda hali kontent yo'q (yangi guruh yoki hali hech narsa
   // yuklanmagan) — "Fan" tanlovini bo'sh/o'chirilgan qoldirmaslik uchun
-  // HEMIS'dan joriy o'quv yili bo'yicha shu guruhga biriktirilgan fanlarni
-  // olib beramiz (Fan resurslari, Baholash, Davomat, Natijalar — barchasi
-  // shu endpointdan foydalanadi).
+  // HEMIS'dan shu guruhga biriktirilgan fanlarni olib beramiz (Fan
+  // resurslari, Baholash, Davomat, Natijalar — barchasi shu endpointdan
+  // foydalanadi). "Joriy" o'quv yilini aniq bilib bo'lmaydi (HEMIS'ning
+  // yangi o'quv yili tayyorlanishi kalendar sanadan kechikishi mumkin —
+  // bir marta bunday holat kuzatildi), shuning uchun bir nechta so'nggi
+  // yilni ketma-ket sinab, birinchi mos kelganida to'xtaymiz.
   if (data.length === 0 && groupId !== null) {
-    try {
-      const { groups } = await fetchTeacherGroupsForYear(req.user, String(academicYearStart()))
-      const match = groups.find(g => g.id === groupId)
-      if (match?.subjects.length) {
-        data = match.subjects.map(s => ({ groupId, subjectName: s }))
-      }
-    } catch { /* HEMIS ishlamasa, bo'sh ro'yxat qolaveradi */ }
+    const currentYear = academicYearStart()
+    for (const year of [currentYear, currentYear - 1, currentYear - 2]) {
+      try {
+        const { groups } = await fetchTeacherGroupsForYear(req.user, String(year))
+        const match = groups.find(g => g.id === groupId)
+        if (match?.subjects.length) {
+          data = match.subjects.map(s => ({ groupId, subjectName: s }))
+          break
+        }
+      } catch { /* shu yil ishlamasa, keyingisini sinaymiz */ }
+    }
   }
 
   res.json({ success: true, data })
