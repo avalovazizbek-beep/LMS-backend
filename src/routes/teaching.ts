@@ -29,6 +29,7 @@ import {
   getGroupById,
   upsertGroups,
   addTeacherGroups,
+  getTeacherSubjects,
   getTeacherSchedule,
   listTeacherContent,
   getTeacherContent,
@@ -924,6 +925,15 @@ router.get("/my-subjects", async (req: AuthRequest, res: Response): Promise<void
           break
         }
       } catch { /* shu yil ishlamasa, keyingisini sinaymiz */ }
+    }
+  }
+
+  // HEMIS ham natija bermasa (masalan demo hisob — haqiqiy HEMIS ulanishi
+  // yo'q) — o'qituvchiga qo'lda biriktirilgan fanlar ro'yxatiga (lms_teacher_subjects) qaraymiz.
+  if (data.length === 0 && groupId !== null) {
+    const subjectNames = await getTeacherSubjects(tId)
+    if (subjectNames.length) {
+      data = subjectNames.map(s => ({ groupId, subjectName: s }))
     }
   }
 
