@@ -882,7 +882,13 @@ router.get("/schedule", async (req: AuthRequest, res: Response): Promise<void> =
   res.json({ success: true, data: schedule })
 })
 
-/* ── GET /my-subjects — o'qituvchining fanlari (content dan) ────────── */
+function academicYearStart() {
+  const now = new Date()
+  const year = now.getFullYear()
+  return now.getMonth() >= 8 ? year : year - 1
+}
+
+/* ── GET /my-subjects — o'qituvchining fanlari (content dan, aks holda HEMIS'dan) ── */
 router.get("/my-subjects", async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.user?.role !== "employee") {
     res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" }); return
@@ -897,13 +903,24 @@ router.get("/my-subjects", async (req: AuthRequest, res: Response): Promise<void
     `SELECT DISTINCT group_id, subject_name FROM lms_teacher_content WHERE ${where} ORDER BY subject_name`,
     params
   )
-  res.json({
-    success: true,
-    data: rows.map(r => ({
-      groupId: Number(r.group_id),
-      subjectName: String(r.subject_name),
-    })),
-  })
+  let data = rows.map(r => ({ groupId: Number(r.group_id), subjectName: String(r.subject_name) }))
+
+  // Bu guruhda bazamizda hali kontent yo'q (yangi guruh yoki hali hech narsa
+  // yuklanmagan) — "Fan" tanlovini bo'sh/o'chirilgan qoldirmaslik uchun
+  // HEMIS'dan joriy o'quv yili bo'yicha shu guruhga biriktirilgan fanlarni
+  // olib beramiz (Fan resurslari, Baholash, Davomat, Natijalar — barchasi
+  // shu endpointdan foydalanadi).
+  if (data.length === 0 && groupId !== null) {
+    try {
+      const { groups } = await fetchTeacherGroupsForYear(req.user, String(academicYearStart()))
+      const match = groups.find(g => g.id === groupId)
+      if (match?.subjects.length) {
+        data = match.subjects.map(s => ({ groupId, subjectName: s }))
+      }
+    } catch { /* HEMIS ishlamasa, bo'sh ro'yxat qolaveradi */ }
+  }
+
+  res.json({ success: true, data })
 })
 
 /* ── GET /content — ro'yxat (lesson/assignment/exam) ───────────────── */
