@@ -34,7 +34,12 @@ function textVal(...args: unknown[]): string {
   return ""
 }
 
-const AUTO_ADMIN_CODES = new Set(["super_admin", "api"])
+// Yagona, o'zgarmas admin — HEMIS rolidan (super_admin/api) qat'i nazar, faqat
+// shu bitta hemis_id doim admin bo'ladi. Boshqa hech kim (super_admin bo'lsa
+// ham) avtomatik admin bo'lmaydi — kerak bo'lsa shu odam ularga "Rol berish"
+// orqali qo'lda admin huquqi beradi. Qiymat serverdagi .env faylida
+// FIXED_ADMIN_HEMIS_ID sifatida saqlanadi (kodga hardcode qilinmaydi).
+const FIXED_ADMIN_HEMIS_ID = String(process.env.FIXED_ADMIN_HEMIS_ID ?? "").trim()
 
 function extractHemisRoleCodes(employeeProfile: unknown): string[] {
   const profile = asRecord(employeeProfile)
@@ -61,13 +66,13 @@ export async function isAdminUser(req: AuthRequest): Promise<boolean> {
   const user = req.user
   if (!user) return false
 
-  // Auto-admin: super_admin or api HEMIS role
-  const profileRoles = extractHemisRoleCodes(user.employeeProfile)
-  if (profileRoles.some(r => AUTO_ADMIN_CODES.has(r))) return true
-
-  // DB-granted admin
   const hemisId = getHemisId(req)
   if (!hemisId) return false
+
+  // Yagona o'zgarmas admin
+  if (FIXED_ADMIN_HEMIS_ID && hemisId === FIXED_ADMIN_HEMIS_ID) return true
+
+  // DB-granted admin
   const [rows] = await pool.query<RowDataPacket[]>(
     "SELECT lms_role FROM lms_permissions WHERE hemis_id = ?",
     [hemisId]
@@ -87,10 +92,10 @@ router.get("/check", async (req: AuthRequest, res: Response): Promise<void> => {
   if (!user) { res.status(401).json({ success: false }); return }
 
   const profileRoles = extractHemisRoleCodes(user.employeeProfile)
-  const isAutoAdmin = profileRoles.some(r => AUTO_ADMIN_CODES.has(r))
+  const hemisId = getHemisId(req)
+  const isAutoAdmin = !!FIXED_ADMIN_HEMIS_ID && hemisId === FIXED_ADMIN_HEMIS_ID
 
   let dbRole: string | null = null
-  const hemisId = getHemisId(req)
   if (hemisId) {
     const [rows] = await pool.query<RowDataPacket[]>(
       "SELECT lms_role FROM lms_permissions WHERE hemis_id = ?",
@@ -166,7 +171,7 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
     const roleCodes = roles.map((rr: unknown) =>
       typeof rr === "string" ? rr : textVal(asRecord(rr).code, asRecord(rr).name)
     )
-    const isAutoAdmin = roleCodes.some((c: string) => AUTO_ADMIN_CODES.has(c.toLowerCase()))
+    const isAutoAdmin = !!FIXED_ADMIN_HEMIS_ID && String(r.hemis_id) === FIXED_ADMIN_HEMIS_ID
     return {
       hemisId: r.hemis_id,
       fullName: r.full_name,
@@ -195,6 +200,9 @@ router.patch("/users/:hemisId/role", adminOnly, async (req: AuthRequest, res: Re
   const validRoles = ["admin", "teacher", "student", "blocked", "pending"]
   if (!validRoles.includes(lmsRole)) {
     res.status(400).json({ success: false, message: "Noto'g'ri rol" }); return
+  }
+  if (FIXED_ADMIN_HEMIS_ID && hemisId === FIXED_ADMIN_HEMIS_ID) {
+    res.status(400).json({ success: false, message: "Bu foydalanuvchi doimiy admin — roli o'zgartirilmaydi" }); return
   }
 
   const grantedBy = textVal(String(req.user?.fullName ?? ""), String(req.user?.username ?? ""))
