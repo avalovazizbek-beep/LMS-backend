@@ -842,12 +842,12 @@ router.get("/groups-by-year", async (req: AuthRequest, res: Response): Promise<v
     res.status(400).json({ success: false, message: "O'quv yili ko'rsatilishi shart" }); return
   }
   try {
-    const groups = await fetchTeacherGroupsForYear(req.user, year)
+    const { groups, debug } = await fetchTeacherGroupsForYear(req.user, year)
     if (groups.length) {
       await upsertGroups(groups)
       await addTeacherGroups(teacherUserId(req.user), groups.map(g => g.id))
     }
-    res.json({ success: true, data: groups })
+    res.json({ success: true, data: groups, debug })
   } catch (err) {
     res.status(502).json({ success: false, message: err instanceof Error ? err.message : "HEMIS'dan guruhlarni olishda xato" })
   }

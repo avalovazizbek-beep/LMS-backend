@@ -241,30 +241,60 @@ async function fetchTutorGroups(user?: AuthRequest["user"]): Promise<SyncedGroup
  * takrorlaydi. `_education_year` filtrsiz so'rov bo'sh natija qaytaradi,
  * shuning uchun yil har doim aniq ko'rsatilishi shart.
  */
-export async function fetchTeacherGroupsForYear(user: AuthRequest["user"] | undefined, educationYear: string): Promise<SyncedGroup[]> {
+export async function fetchTeacherGroupsForYear(user: AuthRequest["user"] | undefined, educationYear: string): Promise<{
+  groups: SyncedGroup[]
+  debug: Record<string, unknown>
+}> {
   const employeeId = employeeIdFromUser(user)
-  if (!employeeId || !educationYear) return []
+  if (!employeeId || !educationYear) {
+    return { groups: [], debug: { reason: "no-employee-id-or-year", employeeId, educationYear } }
+  }
 
   const teacherParams: Record<string, string> = { _employee: employeeId, _education_year: educationYear, limit: "200" }
-  const teacherItems = await employeeDataAllItems("/v1/data/curriculum-subject-teacher-list", teacherParams, user)
+  let teacherItems: unknown[] = []
+  let teacherItemsError: string | null = null
+  try {
+    teacherItems = await employeeDataAllItems("/v1/data/curriculum-subject-teacher-list", teacherParams, user)
+  } catch (err) {
+    teacherItemsError = extractMessage(err)
+  }
 
-  const groupsMap = await groupMapForCurricula(
-    teacherItems.map((item) => textValue(asRecord(item)._curriculum) ?? "")
-  ).catch(() => new Map<string, Record<string, unknown>>())
+  const curriculumIds = teacherItems.map((item) => textValue(asRecord(item)._curriculum) ?? "")
+  let groupsMap = new Map<string, Record<string, unknown>>()
+  let groupMapError: string | null = null
+  try {
+    groupsMap = await groupMapForCurricula(curriculumIds)
+  } catch (err) {
+    groupMapError = extractMessage(err)
+  }
 
   const out = new Map<number, SyncedGroup>()
+  let unmatchedGroupIds = 0
   teacherItems.forEach((item) => {
     const record = asRecord(item)
     const groupId = textValue(record._group)
     const group = groupId ? groupsMap.get(groupId) : undefined
-    if (!group) return
+    if (!group) { if (groupId) unmatchedGroupIds += 1; return }
     const gid = numberValue(group.id)
     const gname = textValue(group.name)
     if (gid === null || !gname || out.has(gid)) return
     out.set(gid, { id: gid, name: gname })
   })
 
-  return Array.from(out.values())
+  return {
+    groups: Array.from(out.values()),
+    debug: {
+      employeeId,
+      educationYear,
+      teacherItemsCount: teacherItems.length,
+      teacherItemsError,
+      curriculumIdsCount: curriculumIds.filter(Boolean).length,
+      groupsMapSize: groupsMap.size,
+      groupMapError,
+      unmatchedGroupIds,
+      sampleTeacherItem: teacherItems[0] ?? null,
+    },
+  }
 }
 
 /**
