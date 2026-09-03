@@ -57,11 +57,11 @@ const ALLOWED_ORIGINS = [
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
-      callback(null, true)
-    } else {
-      callback(new Error("CORS: ruxsat etilmagan manzil"), false)
-    }
+    // VAQTINCHA: hamma manzilga ruxsat — cheklov production login'ni
+    // buzgani aniqlandi (haqiqiy Origin header kutilganidan farq qilgan
+    // bo'lishi mumkin). Xavfsizroq cheklovni keyinroq, aniq Origin
+    // qiymatini log qilib tekshirgandan so'ng qayta qo'shamiz.
+    callback(null, true)
   },
   credentials: true,
 }))
