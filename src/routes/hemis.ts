@@ -241,8 +241,12 @@ async function fetchTutorGroups(user?: AuthRequest["user"]): Promise<SyncedGroup
  * takrorlaydi. `_education_year` filtrsiz so'rov bo'sh natija qaytaradi,
  * shuning uchun yil har doim aniq ko'rsatilishi shart.
  */
+export interface TeacherGroupWithSubjects extends SyncedGroup {
+  subjects: string[]
+}
+
 export async function fetchTeacherGroupsForYear(user: AuthRequest["user"] | undefined, educationYear: string): Promise<{
-  groups: SyncedGroup[]
+  groups: TeacherGroupWithSubjects[]
   debug: Record<string, unknown>
 }> {
   const employeeId = employeeIdFromUser(user)
@@ -268,7 +272,7 @@ export async function fetchTeacherGroupsForYear(user: AuthRequest["user"] | unde
     groupMapError = extractMessage(err)
   }
 
-  const out = new Map<number, SyncedGroup>()
+  const out = new Map<number, TeacherGroupWithSubjects>()
   let unmatchedGroupIds = 0
   teacherItems.forEach((item) => {
     const record = asRecord(item)
@@ -277,8 +281,15 @@ export async function fetchTeacherGroupsForYear(user: AuthRequest["user"] | unde
     if (!group) { if (groupId) unmatchedGroupIds += 1; return }
     const gid = numberValue(group.id)
     const gname = textValue(group.name)
-    if (gid === null || !gname || out.has(gid)) return
-    out.set(gid, { id: gid, name: gname })
+    if (gid === null || !gname) return
+    const subjectName = textValue(asRecord(record.subject).name)
+
+    const existing = out.get(gid)
+    if (existing) {
+      if (subjectName && !existing.subjects.includes(subjectName)) existing.subjects.push(subjectName)
+      return
+    }
+    out.set(gid, { id: gid, name: gname, subjects: subjectName ? [subjectName] : [] })
   })
 
   return {
