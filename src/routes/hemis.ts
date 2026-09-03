@@ -232,6 +232,74 @@ async function fetchTutorGroups(user?: AuthRequest["user"]): Promise<SyncedGroup
   return fetchTutorGroupsFrom("/ver1/tutor/group/list", base, token)
 }
 
+export interface TeacherYearGroup extends SyncedGroup {
+  educationYearCode: string | null
+  educationYearName: string | null
+}
+
+/**
+ * O'qituvchining HEMIS'dagi BARCHA o'quv yillari bo'yicha dars bergan
+ * guruhlarini qaytaradi (tutor API'dan farqli — u faqat joriy yuklamani
+ * beradi). `/v1/data/curriculum-subject-teacher-list` `_education_year`
+ * filtrsiz so'ralganda o'qituvchining o'tgan yillardagi yozuvlarini ham
+ * qaytaradi; har bir qator o'z o'quv reja (curriculum)si orqali qaysi
+ * o'quv yiliga tegishli ekanini aytadi.
+ */
+export async function fetchTeacherGroupsAllYears(user?: AuthRequest["user"]): Promise<{
+  years: { code: string; name: string }[]
+  groups: TeacherYearGroup[]
+}> {
+  const employeeId = employeeIdFromUser(user)
+  if (!employeeId) return { years: [], groups: [] }
+
+  const teacherParams: Record<string, string> = { _employee: employeeId, limit: "200" }
+  const [teacherItems, curricula] = await Promise.all([
+    employeeDataAllItems("/v1/data/curriculum-subject-teacher-list", teacherParams, user),
+    curriculumMap({}).catch(() => new Map<string | undefined, Record<string, unknown>>()),
+  ])
+
+  const groupsMap = await groupMapForCurricula(
+    teacherItems.map((item) => textValue(asRecord(item)._curriculum) ?? "")
+  ).catch(() => new Map<string, Record<string, unknown>>())
+
+  const yearsMap = new Map<string, string>()
+  const groupsOut = new Map<string, TeacherYearGroup>()
+
+  teacherItems.forEach((item) => {
+    const record = asRecord(item)
+    const curriculumId = textValue(record._curriculum)
+    const curriculum = curricula.get(curriculumId)
+    const educationYear = asRecord(asRecord(curriculum).educationYear)
+    const yearCode = textValue(educationYear.code)
+    const yearName = textValue(educationYear.name) || yearCode
+
+    const groupId = textValue(record._group)
+    const group = groupId ? groupsMap.get(groupId) : undefined
+    if (!group) return
+    const gid = numberValue(group.id)
+    const gname = textValue(group.name)
+    if (gid === null || !gname) return
+
+    if (yearCode && yearName) yearsMap.set(yearCode, yearName)
+
+    const key = `${yearCode ?? "?"}|${gid}`
+    if (!groupsOut.has(key)) {
+      groupsOut.set(key, {
+        id: gid,
+        name: gname,
+        educationYearCode: yearCode ?? null,
+        educationYearName: yearName ?? null,
+      })
+    }
+  })
+
+  const years = Array.from(yearsMap.entries())
+    .map(([code, name]) => ({ code, name }))
+    .sort((a, b) => b.code.localeCompare(a.code, undefined, { numeric: true }))
+
+  return { years, groups: Array.from(groupsOut.values()) }
+}
+
 /**
  * O'qituvchiga HEMIS'da biriktirilgan guruhlar va dars jadvalini bir martalik
  * so'rov bilan olib, o'z bazamizga yozadi (login paytida + qo'lda "yangilash").

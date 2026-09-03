@@ -165,6 +165,15 @@ export async function replaceTeacherGroups(userId: number, groupIds: number[]) {
   }
 }
 
+/** Guruhlarni o'chirmasdan qo'shadi — o'tgan yillardagi guruhlarni joriy
+ *  sinxronizatsiya ustidan yozib yubormaslik uchun (masalan
+ *  fetchTeacherGroupsAllYears orqali topilgan tarixiy guruhlar). */
+export async function addTeacherGroups(userId: number, groupIds: number[]) {
+  for (const gid of groupIds) {
+    await pool.query("INSERT IGNORE INTO lms_teacher_groups (user_id, group_id) VALUES (?, ?)", [userId, gid])
+  }
+}
+
 export async function replaceTeacherSchedule(userId: number, rows: TeacherScheduleInput[]) {
   await pool.query("DELETE FROM lms_teacher_schedule WHERE teacher_user_id = ?", [userId])
   for (const row of rows) {

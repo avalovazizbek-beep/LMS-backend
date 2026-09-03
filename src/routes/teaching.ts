@@ -9,7 +9,7 @@ import { authMiddleware, requireRole, AuthRequest, AuthUser } from "../middlewar
 import { pool } from "../services/db"
 import { notifications } from "../db/data"
 import { parseNumber } from "../services/meetingStore"
-import { syncTeacherFromHemis, employeeTeachesGroup } from "./hemis"
+import { syncTeacherFromHemis, employeeTeachesGroup, fetchTeacherGroupsAllYears } from "./hemis"
 import {
   type ContentType,
   type ContentFile,
@@ -27,6 +27,8 @@ import {
   getTeacherGroupIds,
   getTeacherGroups,
   getGroupById,
+  upsertGroups,
+  addTeacherGroups,
   getTeacherSchedule,
   listTeacherContent,
   getTeacherContent,
@@ -823,6 +825,27 @@ router.get("/groups", async (req: AuthRequest, res: Response) => {
   const groupId = studentGroupId(req.user)
   const group = groupId !== null ? await getGroupById(groupId) : null
   res.json({ success: true, data: group ? [group] : [] })
+})
+
+/* ── GET /groups-by-year — o'qituvchining barcha o'quv yillaridagi guruhlari ── */
+// Joriy /groups faqat HEMIS'dagi ENG SO'NGGI sinxronizatsiya + kontenti bor
+// guruhlarni beradi — o'tgan yillarda dars bergan, hali kontent yaratilmagan
+// guruhlar yo'qolib qoladi. Bu endpoint HEMIS'dan o'qituvchining butun
+// tarixini so'raydi va topilgan guruhlarni bazamizga (o'chirmasdan) qo'shadi.
+router.get("/groups-by-year", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" }); return
+  }
+  try {
+    const { years, groups } = await fetchTeacherGroupsAllYears(req.user)
+    if (groups.length) {
+      await upsertGroups(groups.map(g => ({ id: g.id, name: g.name })))
+      await addTeacherGroups(teacherUserId(req.user), groups.map(g => g.id))
+    }
+    res.json({ success: true, data: { years, groups } })
+  } catch (err) {
+    res.status(502).json({ success: false, message: err instanceof Error ? err.message : "HEMIS'dan guruhlarni olishda xato" })
+  }
 })
 
 /* ── POST /sync — HEMIS'dan guruh va jadvalni qayta sinxronlash ────── */
