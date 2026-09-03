@@ -21,6 +21,7 @@ import bcrypt from "bcryptjs"
 import type mysql from "mysql2/promise"
 import { pool, initDatabase } from "../src/services/db"
 import { grantRetake } from "../src/services/retakeStore"
+import { deleteTeacherContent, removeStoredFile } from "../src/services/teachingStore"
 
 const TEACHER_ID = 9501
 const GROUP_IDS = [9901]
@@ -53,6 +54,37 @@ function pick<T>(arr: readonly T[]): T {
 
 async function remove() {
   await initDatabase()
+
+  // Fayllarni (video/audio/hujjat) DB qatorlaridan OLDIN o'chiramiz — FK
+  // CASCADE faqat qatorlarni tozalaydi, diskdagi fayllarni emas.
+
+  // 1) Talabalar shu kontentga yuklagan fayllar (topshiriq javoblari)
+  const [submissionFiles] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT s.relative_path FROM lms_submissions s
+     JOIN lms_teacher_content c ON c.id = s.content_id
+     WHERE c.teacher_user_id = ? AND s.relative_path IS NOT NULL`,
+    [TEACHER_ID]
+  )
+  submissionFiles.forEach((row) => removeStoredFile(row.relative_path as string))
+
+  // 2) O'qituvchi yuklagan kontent fayllari (video/audio/taqdimot/qo'llanma/topshiriq)
+  const [contentRows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT id FROM lms_teacher_content WHERE teacher_user_id = ?",
+    [TEACHER_ID]
+  )
+  for (const row of contentRows) {
+    await deleteTeacherContent(Number(row.id))
+  }
+
+  // 3) Meeting yozuvlari (video)
+  const [recordingFiles] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT r.relative_path FROM lms_meeting_recordings r
+     JOIN lms_meetings m ON m.id = r.meeting_id
+     WHERE m.created_by_user_id = ?`,
+    [TEACHER_ID]
+  )
+  recordingFiles.forEach((row) => removeStoredFile(row.relative_path as string))
+
   await pool.query("DELETE FROM lms_demo_accounts WHERE hemis_id = ? OR hemis_id BETWEEN 9601 AND 9699", [TEACHER_ID])
   await pool.query("DELETE FROM hemis_users WHERE hemis_id = ? OR CAST(hemis_id AS UNSIGNED) BETWEEN 9601 AND 9699", [String(TEACHER_ID)])
   await pool.query("DELETE FROM lms_platform_sessions WHERE user_id = ? OR user_id BETWEEN 9601 AND 9699", [TEACHER_ID])
@@ -64,14 +96,13 @@ async function remove() {
   await pool.query(`DELETE FROM lms_period_grades WHERE group_id IN (${groupPlaceholders})`, ALL_KNOWN_GROUP_IDS)
   await pool.query(`DELETE FROM lms_attendance WHERE group_id IN (${groupPlaceholders})`, ALL_KNOWN_GROUP_IDS)
   await pool.query("DELETE FROM face_registrations WHERE username = 'Demo Talaba 1-1'")
-  // lms_meetings o'chirilishi lms_meeting_groups va lms_meeting_attendance'ni
-  // FK ON DELETE CASCADE orqali avtomatik tozalaydi
+  // lms_meetings o'chirilishi lms_meeting_groups, lms_meeting_attendance va
+  // lms_meeting_recordings'ni FK ON DELETE CASCADE orqali avtomatik tozalaydi
+  // (fayllari 3-qadamda allaqachon o'chirildi)
   await pool.query("DELETE FROM lms_meetings WHERE created_by_user_id = ?", [TEACHER_ID])
-  // lms_teacher_content o'chirilishi lms_submissions, lms_content_progress,
-  // lms_exam_retake_grants'ni FK ON DELETE CASCADE orqali avtomatik tozalaydi
-  await pool.query("DELETE FROM lms_teacher_content WHERE teacher_user_id = ?", [TEACHER_ID])
+  // lms_teacher_content 2-qadamda allaqachon (fayllari bilan) o'chirildi
   await pool.query(`DELETE FROM lms_groups WHERE id IN (${groupPlaceholders})`, ALL_KNOWN_GROUP_IDS)
-  console.log("Demo hisoblar o'chirildi.")
+  console.log("Demo hisoblar va ular yuklagan fayllar o'chirildi.")
   await pool.end()
 }
 
