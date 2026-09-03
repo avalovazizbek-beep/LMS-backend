@@ -9,7 +9,7 @@ import { authMiddleware, requireRole, AuthRequest, AuthUser } from "../middlewar
 import { pool } from "../services/db"
 import { notifications } from "../db/data"
 import { parseNumber } from "../services/meetingStore"
-import { syncTeacherFromHemis, employeeTeachesGroup, fetchTeacherGroupsAllYears } from "./hemis"
+import { syncTeacherFromHemis, employeeTeachesGroup, fetchTeacherGroupsForYear } from "./hemis"
 import {
   type ContentType,
   type ContentFile,
@@ -827,22 +827,27 @@ router.get("/groups", async (req: AuthRequest, res: Response) => {
   res.json({ success: true, data: group ? [group] : [] })
 })
 
-/* ── GET /groups-by-year — o'qituvchining barcha o'quv yillaridagi guruhlari ── */
+/* ── GET /groups-by-year?year=2024 — o'qituvchining berilgan o'quv yildagi guruhlari ── */
 // Joriy /groups faqat HEMIS'dagi ENG SO'NGGI sinxronizatsiya + kontenti bor
 // guruhlarni beradi — o'tgan yillarda dars bergan, hali kontent yaratilmagan
-// guruhlar yo'qolib qoladi. Bu endpoint HEMIS'dan o'qituvchining butun
-// tarixini so'raydi va topilgan guruhlarni bazamizga (o'chirmasdan) qo'shadi.
+// guruhlar yo'qolib qoladi. Bu endpoint HEMIS'dan aynan shu yil bo'yicha
+// so'raydi (boshqa xodim sahifalaridagi kabi) va topilgan guruhlarni
+// bazamizga (o'chirmasdan) qo'shadi.
 router.get("/groups-by-year", async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.user?.role !== "employee") {
     res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" }); return
   }
+  const year = String(req.query.year ?? "").trim()
+  if (!year) {
+    res.status(400).json({ success: false, message: "O'quv yili ko'rsatilishi shart" }); return
+  }
   try {
-    const { years, groups } = await fetchTeacherGroupsAllYears(req.user)
+    const groups = await fetchTeacherGroupsForYear(req.user, year)
     if (groups.length) {
-      await upsertGroups(groups.map(g => ({ id: g.id, name: g.name })))
+      await upsertGroups(groups)
       await addTeacherGroups(teacherUserId(req.user), groups.map(g => g.id))
     }
-    res.json({ success: true, data: { years, groups } })
+    res.json({ success: true, data: groups })
   } catch (err) {
     res.status(502).json({ success: false, message: err instanceof Error ? err.message : "HEMIS'dan guruhlarni olishda xato" })
   }
