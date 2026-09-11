@@ -472,6 +472,95 @@ export async function fetchInstituteGroupsWithStudentCounts(user?: AuthRequest["
   return { groups, totalStudents, departmentId }
 }
 
+export interface AcademicDebtor {
+  studentUserId: number
+  studentFullName: string
+  studentIdNumber: string | null
+  subjectName: string
+  groupId: number
+  groupName: string
+  semester: string
+  totalPoint: number
+  grade: number | null
+}
+
+/**
+ * "Akademik qarzdorlar" — so'ragan (admin) xodimning O'Z HEMIS departmenti
+ * bo'yicha barcha guruhlarning o'quv rejasi (_curriculum) asosida
+ * /v1/data/academic-record-list dan retraining_status=true (jami ball < 55,
+ * HEMIS'ning o'zi hisoblagan rasmiy holat — AcademicRecord sxemasi,
+ * backend/api.md) bo'lgan yozuvlarni topadi. Talaba qaysi guruhga
+ * tegishli ekanligini aniqlash uchun har bir guruhning talabalar
+ * ro'yxati (/v1/data/student-list?_group=) bilan solishtiriladi — shu
+ * bilan bir vaqtda departmentdan tashqari (boshqa institut) talabalar
+ * ham chetlab o'tiladi (fetchInstituteGroupsWithStudentCounts'dagi
+ * xavfsizlik chorasi bilan bir xil mantiq).
+ */
+export async function fetchAcademicDebtors(user?: AuthRequest["user"], semester?: string): Promise<{
+  debtors: AcademicDebtor[]
+  departmentId: string | null
+}> {
+  const departmentId = employeeDepartmentId(user)
+  if (!departmentId) return { debtors: [], departmentId: null }
+
+  const groupItems = await employeeDataAllItems("/v1/data/group-list", { _department: departmentId, limit: "200" }, undefined)
+  const groups = groupItems
+    .map((item) => {
+      const r = asRecord(item)
+      const groupId = numberValue(r.id)
+      const groupName = textValue(r.name)
+      const curriculumId = textValue(r._curriculum)
+      return groupId !== null && groupName && curriculumId ? { groupId, groupName, curriculumId } : null
+    })
+    .filter((g): g is { groupId: number; groupName: string; curriculumId: string } => g !== null)
+
+  if (!groups.length) return { debtors: [], departmentId }
+
+  // Har bir talaba qaysi guruhda ekanligini bilish uchun guruh->talabalar xaritasi
+  const studentGroupMap = new Map<number, { groupId: number; groupName: string }>()
+  await mapWithConcurrency(groups, 4, async (g) => {
+    try {
+      const students = await employeeDataAllItems("/v1/data/student-list", { _group: String(g.groupId), limit: "200" }, undefined)
+      for (const s of students) {
+        const sid = numberValue(asRecord(s).id)
+        if (sid !== null) studentGroupMap.set(sid, { groupId: g.groupId, groupName: g.groupName })
+      }
+    } catch { /* bitta guruh xato bo'lsa ham qolganlari davom etsin */ }
+  })
+
+  const curriculumIds = Array.from(new Set(groups.map((g) => g.curriculumId)))
+  const recordsByCurriculum = await mapWithConcurrency(curriculumIds, 3, async (curriculumId) => {
+    const params: Record<string, string> = { _curriculum: curriculumId, limit: "200" }
+    if (semester) params._semester = semester
+    try {
+      return await employeeDataAllItems("/v1/data/academic-record-list", params, undefined)
+    } catch { return [] }
+  })
+
+  const debtors: AcademicDebtor[] = []
+  for (const rec of recordsByCurriculum.flat()) {
+    const r = asRecord(rec)
+    if (r.retraining_status !== true) continue
+    const studentId = numberValue(r._student)
+    if (studentId === null) continue
+    const groupInfo = studentGroupMap.get(studentId)
+    if (!groupInfo) continue // departmentga tegishli emas — o'tkazib yuboriladi
+    debtors.push({
+      studentUserId: studentId,
+      studentFullName: textValue(r.student_name) ?? "Talaba",
+      studentIdNumber: textValue(r.student_id_number) ?? null,
+      subjectName: textValue(r.subject_name) ?? "",
+      groupId: groupInfo.groupId,
+      groupName: groupInfo.groupName,
+      semester: textValue(r.semester_name, r._semester) ?? "",
+      totalPoint: numberValue(r.total_point) ?? 0,
+      grade: numberValue(r.grade) ?? null,
+    })
+  }
+
+  return { debtors, departmentId }
+}
+
 
 /* ── helpers ──────────────────────────────────────────────────────── */
 function stripTrailingSlash(value: string) {

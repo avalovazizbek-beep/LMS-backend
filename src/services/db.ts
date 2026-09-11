@@ -541,6 +541,90 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_exam_retake_grants")
 
+  // ── Qayta o'qish (reedu): HEMIS'da fandan umumiy ball 55dan past chiqqan
+  // (retraining_status=true) talabani maxsus "reedu" guruhga biriktirib,
+  // jadval/davomat/nazoratni oxirigacha LMS ichida yuritish uchun ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_reedu_groups (
+      id                INT AUTO_INCREMENT PRIMARY KEY,
+      name              VARCHAR(255) NOT NULL,
+      subject_name      VARCHAR(255) NOT NULL,
+      teacher_user_id   INT NULL,
+      teacher_full_name VARCHAR(255) NULL,
+      semester          VARCHAR(20) NULL,
+      status            ENUM('active','closed') NOT NULL DEFAULT 'active',
+      created_by        VARCHAR(255) NULL,
+      created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_reedu_groups_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_reedu_groups")
+
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_reedu_enrollments (
+      id                   INT AUTO_INCREMENT PRIMARY KEY,
+      reedu_group_id       INT NOT NULL,
+      student_user_id      INT NOT NULL,
+      student_full_name    VARCHAR(255) NOT NULL,
+      student_id_number    VARCHAR(100) NULL,
+      subject_name         VARCHAR(255) NOT NULL,
+      original_group_id    INT NOT NULL,
+      original_group_name  VARCHAR(255) NULL,
+      semester             VARCHAR(20) NULL,
+      debtor_total_point   DECIMAL(6,2) NULL,
+      status               ENUM('active','completed','failed') NOT NULL DEFAULT 'active',
+      final_score          DECIMAL(6,2) NULL,
+      created_by           VARCHAR(255) NULL,
+      created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at         TIMESTAMP NULL,
+      UNIQUE KEY uq_reedu_enrollment (reedu_group_id, student_user_id, subject_name),
+      INDEX idx_reedu_enroll_student (student_user_id),
+      CONSTRAINT fk_reedu_enroll_group FOREIGN KEY (reedu_group_id) REFERENCES lms_reedu_groups(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_reedu_enrollments")
+
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_reedu_schedule (
+      id             INT AUTO_INCREMENT PRIMARY KEY,
+      reedu_group_id INT NOT NULL,
+      week_day       TINYINT NOT NULL,
+      start_time     VARCHAR(10) NOT NULL,
+      end_time       VARCHAR(10) NOT NULL,
+      room           VARCHAR(120) NULL,
+      created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_reedu_schedule_group (reedu_group_id),
+      CONSTRAINT fk_reedu_sched_group FOREIGN KEY (reedu_group_id) REFERENCES lms_reedu_groups(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_reedu_schedule")
+
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_reedu_attendance (
+      id              INT AUTO_INCREMENT PRIMARY KEY,
+      reedu_group_id  INT NOT NULL,
+      student_user_id INT NOT NULL,
+      lesson_date     DATE NOT NULL,
+      status          ENUM('present','absent','late','excused') NOT NULL DEFAULT 'present',
+      marked_by       VARCHAR(255) NULL,
+      created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_reedu_att (reedu_group_id, student_user_id, lesson_date),
+      INDEX idx_reedu_att_group_date (reedu_group_id, lesson_date),
+      CONSTRAINT fk_reedu_att_group FOREIGN KEY (reedu_group_id) REFERENCES lms_reedu_groups(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_reedu_attendance")
+
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_reedu_grades (
+      id              INT AUTO_INCREMENT PRIMARY KEY,
+      reedu_group_id  INT NOT NULL,
+      student_user_id INT NOT NULL,
+      grade_type      ENUM('JN','ON1','ON2','YN') NOT NULL,
+      grade           DECIMAL(5,1) NULL,
+      updated_by      VARCHAR(255) NULL,
+      updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_reedu_grade (reedu_group_id, student_user_id, grade_type),
+      CONSTRAINT fk_reedu_grade_group FOREIGN KEY (reedu_group_id) REFERENCES lms_reedu_groups(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_reedu_grades")
+
   // ── Admin ruxsatnomalar: kimga qanday LMS roli berilgan ──
   await execSafe(`
     CREATE TABLE IF NOT EXISTS lms_permissions (

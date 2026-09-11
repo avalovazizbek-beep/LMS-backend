@@ -21,6 +21,7 @@ import teachingRoutes from "./routes/teaching"
 import faceRoutes from "./routes/face"
 import adminRoutes from "./routes/admin"
 import announcementsRoutes from "./routes/announcements"
+import reeduRoutes from "./routes/reedu"
 import {
   getAttendance,
   getMeeting,
@@ -87,6 +88,7 @@ app.use("/api/teaching", teachingRoutes)
 app.use("/api/face", faceRoutes)
 app.use("/api/admin", adminRoutes)
 app.use("/api/announcements", announcementsRoutes)
+app.use("/api/reedu", reeduRoutes)
 
 app.get("/health", (_req, res) => {
   res.json({
