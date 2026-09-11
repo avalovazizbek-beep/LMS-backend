@@ -3206,7 +3206,35 @@ router.get("/grades", async (req: AuthRequest, res: Response) => {
         _education_year:      "",
       }
     })
-    res.json({ success: true, data: mapped, source: r.source })
+    // DIQQAT: bu vaqtinchalik diagnostika — ko'rinadigan ma'lumotni
+    // (mapped) O'ZGARTIRMAYDI, faqat javobga qo'shimcha "debug" maydon
+    // qo'shadi. Maqsad: hali boshlanmagan/yangi semestr uchun HEMIS'ning
+    // qaysi backend resursida (agar bo'lsa) haqiqiy fan ro'yxati borligini
+    // XATOSIZ tekshirib olish — avvalgi urinishda filtr chin emasligi
+    // production'da (foydalanuvchiga ko'rinadigan holda) aniqlangan edi,
+    // shuni endi oldindan, ko'rinmas holda tekshiramiz.
+    let debug: Record<string, unknown> | undefined
+    if (mapped.length === 0 && semester) {
+      const groupId = textValue(req.user?.groupId)
+      if (groupId) {
+        try {
+          const planItems = await employeeDataAllItems(
+            "/v1/data/curriculum-subject-teacher-list",
+            { _group: groupId, _semester: String(semester), limit: "200" },
+            undefined
+          )
+          debug = {
+            groupId,
+            semester: String(semester),
+            planItemsCount: planItems.length,
+            samplePlanItems: planItems.slice(0, 3),
+          }
+        } catch (planErr) {
+          debug = { groupId, semester: String(semester), planFallbackError: extractMessage(planErr) }
+        }
+      }
+    }
+    res.json({ success: true, data: mapped, source: r.source, debug })
   } catch (err) {
     res.status(502).json({ success: false, message: extractMessage(err) })
   }
