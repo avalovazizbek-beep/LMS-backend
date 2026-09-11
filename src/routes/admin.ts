@@ -21,6 +21,15 @@ import {
 } from "../services/announcementStore"
 import { fetchInstituteGroupsWithStudentCounts } from "./hemis"
 import { withHemisCache } from "../services/db"
+import {
+  getManagedRolePermissions,
+  setRolePermission,
+  hasPermission,
+  ADMIN_MODULES,
+  type AdminModule,
+  type PermissionAction,
+} from "../services/permissionsStore"
+import { logAudit, listAuditLog } from "../services/auditLog"
 
 const router = Router()
 router.use(authMiddleware)
@@ -64,28 +73,63 @@ function getHemisId(req: AuthRequest): string {
   return String(req.user?.userId ?? req.user?.id ?? req.user?.username ?? "")
 }
 
-export async function isAdminUser(req: AuthRequest): Promise<boolean> {
+/** Foydalanuvchining admin panelidagi rolini qaytaradi: 'admin' (to'liq huquqli),
+    'dean' (kengaytirilgan boshqaruv — lms_role_permissions jadvali bo'yicha
+    cheklangan) yoki null (admin panelga umuman kirolmaydi). */
+export async function getUserAdminRole(req: AuthRequest): Promise<"admin" | "dean" | null> {
   const user = req.user
-  if (!user) return false
+  if (!user) return null
 
   const hemisId = getHemisId(req)
-  if (!hemisId) return false
+  if (!hemisId) return null
 
   // Yagona o'zgarmas admin
-  if (FIXED_ADMIN_HEMIS_ID && hemisId === FIXED_ADMIN_HEMIS_ID) return true
+  if (FIXED_ADMIN_HEMIS_ID && hemisId === FIXED_ADMIN_HEMIS_ID) return "admin"
 
-  // DB-granted admin
+  // DB-granted admin/dean
   const [rows] = await pool.query<RowDataPacket[]>(
     "SELECT lms_role FROM lms_permissions WHERE hemis_id = ?",
     [hemisId]
   )
-  return rows[0]?.lms_role === "admin"
+  const role = rows[0]?.lms_role
+  return role === "admin" || role === "dean" ? role : null
+}
+
+/** Admin panelga kirish huquqi bor-yo'qligi (admin YOKI dean). Modul ichidagi
+    aniq amal (Yaratish/Tahrirlash/O'chirish) uchun requirePermission ishlatiladi —
+    bu funksiya faqat "panelga umuman kira oladimi" degan keng tekshiruv. */
+export async function isAdminUser(req: AuthRequest): Promise<boolean> {
+  return (await getUserAdminRole(req)) !== null
 }
 
 async function adminOnly(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const ok = await isAdminUser(req)
   if (!ok) { res.status(403).json({ success: false, message: "Admin huquqi yo'q" }); return }
   next()
+}
+
+/** Faqat 'admin' roli (dean emas) — rol berish va ruxsatlar jadvalini
+    o'zgartirish kabi imtiyoz-ko'tarish xavfi bor amallar uchun. Jadvaldagi
+    qiymatlardan qat'i nazar har doim shu qat'iy tekshiruv qo'llanadi —
+    aks holda dean o'ziga admin huquqini berib olishi mumkin edi. */
+export async function requireFullAdmin(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  const role = await getUserAdminRole(req)
+  if (role !== "admin") { res.status(403).json({ success: false, message: "Faqat admin uchun" }); return }
+  next()
+}
+
+/** Berilgan modulda ma'lum amalga (Yaratish/Tahrirlash/O'chirish/Ko'rish)
+    joriy foydalanuvchining ruxsati bor-yo'qligini lms_role_permissions
+    jadvali bo'yicha tekshiradi. 'admin' har doim o'tadi. */
+export function requirePermission(module: AdminModule, action: PermissionAction) {
+  return async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    const role = await getUserAdminRole(req)
+    if (!role) { res.status(403).json({ success: false, message: "Admin huquqi yo'q" }); return }
+    if (role === "admin") { next(); return }
+    const ok = await hasPermission(role, module, action)
+    if (!ok) { res.status(403).json({ success: false, message: "Bu amal uchun ruxsatingiz yo'q" }); return }
+    next()
+  }
 }
 
 /* ── GET /api/admin/check ───────────────────────────────────────────── */
@@ -205,10 +249,12 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
 })
 
 /* ── PATCH /api/admin/users/:hemisId/role ──────────────────────────── */
-router.patch("/users/:hemisId/role", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+// requireFullAdmin: rol berish imtiyoz-ko'tarish xavfi bor amal — hech qachon
+// dean roliga (yoki lms_role_permissions jadvaliga) ishonib topshirilmaydi.
+router.patch("/users/:hemisId/role", requireFullAdmin, async (req: AuthRequest, res: Response): Promise<void> => {
   const { hemisId } = req.params
   const { lmsRole, note } = req.body as { lmsRole: string; note?: string }
-  const validRoles = ["admin", "teacher", "student", "blocked", "pending"]
+  const validRoles = ["admin", "dean", "teacher", "student", "blocked", "pending"]
   if (!validRoles.includes(lmsRole)) {
     res.status(400).json({ success: false, message: "Noto'g'ri rol" }); return
   }
@@ -230,8 +276,43 @@ router.patch("/users/:hemisId/role", adminOnly, async (req: AuthRequest, res: Re
      ON DUPLICATE KEY UPDATE lms_role=VALUES(lms_role), granted_by=VALUES(granted_by), note=VALUES(note), updated_at=NOW()`,
     [hemisId, userRow?.full_name ?? "", userRow?.role ?? "", lmsRole, grantedBy, note ?? null]
   )
+  void logAudit(req, "role.update", "users", hemisId, { lmsRole, note: note ?? null })
 
   res.json({ success: true, message: "Ruxsat yangilandi" })
+})
+
+/* ── Kengaytirilgan boshqaruv: rol × modul ruxsatlari ────────────────── */
+router.get("/permissions", requirePermission("permissions", "view"), async (_req: AuthRequest, res: Response): Promise<void> => {
+  res.json({ success: true, data: { modules: ADMIN_MODULES, roles: await getManagedRolePermissions() } })
+})
+
+router.put("/permissions", requireFullAdmin, async (req: AuthRequest, res: Response): Promise<void> => {
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
+  const role = textVal(String(body.role ?? ""))
+  const module = textVal(String(body.module ?? ""))
+  if (role !== "dean" && role !== "admin") {
+    res.status(400).json({ success: false, message: "role faqat 'admin' yoki 'dean' bo'lishi mumkin" }); return
+  }
+  if (!(ADMIN_MODULES as readonly string[]).includes(module)) {
+    res.status(400).json({ success: false, message: "Noto'g'ri modul" }); return
+  }
+  const perm = {
+    canView: Boolean(body.canView),
+    canCreate: Boolean(body.canCreate),
+    canEdit: Boolean(body.canEdit),
+    canDelete: Boolean(body.canDelete),
+  }
+  await setRolePermission(role, module, perm)
+  void logAudit(req, "permissions.update", "permissions", `${role}:${module}`, perm)
+  res.json({ success: true, message: "Ruxsatlar saqlandi" })
+})
+
+/* ── GET /api/admin/audit-log — kim (IP bilan) qaysi amalni bajargani ── */
+router.get("/audit-log", requirePermission("permissions", "view"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const limit = Number(req.query.limit ?? 100)
+  const actorHemisId = typeof req.query.actorHemisId === "string" ? req.query.actorHemisId : undefined
+  const module = typeof req.query.module === "string" ? req.query.module : undefined
+  res.json({ success: true, data: await listAuditLog({ limit, actorHemisId, module }) })
 })
 
 /* ── GET /api/admin/stats ───────────────────────────────────────────── */
@@ -651,9 +732,10 @@ router.get("/settings", adminOnly, async (_req: AuthRequest, res: Response): Pro
 })
 
 /* ── PUT /api/admin/settings ────────────────────────────────────────── */
-router.put("/settings", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.put("/settings", requirePermission("settings", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const updates = req.body as Record<string, unknown>
   const allowed = new Set(["face_block_threshold", "test_max_attempts", "meeting_attendance_minutes"])
+  const applied: Record<string, string> = {}
 
   for (const [key, val] of Object.entries(updates)) {
     if (!allowed.has(key)) continue
@@ -663,7 +745,9 @@ router.put("/settings", adminOnly, async (req: AuthRequest, res: Response): Prom
       "INSERT INTO lms_settings (key_name, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
       [key, value]
     )
+    applied[key] = value
   }
+  void logAudit(req, "settings.update", "settings", null, applied)
 
   res.json({ success: true, message: "Sozlamalar saqlandi" })
 })
@@ -683,7 +767,7 @@ router.get("/face-requests", adminOnly, async (req: AuthRequest, res: Response):
 })
 
 /* ── PATCH /api/admin/face-requests/:id ────────────────────────────── */
-router.patch("/face-requests/:id", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.patch("/face-requests/:id", requirePermission("faceid", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const { id } = req.params
   const { action, note } = req.body as { action: "approve" | "reject"; note?: string }
   if (!["approve", "reject"].includes(action)) {
@@ -706,6 +790,7 @@ router.patch("/face-requests/:id", adminOnly, async (req: AuthRequest, res: Resp
       await pool.query("DELETE FROM face_registrations WHERE username=?", [username])
     }
   }
+  void logAudit(req, `faceRequest.${action}`, "faceid", id, { note: note ?? null })
 
   res.json({ success: true, message: action === "approve" ? "Tasdiqlandi" : "Rad etildi" })
 })
@@ -1216,12 +1301,13 @@ router.get("/platform-attendance", adminOnly, async (req: AuthRequest, res: Resp
 })
 
 /* ── PATCH /api/admin/content/:id/toggle — admin qulfni ochadi ──────── */
-router.patch("/content/:id/toggle", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.patch("/content/:id/toggle", requirePermission("retake", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   if (!id) { res.status(400).json({ success: false, message: "Noto'g'ri id" }); return }
   const existing = await getTeacherContent(id)
   if (!existing) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
   const updated = await updateTeacherContent(id, { isActive: !existing.isActive })
+  void logAudit(req, "content.toggle", "retake", String(id), { isActive: updated?.isActive })
   res.json({ success: true, data: updated })
 })
 
@@ -1271,7 +1357,7 @@ router.get("/content/:id/submissions", adminOnly, async (req: AuthRequest, res: 
 })
 
 /* ── POST /api/admin/content/:id/retake-grants — tanlangan (yiqilgan) talabalarga ruxsat ── */
-router.post("/content/:id/retake-grants", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/content/:id/retake-grants", requirePermission("retake", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const content = Number.isFinite(id) ? await getTeacherContent(id) : null
   if (!content || content.type !== "exam") { res.status(404).json({ success: false, message: "Imtihon topilmadi" }); return }
@@ -1291,15 +1377,17 @@ router.post("/content/:id/retake-grants", adminOnly, async (req: AuthRequest, re
     await grantRetake(content.id, studentId, grantedBy || null, body.reason)
     granted++
   }
+  void logAudit(req, "retake.grant", "retake", String(id), { studentIds: ids, reason: body.reason ?? null, granted })
   res.json({ success: true, message: `${granted} ta talabaga qayta urinish ruxsati berildi` })
 })
 
 /* ── DELETE /api/admin/content/:id/retake-grants/:studentUserId — bekor qilish ── */
-router.delete("/content/:id/retake-grants/:studentUserId", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.delete("/content/:id/retake-grants/:studentUserId", requirePermission("retake", "delete"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const studentUserId = Number(req.params.studentUserId)
   if (!Number.isFinite(id) || !Number.isFinite(studentUserId)) { res.status(400).json({ success: false, message: "Noto'g'ri parametrlar" }); return }
   await revokeRetakeGrant(id, studentUserId)
+  void logAudit(req, "retake.revoke", "retake", String(id), { studentUserId })
   res.json({ success: true, message: "Ruxsat bekor qilindi" })
 })
 
@@ -1323,7 +1411,7 @@ router.get("/announcements", adminOnly, async (_req: AuthRequest, res: Response)
   res.json({ success: true, data: await listAllAnnouncements() })
 })
 
-router.post("/announcements", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/announcements", requirePermission("announcements", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   const body = req.body || {}
   const audience = validAudience(body.audience)
   if (!audience) { res.status(400).json({ success: false, message: "audience noto'g'ri" }); return }
@@ -1338,10 +1426,11 @@ router.post("/announcements", adminOnly, async (req: AuthRequest, res: Response)
     createdByUserId: announcementCreatorId(req),
     createdByName: announcementCreatorName(req),
   })
+  void logAudit(req, "announcement.create", "announcements", String(record.id), { audience })
   res.status(201).json({ success: true, data: record })
 })
 
-router.post("/announcements/upload", adminOnly, (req: AuthRequest, res: Response): void => {
+router.post("/announcements/upload", requirePermission("announcements", "create"), (req: AuthRequest, res: Response): void => {
   const audience = validAudience(req.query.audience || req.headers["x-announcement-audience"])
   if (!audience) { res.status(400).json({ success: false, message: "audience noto'g'ri" }); return }
 
@@ -1404,6 +1493,7 @@ router.post("/announcements/upload", adminOnly, (req: AuthRequest, res: Response
           mediaKind: mediaKindFromMime(mimeType),
         },
       })
+      void logAudit(req, "announcement.create", "announcements", String(record.id), { audience, hasFile: true })
       res.status(201).json({ success: true, data: record })
     } catch {
       fs.rm(absolutePath, { force: true }, () => undefined)
@@ -1414,7 +1504,7 @@ router.post("/announcements/upload", adminOnly, (req: AuthRequest, res: Response
   req.pipe(stream)
 })
 
-router.put("/announcements/:id", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.put("/announcements/:id", requirePermission("announcements", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) { res.status(400).json({ success: false, message: "Noto'g'ri ID" }); return }
   const body = req.body || {}
@@ -1429,22 +1519,25 @@ router.put("/announcements/:id", adminOnly, async (req: AuthRequest, res: Respon
 
   const record = await updateAnnouncement(id, patch)
   if (!record) { res.status(404).json({ success: false, message: "E'lon topilmadi" }); return }
+  void logAudit(req, "announcement.update", "announcements", String(id), patch)
   res.json({ success: true, data: record })
 })
 
-router.patch("/announcements/:id/toggle", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.patch("/announcements/:id/toggle", requirePermission("announcements", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) { res.status(400).json({ success: false, message: "Noto'g'ri ID" }); return }
   const record = await toggleAnnouncementActive(id)
   if (!record) { res.status(404).json({ success: false, message: "E'lon topilmadi" }); return }
+  void logAudit(req, "announcement.toggle", "announcements", String(id), { isActive: record.isActive })
   res.json({ success: true, data: record })
 })
 
-router.delete("/announcements/:id", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.delete("/announcements/:id", requirePermission("announcements", "delete"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) { res.status(400).json({ success: false, message: "Noto'g'ri ID" }); return }
   const removed = await deleteAnnouncement(id)
   if (!removed) { res.status(404).json({ success: false, message: "E'lon topilmadi" }); return }
+  void logAudit(req, "announcement.delete", "announcements", String(id))
   res.json({ success: true, message: "E'lon o'chirildi" })
 })
 

@@ -2,7 +2,8 @@ import { Router, Response, NextFunction } from "express"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { studentUserId } from "../services/teachingStore"
 import { fetchAcademicDebtors, type AcademicDebtor } from "./hemis"
-import { isAdminUser } from "./admin"
+import { isAdminUser, requirePermission } from "./admin"
+import { logAudit } from "../services/auditLog"
 import {
   markAlreadyEnrolled,
   createReeduGroup,
@@ -64,7 +65,7 @@ router.get("/admin/groups", adminOnly, async (_req: AuthRequest, res: Response):
   res.json({ success: true, data: await listReeduGroups() })
 })
 
-router.post("/admin/groups", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/admin/groups", adminOnly, requirePermission("reedu", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   const body = asRecord(req.body)
   const name = textVal(body.name)
   const subjectName = textVal(body.subjectName)
@@ -77,6 +78,7 @@ router.post("/admin/groups", adminOnly, async (req: AuthRequest, res: Response):
     semester: textVal(body.semester) || null,
     createdBy: req.user?.fullName ?? req.user?.username ?? null,
   })
+  void logAudit(req, "reedu.group.create", "reedu", String(id), { name, subjectName })
   res.json({ success: true, data: { id } })
 })
 
@@ -103,14 +105,15 @@ router.get("/admin/groups/:id", adminOnly, async (req: AuthRequest, res: Respons
   })
 })
 
-router.post("/admin/groups/:id/close", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/admin/groups/:id/close", adminOnly, requirePermission("reedu", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = numVal(req.params.id)
   if (id === null) { res.status(400).json({ success: false, message: "id noto'g'ri" }); return }
   await closeReeduGroup(id)
+  void logAudit(req, "reedu.group.close", "reedu", String(id))
   res.json({ success: true })
 })
 
-router.post("/admin/groups/:id/enroll", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/admin/groups/:id/enroll", adminOnly, requirePermission("reedu", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = numVal(req.params.id)
   if (id === null) { res.status(400).json({ success: false, message: "id noto'g'ri" }); return }
   const body = asRecord(req.body)
@@ -136,11 +139,12 @@ router.post("/admin/groups/:id/enroll", adminOnly, async (req: AuthRequest, res:
     .filter((d): d is AcademicDebtor => d !== null)
   if (!debtors.length) { res.status(400).json({ success: false, message: "debtors ro'yxati bo'sh" }); return }
   const inserted = await enrollDebtors(id, debtors, req.user?.fullName ?? req.user?.username ?? null)
+  void logAudit(req, "reedu.enroll", "reedu", String(id), { inserted, count: debtors.length })
   res.json({ success: true, data: { inserted } })
 })
 
 /* ── 3-bosqich: Dars jadvali ─────────────────────────────────────────── */
-router.put("/admin/groups/:id/schedule", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.put("/admin/groups/:id/schedule", adminOnly, requirePermission("reedu", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = numVal(req.params.id)
   if (id === null) { res.status(400).json({ success: false, message: "id noto'g'ri" }); return }
   const body = asRecord(req.body)
@@ -150,11 +154,12 @@ router.put("/admin/groups/:id/schedule", adminOnly, async (req: AuthRequest, res
     return { weekDay: numVal(r.weekDay) ?? 1, startTime: textVal(r.startTime), endTime: textVal(r.endTime), room: textVal(r.room) || null }
   }).filter((s) => s.startTime && s.endTime)
   await setReeduSchedule(id, slots)
+  void logAudit(req, "reedu.schedule.set", "reedu", String(id), { slotCount: slots.length })
   res.json({ success: true })
 })
 
 /* ── 4-bosqich: Davomat ──────────────────────────────────────────────── */
-router.post("/admin/groups/:id/attendance", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/admin/groups/:id/attendance", adminOnly, requirePermission("reedu", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = numVal(req.params.id)
   if (id === null) { res.status(400).json({ success: false, message: "id noto'g'ri" }); return }
   const body = asRecord(req.body)
@@ -166,6 +171,7 @@ router.post("/admin/groups/:id/attendance", adminOnly, async (req: AuthRequest, 
     return { studentUserId: numVal(rec.studentUserId) ?? 0, status: (textVal(rec.status) || "present") as "present" | "absent" | "late" | "excused" }
   }).filter((r) => r.studentUserId > 0)
   await markReeduAttendance(id, lessonDate, records, req.user?.fullName ?? req.user?.username ?? null)
+  void logAudit(req, "reedu.attendance.mark", "reedu", String(id), { lessonDate, count: records.length })
   res.json({ success: true })
 })
 
@@ -176,7 +182,7 @@ router.get("/admin/groups/:id/attendance", adminOnly, async (req: AuthRequest, r
 })
 
 /* ── 5-bosqich: Nazorat (JN/ON1/ON2/YN) ─────────────────────────────── */
-router.put("/admin/groups/:id/grade", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.put("/admin/groups/:id/grade", adminOnly, requirePermission("reedu", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = numVal(req.params.id)
   if (id === null) { res.status(400).json({ success: false, message: "id noto'g'ri" }); return }
   const body = asRecord(req.body)
@@ -187,11 +193,12 @@ router.put("/admin/groups/:id/grade", adminOnly, async (req: AuthRequest, res: R
   }
   const grade = body.grade === null ? null : numVal(body.grade)
   await upsertReeduGrade(id, studentUserId, gradeType as any, grade, req.user?.fullName ?? req.user?.username ?? null)
+  void logAudit(req, "reedu.grade.set", "reedu", String(id), { studentUserId, gradeType, grade })
   res.json({ success: true })
 })
 
 /* ── 6-bosqich: Yakunlash va Qaydnoma ───────────────────────────────── */
-router.post("/admin/groups/:id/finalize", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/admin/groups/:id/finalize", adminOnly, requirePermission("reedu", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = numVal(req.params.id)
   if (id === null) { res.status(400).json({ success: false, message: "id noto'g'ri" }); return }
   const body = asRecord(req.body)
@@ -199,6 +206,7 @@ router.post("/admin/groups/:id/finalize", adminOnly, async (req: AuthRequest, re
   if (studentUserId === null) { res.status(400).json({ success: false, message: "studentUserId majburiy" }); return }
   const result = await finalizeReeduEnrollment(id, studentUserId)
   if (!result) { res.status(400).json({ success: false, message: "Bu talaba uchun hali baho kiritilmagan" }); return }
+  void logAudit(req, "reedu.finalize", "reedu", String(id), { studentUserId, ...result })
   res.json({ success: true, data: result })
 })
 

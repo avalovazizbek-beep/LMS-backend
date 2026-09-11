@@ -679,7 +679,7 @@ export async function initDatabase() {
       hemis_id    VARCHAR(255) NOT NULL,
       full_name   VARCHAR(255),
       hemis_role  VARCHAR(100),
-      lms_role    ENUM('admin','teacher','student','blocked','pending') NOT NULL DEFAULT 'pending',
+      lms_role    ENUM('admin','dean','teacher','student','blocked','pending') NOT NULL DEFAULT 'pending',
       granted_by  VARCHAR(255),
       granted_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -688,6 +688,61 @@ export async function initDatabase() {
       INDEX idx_perm_lms_role (lms_role)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_permissions")
+  // Eski o'rnatishlarda lms_role ENUM'ga 'dean' qo'shib qo'yish
+  await execIgnoreDuplicate(`
+    ALTER TABLE lms_permissions
+      MODIFY COLUMN lms_role ENUM('admin','dean','teacher','student','blocked','pending') NOT NULL DEFAULT 'pending'
+  `)
+
+  // ── Kengaytirilgan boshqaruv: rol × modul bo'yicha Ko'rish/Yaratish/
+  // Tahrirlash/O'chirish huquqlari (admin/dean uchun) ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_role_permissions (
+      id         INT AUTO_INCREMENT PRIMARY KEY,
+      role       VARCHAR(30) NOT NULL,
+      module     VARCHAR(50) NOT NULL,
+      can_view   TINYINT(1) NOT NULL DEFAULT 0,
+      can_create TINYINT(1) NOT NULL DEFAULT 0,
+      can_edit   TINYINT(1) NOT NULL DEFAULT 0,
+      can_delete TINYINT(1) NOT NULL DEFAULT 0,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_role_module (role, module)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_role_permissions")
+
+  // Standart qiymatlarni bir marta urug'lantirish (mavjud bo'lsa qayta yozilmaydi).
+  // Modul nomlari kod ichida qat'iy belgilangan (foydalanuvchi kiritmaydi) — shu
+  // sabab to'g'ridan-to'g'ri qatorga qo'shish xavfsiz.
+  const ADMIN_MODULES = ["users", "students", "teachers", "results", "attendance", "grading", "retake", "reedu", "faceid", "announcements", "settings", "permissions"]
+  for (const mod of ADMIN_MODULES) {
+    await pool.query(
+      `INSERT IGNORE INTO lms_role_permissions (role, module, can_view, can_create, can_edit, can_delete) VALUES ('admin', ?, 1, 1, 1, 1)`,
+      [mod]
+    )
+    await pool.query(
+      `INSERT IGNORE INTO lms_role_permissions (role, module, can_view, can_create, can_edit, can_delete) VALUES ('dean', ?, 1, 0, 0, 0)`,
+      [mod]
+    )
+  }
+
+  // ── Audit log: kim (IP bilan) qaysi admin amalini bajardi ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_audit_log (
+      id             INT AUTO_INCREMENT PRIMARY KEY,
+      actor_hemis_id VARCHAR(255) NOT NULL,
+      actor_name     VARCHAR(255) NULL,
+      actor_role     VARCHAR(30) NULL,
+      action         VARCHAR(100) NOT NULL,
+      module         VARCHAR(50) NULL,
+      target         VARCHAR(255) NULL,
+      detail         JSON NULL,
+      ip_address     VARCHAR(64) NULL,
+      user_agent     VARCHAR(500) NULL,
+      created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_audit_actor (actor_hemis_id),
+      INDEX idx_audit_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_audit_log")
 
   // ── Tizim sozlamalari (admin tomonidan o'zgartiriladigan) ──
   await execSafe(`

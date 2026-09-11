@@ -45,6 +45,9 @@ process.on("uncaughtException", (err) => {
 })
 
 const app = express()
+// Nginx/reverse-proxy ortida haqiqiy klient IP'sini X-Forwarded-For'dan olish uchun
+// (audit log yozuvlari uchun kerak — aks holda hammasi proksi IP'si bo'lib qolardi)
+app.set("trust proxy", true)
 const PORT = process.env.PORT || 5000
 const FRONTEND_ORIGIN = process.env.FRONTEND_URL || "http://localhost:3000"
 const ALLOWED_ORIGINS = [
