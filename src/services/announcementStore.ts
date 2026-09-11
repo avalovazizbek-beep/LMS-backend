@@ -157,7 +157,17 @@ export async function updateAnnouncement(
 export async function toggleActive(id: number): Promise<AnnouncementRecord | null> {
   const current = await getAnnouncement(id)
   if (!current) return null
-  await pool.query("UPDATE lms_announcements SET is_active = ? WHERE id = ?", [!current.isActive, id])
+  const next = !current.isActive
+  await pool.query("UPDATE lms_announcements SET is_active = ? WHERE id = ?", [next, id])
+
+  // Qayta yoqilganda (o'chirilgan holatdan faollashtirilganda) — avval "X"
+  // bosib yopib qo'ygan foydalanuvchilarga ham yana ko'rinishi uchun ularning
+  // yopish yozuvlarini tozalaymiz. Shu bilan admin e'lonni qayta yaratmasdan,
+  // faqat o'chirib-yoqib, hammaga yana yuborishi mumkin.
+  if (next) {
+    await pool.query("DELETE FROM lms_announcement_dismissals WHERE announcement_id = ?", [id])
+  }
+
   return getAnnouncement(id)
 }
 

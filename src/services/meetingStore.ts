@@ -96,12 +96,20 @@ export interface CreateMeetingInput {
 
 const JWT_SECRET = process.env.MEETING_JWT_SECRET || process.env.JWT_SECRET || "secret"
 
-/** Talaba "keldi" deb hisoblanishi uchun, meeting davomiyligining kamida
- *  shuncha ulushida kamerada yuzi ko'rinib turishi kerak (masalan 80
- *  daqiqalik darsda kamida 60 daqiqa = 0.75). */
-const FACE_ATTENDANCE_THRESHOLD_RATIO = 0.75
+/** Talaba "keldi" deb hisoblanishi uchun kamerada yuzi kamida shuncha
+ *  DAQIQA ko'rinib turishi kerak — admin panelidan (Sozlamalar) o'zgartiriladi,
+ *  lms_settings jadvalida "meeting_attendance_minutes" kaliti bilan saqlanadi. */
+const DEFAULT_ATTENDANCE_MINUTES = 70
 /** Bitta face-ping so'rovida qo'shiladigan maksimal soniya (suiiste'mol/soxta so'rovlardan himoya) */
 const MAX_FACE_PING_SECONDS = 60
+
+async function getAttendanceThresholdSeconds(): Promise<number> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT value FROM lms_settings WHERE key_name = 'meeting_attendance_minutes' LIMIT 1"
+  )
+  const minutes = Number(rows[0]?.value)
+  return (Number.isFinite(minutes) && minutes > 0 ? minutes : DEFAULT_ATTENDANCE_MINUTES) * 60
+}
 
 const defaultSettings: MeetingSettings = {
   allowCamera: true,
@@ -390,16 +398,20 @@ export async function endMeeting(meeting: MeetingRecord): Promise<MeetingRecord>
 }
 
 /** Meeting tugaganda barcha kirgan talabalarni (group_id bor) lms_attendance ga yozadi.
- *  "Keldi" faqat kamerada yuzi meeting davomiyligining kamida
- *  FACE_ATTENDANCE_THRESHOLD_RATIO ulushida ko'rinib turgan bo'lsa qo'yiladi —
- *  faqat join qilingani (kamerasiz/kamera oldida o'tirmasdan) yetarli emas. */
+ *  "Keldi" faqat kamerada yuzi admin belgilagan chegara (daqiqa,
+ *  meeting_attendance_minutes) yoki undan ko'proq vaqt ko'rinib turgan bo'lsa
+ *  qo'yiladi — faqat join qilingani (kamerasiz/kamera oldida o'tirmasdan)
+ *  yetarli emas. Meeting shu chegaradan qisqa bo'lib qolsa (masalan darsning
+ *  o'zi 40 daqiqa, chegara 70 bo'lsa), hech kim "kelmadi" bo'lib qolmasligi
+ *  uchun chegara meetingning haqiqiy davomiyligidan oshmaydi. */
 async function syncMeetingAttendanceToMain(meeting: MeetingRecord): Promise<void> {
   if (!meeting.subjectName) return
 
   const lessonDate = new Date(meeting.startTime).toISOString().slice(0, 10)
   const subjectName = meeting.subjectName
   const durationSeconds = Math.max(60, Math.round((Date.now() - new Date(meeting.startTime).getTime()) / 1000))
-  const requiredSeconds = durationSeconds * FACE_ATTENDANCE_THRESHOLD_RATIO
+  const thresholdSeconds = await getAttendanceThresholdSeconds()
+  const requiredSeconds = Math.min(thresholdSeconds, durationSeconds)
 
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
     `SELECT user_id, group_id, full_name, face_visible_seconds

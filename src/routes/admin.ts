@@ -636,7 +636,7 @@ router.get("/settings", adminOnly, async (_req: AuthRequest, res: Response): Pro
 /* ── PUT /api/admin/settings ────────────────────────────────────────── */
 router.put("/settings", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
   const updates = req.body as Record<string, unknown>
-  const allowed = new Set(["face_block_threshold", "test_max_attempts"])
+  const allowed = new Set(["face_block_threshold", "test_max_attempts", "meeting_attendance_minutes"])
 
   for (const [key, val] of Object.entries(updates)) {
     if (!allowed.has(key)) continue
@@ -979,6 +979,23 @@ router.get("/sessions", adminOnly, async (req: AuthRequest, res: Response): Prom
     [limitVal]
   )
   res.json({ success: true, data: rows })
+})
+
+/* ── GET /api/admin/login-trend — so'nggi N kunlik kirishlar (kun bo'yicha,
+   BAZADAGI HAMMA sessiya bo'yicha hisoblanadi — /sessions kabi so'nggi N
+   qatorga cheklanmaydi, shuning uchun kun bo'yicha son har doim to'g'ri) ── */
+router.get("/login-trend", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const days = Math.min(Math.max(Number(req.query.days ?? 7), 1), 90)
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT DATE_FORMAT(login_at, '%Y-%m-%d') AS d, COUNT(*) AS c
+     FROM lms_platform_sessions
+     WHERE login_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+     GROUP BY d`,
+    [days - 1]
+  )
+  const counts: Record<string, number> = {}
+  for (const r of rows as RowDataPacket[]) counts[String(r.d)] = Number(r.c)
+  res.json({ success: true, data: counts })
 })
 
 /* ── GET /api/admin/locked-assignments — yakunlangan amaliylar ─────── */
