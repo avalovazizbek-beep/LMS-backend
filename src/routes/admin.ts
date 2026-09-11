@@ -236,7 +236,10 @@ router.get("/stats", adminOnly, async (_req: AuthRequest, res: Response): Promis
         (SELECT COUNT(*) FROM lms_meetings) AS total_meetings,
         (SELECT COUNT(*) FROM face_requests WHERE status='pending') AS face_pending,
         (SELECT COUNT(*) FROM lms_submissions) AS total_submissions,
-        (SELECT COUNT(*) FROM lms_content_progress WHERE completed=1) AS total_completions
+        (SELECT COUNT(*) FROM lms_content_progress WHERE completed=1) AS total_completions,
+        (SELECT COUNT(*) FROM lms_submissions WHERE grade IS NOT NULL) AS graded_submissions,
+        (SELECT COUNT(*) FROM face_registrations) AS face_registered,
+        (SELECT COUNT(DISTINCT user_id) FROM lms_platform_sessions WHERE role='student' AND login_at >= NOW() - INTERVAL 30 DAY) AS active_students_30d
     `),
   ])
 
@@ -253,6 +256,9 @@ router.get("/stats", adminOnly, async (_req: AuthRequest, res: Response): Promis
       facePending: Number(row.face_pending ?? 0),
       totalSubmissions: Number(row.total_submissions ?? 0),
       totalCompletions: Number(row.total_completions ?? 0),
+      gradedSubmissions: Number(row.graded_submissions ?? 0),
+      faceRegistered: Number(row.face_registered ?? 0),
+      activeStudents30d: Number(row.active_students_30d ?? 0),
     },
   })
 })
