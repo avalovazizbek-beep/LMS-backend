@@ -62,6 +62,17 @@ import {
   getExamSession,
   deleteExamSession,
   buildOptionPerms,
+  type QuestionDifficulty,
+  type ExamQuestion,
+  type AdaptiveState,
+  getAdaptiveState,
+  saveAdaptiveState,
+  nextAdaptiveDifficulty,
+  pickAdaptiveQuestion,
+  finalizeAdaptiveExam,
+  recordExamViolation,
+  getExamViolationsSummary,
+  type ViolationType,
 } from "../services/examStore"
 import {
   type AttendanceStatus,
@@ -82,6 +93,7 @@ import {
   getGroupGradeHistory,
 } from "../services/gradeStore"
 import { getActiveRetakeGrant, consumeRetakeGrant } from "../services/retakeStore"
+import { isAdminUser } from "./admin"
 
 const router = Router()
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
@@ -161,6 +173,7 @@ interface ContentMeta {
   attemptsCount: number | null
   questionDisplayCount: number | null
   language: string
+  isAdaptive: boolean
   completionPoints: number | null
   durationMinutes: number | null
   trainingLoad: number | null
@@ -190,6 +203,7 @@ function readContentMeta(source: Record<string, unknown>): ContentMeta {
     attemptsCount: numberValue(source.attemptsCount ?? source.attempts_count),
     questionDisplayCount: numberValue(source.questionDisplayCount ?? source.question_display_count),
     language: textValue(source.language),
+    isAdaptive: boolValue(source.isAdaptive ?? source.is_adaptive),
     completionPoints: numberValue(source.completionPoints ?? source.completion_points),
     durationMinutes: numberValue(source.durationMinutes ?? source.duration_minutes),
     trainingLoad: numberValue(source.trainingLoad ?? source.training_load),
@@ -1370,6 +1384,7 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
     attemptsCount: meta.attemptsCount,
     questionDisplayCount: meta.questionDisplayCount,
     language: meta.language || null,
+    isAdaptive: meta.isAdaptive,
     completionPoints: meta.completionPoints,
     durationMinutes: meta.durationMinutes,
     trainingLoad: meta.trainingLoad,
@@ -1461,6 +1476,7 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
   if ("attemptsCount" in body) patch.attemptsCount = numberValue(body.attemptsCount)
   if ("questionDisplayCount" in body) patch.questionDisplayCount = numberValue(body.questionDisplayCount)
   if ("language" in body) patch.language = textValue(body.language) || null
+  if ("isAdaptive" in body) patch.isAdaptive = boolValue(body.isAdaptive)
 
   if (typeof body.availableFrom === "string" && body.availableFrom.trim()) {
     if (!isValidDate(body.availableFrom)) {
@@ -1884,7 +1900,7 @@ router.put("/content/:id/questions", async (req: AuthRequest, res: Response): Pr
     return
   }
 
-  const questions: { questionText: string; imageUrl?: string | null; optionImages?: (string | null)[] | null; options: string[]; correctIndex: number; correctIndexes: number[]; points: number }[] = []
+  const questions: { questionText: string; imageUrl?: string | null; optionImages?: (string | null)[] | null; options: string[]; correctIndex: number; correctIndexes: number[]; points: number; difficulty?: QuestionDifficulty }[] = []
   for (const raw of rawQuestions) {
     if (!raw || typeof raw !== "object") {
       res.status(400).json({ success: false, message: "Noto'g'ri savol formati" })
@@ -1902,6 +1918,8 @@ router.put("/content/:id/questions", async (req: AuthRequest, res: Response): Pr
       ? (r.correctIndexes as unknown[]).map((x) => numberValue(x)).filter((n): n is number => n !== null)
       : null
     const points = numberValue(r.points) ?? 1
+    const difficultyRaw = textValue(r.difficulty)
+    const difficulty: QuestionDifficulty = difficultyRaw === "oson" || difficultyRaw === "qiyin" ? difficultyRaw : "orta"
 
     if (!questionText) {
       res.status(400).json({ success: false, message: "Savol matni bo'sh bo'lishi mumkin emas" })
@@ -1924,7 +1942,7 @@ router.put("/content/:id/questions", async (req: AuthRequest, res: Response): Pr
       res.status(400).json({ success: false, message: "Ball kamida 1 bo'lishi kerak" })
       return
     }
-    questions.push({ questionText, imageUrl, optionImages, options, correctIndex: finalIndexes[0], correctIndexes: finalIndexes, points })
+    questions.push({ questionText, imageUrl, optionImages, options, correctIndex: finalIndexes[0], correctIndexes: finalIndexes, points, difficulty })
   }
 
   const saved = await replaceQuestions(content.id, questions)
@@ -2006,6 +2024,219 @@ router.post("/content/:id/exam-submit", async (req: AuthRequest, res: Response):
   await deleteExamSession(content.id, sId)
 
   res.status(201).json({ success: true, data: { submission, maxScore: content.maxScore } })
+})
+
+/* ── Moslashuvchan (adaptive) test: bitta-bittalab savol, talabaning
+   javobiga qarab keyingi savol qiyinligi moslashadi ─────────────────── */
+function publicAdaptiveQuestion(q: ExamQuestion, perm: number[]) {
+  return {
+    id: q.id,
+    questionText: q.questionText,
+    imageUrl: q.imageUrl ?? null,
+    optionImages: q.optionImages ?? null,
+    options: q.options,
+    optionPerm: perm,
+    points: q.points,
+    difficulty: q.difficulty,
+  }
+}
+
+function adaptiveTotal(content: TeacherContentRecord, poolSize: number): number {
+  return content.questionDisplayCount && content.questionDisplayCount > 0
+    ? Math.min(content.questionDisplayCount, poolSize)
+    : poolSize
+}
+
+router.get("/content/:id/adaptive/next", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role === "employee") {
+    res.status(403).json({ success: false, message: "Faqat talaba uchun" })
+    return
+  }
+  const id = numberValue(req.params.id)
+  const content = id !== null ? await getTeacherContent(id) : null
+  if (!content || content.type !== "exam" || !content.isAdaptive || content.groupId !== studentGroupId(req.user)) {
+    res.status(404).json({ success: false, message: "Topilmadi" })
+    return
+  }
+  const status = contentStatus(new Date(), content.availableFrom, content.deadline)
+  if (status !== "open") {
+    res.status(403).json({ success: false, message: "Imtihon hozircha ochiq emas" })
+    return
+  }
+
+  const sId = studentUserId(req.user)
+  const pool = await listQuestions(content.id)
+  if (!pool.length) {
+    res.status(400).json({ success: false, message: "Bu imtihon uchun savollar mavjud emas" })
+    return
+  }
+
+  const state = await getAdaptiveState(content.id, sId)
+  const total = adaptiveTotal(content, pool.length)
+
+  if (state.answers.length >= total) {
+    res.json({ success: true, data: { done: true, progress: { answered: state.answers.length, total } } })
+    return
+  }
+
+  // Sahifa yangilansa — hali javob berilmagan joriy savol qayta qaytariladi
+  if (state.currentQuestionId) {
+    const q = pool.find(p => p.id === state.currentQuestionId)
+    if (q) {
+      res.json({
+        success: true,
+        data: {
+          done: false,
+          question: publicAdaptiveQuestion(q, state.currentOptionPerm ?? q.options.map((_, i) => i)),
+          progress: { answered: state.answers.length, total },
+        },
+      })
+      return
+    }
+  }
+
+  const answeredIds = new Set(state.answers.map(a => a.questionId))
+  const next = pickAdaptiveQuestion(pool, answeredIds, state.currentDifficulty)
+  if (!next) {
+    res.json({ success: true, data: { done: true, progress: { answered: state.answers.length, total } } })
+    return
+  }
+  const perm = buildOptionPerms([next])[next.id]
+  await saveAdaptiveState(content.id, sId, { ...state, currentQuestionId: next.id, currentOptionPerm: perm })
+  res.json({
+    success: true,
+    data: { done: false, question: publicAdaptiveQuestion(next, perm), progress: { answered: state.answers.length, total } },
+  })
+})
+
+router.post("/content/:id/adaptive/answer", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role === "employee") {
+    res.status(403).json({ success: false, message: "Faqat talaba uchun" })
+    return
+  }
+  const id = numberValue(req.params.id)
+  const content = id !== null ? await getTeacherContent(id) : null
+  if (!content || content.type !== "exam" || !content.isAdaptive || content.groupId !== studentGroupId(req.user)) {
+    res.status(404).json({ success: false, message: "Topilmadi" })
+    return
+  }
+  const status = contentStatus(new Date(), content.availableFrom, content.deadline)
+  if (status !== "open") {
+    res.status(403).json({ success: false, message: "Imtihon hozircha ochiq emas" })
+    return
+  }
+
+  const sId = studentUserId(req.user)
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
+  const questionId = numberValue(body.questionId)
+  const selectedIndex = numberValue(body.selectedIndex)
+  if (questionId === null || selectedIndex === null) {
+    res.status(400).json({ success: false, message: "questionId va selectedIndex majburiy" })
+    return
+  }
+
+  const state = await getAdaptiveState(content.id, sId)
+  if (state.currentQuestionId !== questionId) {
+    res.status(409).json({ success: false, message: "Bu savol joriy emas — sahifani yangilang" })
+    return
+  }
+
+  const pool = await listQuestions(content.id)
+  const question = pool.find(q => q.id === questionId)
+  if (!question) {
+    res.status(404).json({ success: false, message: "Savol topilmadi" })
+    return
+  }
+
+  const correct = question.correctIndexes.includes(selectedIndex)
+  const nextState: AdaptiveState = {
+    answers: [...state.answers, { questionId, selectedIndex, correct, difficulty: question.difficulty }],
+    currentDifficulty: nextAdaptiveDifficulty(question.difficulty, correct),
+    currentQuestionId: null,
+    currentOptionPerm: null,
+  }
+
+  const total = adaptiveTotal(content, pool.length)
+  const answeredIds = new Set(nextState.answers.map(a => a.questionId))
+  const next = nextState.answers.length < total ? pickAdaptiveQuestion(pool, answeredIds, nextState.currentDifficulty) : null
+
+  if (!next) {
+    const { submission, score } = await finalizeAdaptiveExam(content.id, sId, fullNameOf(req.user), studentGroupId(req.user), nextState, content.maxScore)
+    await deleteExamSession(content.id, sId)
+    res.json({ success: true, data: { done: true, correct, submission, maxScore: content.maxScore, score } })
+    return
+  }
+
+  const perm = buildOptionPerms([next])[next.id]
+  nextState.currentQuestionId = next.id
+  nextState.currentOptionPerm = perm
+  await saveAdaptiveState(content.id, sId, nextState)
+
+  res.json({
+    success: true,
+    data: {
+      done: false,
+      correct,
+      question: publicAdaptiveQuestion(next, perm),
+      progress: { answered: nextState.answers.length, total },
+    },
+  })
+})
+
+/* ── Imtihon paytidagi buzilishlar (proctoring) ─────────────────────── */
+const VALID_VIOLATION_TYPES: ViolationType[] = [
+  "fullscreen_exit", "tab_blur", "screenshot_attempt", "face_mismatch", "no_face", "multi_face", "liveness",
+]
+
+/* POST /content/:id/violation — talaba: fullscreen/tab/Face ID buzilishini xabar qiladi */
+router.post("/content/:id/violation", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role === "employee") {
+    res.status(403).json({ success: false, message: "Faqat talaba uchun" })
+    return
+  }
+  const id = numberValue(req.params.id)
+  const content = id !== null ? await getTeacherContent(id) : null
+  if (!content || content.groupId !== studentGroupId(req.user)) {
+    res.status(404).json({ success: false, message: "Topilmadi" })
+    return
+  }
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
+  const violationType = textValue(body.violationType) as ViolationType
+  if (!VALID_VIOLATION_TYPES.includes(violationType)) {
+    res.status(400).json({ success: false, message: "violationType noto'g'ri" })
+    return
+  }
+  await recordExamViolation({
+    contentId: content.id,
+    studentUserId: studentUserId(req.user),
+    studentFullName: fullNameOf(req.user),
+    groupId: studentGroupId(req.user),
+    violationType,
+    detail: textValue(body.detail) || null,
+  })
+  res.status(201).json({ success: true })
+})
+
+/* GET /content/:id/violations — o'qituvchi (o'zining kontenti) yoki admin */
+router.get("/content/:id/violations", async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = numberValue(req.params.id)
+  const content = id !== null ? await getTeacherContent(id) : null
+  if (!content) {
+    res.status(404).json({ success: false, message: "Topilmadi" })
+    return
+  }
+  if (req.user?.role === "employee" && content.teacherUserId !== teacherUserId(req.user)) {
+    res.status(403).json({ success: false, message: "Sizga ruxsat yo'q" })
+    return
+  }
+  if (req.user?.role !== "employee") {
+    const ok = await isAdminUser(req)
+    if (!ok) {
+      res.status(403).json({ success: false, message: "Ruxsat yo'q" })
+      return
+    }
+  }
+  res.json({ success: true, data: await getExamViolationsSummary(content.id) })
 })
 
 /* ── Davomat (qo'lda) ───────────────────────────────────────────────── */

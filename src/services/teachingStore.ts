@@ -327,6 +327,7 @@ export interface TeacherContentRecord {
   attemptsCount: number | null
   questionDisplayCount: number | null
   language: string | null
+  isAdaptive: boolean
   durationMinutes: number | null
   trainingLoad: number | null
   completionPoints: number | null
@@ -402,6 +403,7 @@ async function mapContentRow(row: mysql.RowDataPacket): Promise<TeacherContentRe
     attemptsCount: row.attempts_count == null ? null : Number(row.attempts_count),
     questionDisplayCount: row.question_display_count == null ? null : Number(row.question_display_count),
     language: row.language ?? null,
+    isAdaptive: Boolean(row.is_adaptive),
     durationMinutes: row.duration_minutes == null ? null : Number(row.duration_minutes),
     trainingLoad: row.training_load == null ? null : Number(row.training_load),
     completionPoints: row.completion_points == null ? null : Number(row.completion_points),
@@ -433,6 +435,7 @@ export interface CreateContentInput {
   attemptsCount?: number | null
   questionDisplayCount?: number | null
   language?: string | null
+  isAdaptive?: boolean
   completionPoints?: number | null
   durationMinutes?: number | null
   trainingLoad?: number | null
@@ -447,8 +450,8 @@ export async function createTeacherContent(input: CreateContentInput): Promise<T
     `INSERT INTO lms_teacher_content
       (uuid, type, teacher_user_id, group_id, subject_name, topic_key, title, description, kind, control_type, resource_type,
        file_name, original_name, mime_type, file_size, relative_path, public_url, meeting_link,
-       available_from, deadline, max_score, attempts_count, question_display_count, language, duration_minutes, training_load, completion_points, lesson_date, delivered)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       available_from, deadline, max_score, attempts_count, question_display_count, language, is_adaptive, duration_minutes, training_load, completion_points, lesson_date, delivered)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       uuid,
       input.type,
@@ -474,6 +477,7 @@ export async function createTeacherContent(input: CreateContentInput): Promise<T
       input.attemptsCount ?? null,
       input.questionDisplayCount ?? null,
       input.language?.trim() || null,
+      input.isAdaptive ? 1 : 0,
       input.durationMinutes ?? null,
       input.trainingLoad ?? null,
       input.completionPoints ?? null,
@@ -581,6 +585,7 @@ export interface UpdateContentInput {
   attemptsCount?: number | null
   questionDisplayCount?: number | null
   language?: string | null
+  isAdaptive?: boolean
   completionPoints?: number | null
   durationMinutes?: number | null
   trainingLoad?: number | null
@@ -623,6 +628,10 @@ export async function updateTeacherContent(id: number, patch: UpdateContentInput
   if (patch.language !== undefined) {
     sets.push("language = ?")
     params.push(patch.language?.trim() || null)
+  }
+  if (patch.isAdaptive !== undefined) {
+    sets.push("is_adaptive = ?")
+    params.push(patch.isAdaptive ? 1 : 0)
   }
   if (patch.availableFrom !== undefined) {
     sets.push("available_from = ?")

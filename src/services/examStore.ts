@@ -10,6 +10,8 @@ export function isExamPassed(grade: number | null | undefined, maxScore: number 
   return grade >= threshold
 }
 
+export type QuestionDifficulty = "oson" | "orta" | "qiyin"
+
 export interface ExamQuestion {
   id: number
   contentId: number
@@ -21,6 +23,7 @@ export interface ExamQuestion {
   correctIndexes: number[]
   points: number
   orderIndex: number
+  difficulty: QuestionDifficulty
 }
 
 export interface ExamQuestionInput {
@@ -31,6 +34,7 @@ export interface ExamQuestionInput {
   correctIndex: number
   correctIndexes?: number[]
   points: number
+  difficulty?: QuestionDifficulty
 }
 
 function mapQuestionRow(row: mysql.RowDataPacket): ExamQuestion {
@@ -62,6 +66,7 @@ function mapQuestionRow(row: mysql.RowDataPacket): ExamQuestion {
     correctIndexes,
     points: Number(row.points),
     orderIndex: Number(row.order_index),
+    difficulty: (row.difficulty === "oson" || row.difficulty === "qiyin" ? row.difficulty : "orta") as QuestionDifficulty,
   }
 }
 
@@ -156,8 +161,8 @@ export async function replaceQuestions(contentId: number, questions: ExamQuestio
         : null
       await conn.query(
         `INSERT INTO lms_exam_questions
-           (content_id, question_text, image_url, option_images, options, correct_index, correct_indexes, points, order_index)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (content_id, question_text, image_url, option_images, options, correct_index, correct_indexes, points, order_index, difficulty)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           contentId,
           q.questionText.trim(),
@@ -168,6 +173,7 @@ export async function replaceQuestions(contentId: number, questions: ExamQuestio
           JSON.stringify(correctIndexes),
           q.points,
           i,
+          q.difficulty === "oson" || q.difficulty === "qiyin" ? q.difficulty : "orta",
         ]
       )
     }
@@ -242,4 +248,175 @@ export async function submitExamAnswers(
   const submission = await getSubmissionForStudent(contentId, studentUserId)
   if (!submission) throw new Error("Topshiriq saqlanmadi")
   return { submission, score }
+}
+
+/* ── Moslashuvchan (adaptive) test ────────────────────────────────────
+   Har bir javobdan keyin keyingi savolning qiyinligi talabaning
+   natijasiga qarab moslashadi: to'g'ri bo'lsa qiyinroq, xato bo'lsa
+   osonroq savol tanlanadi. Holat lms_exam_sessions.adaptive_state'da
+   (JSON) saqlanadi — talaba sahifani yangilasa ham jarayon davom etadi. */
+export interface AdaptiveAnswerRecord {
+  questionId: number
+  selectedIndex: number
+  correct: boolean
+  difficulty: QuestionDifficulty
+}
+
+export interface AdaptiveState {
+  answers: AdaptiveAnswerRecord[]
+  currentDifficulty: QuestionDifficulty
+  currentQuestionId?: number | null
+  currentOptionPerm?: number[] | null
+}
+
+function defaultAdaptiveState(): AdaptiveState {
+  return { answers: [], currentDifficulty: "orta", currentQuestionId: null, currentOptionPerm: null }
+}
+
+export async function getAdaptiveState(contentId: number, studentUserId: number): Promise<AdaptiveState> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT adaptive_state FROM lms_exam_sessions WHERE content_id = ? AND student_user_id = ?",
+    [contentId, studentUserId]
+  )
+  const raw = rows[0]?.adaptive_state
+  if (!raw) return defaultAdaptiveState()
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw
+    if (parsed && Array.isArray(parsed.answers)) {
+      return {
+        answers: parsed.answers,
+        currentDifficulty: parsed.currentDifficulty === "oson" || parsed.currentDifficulty === "qiyin" ? parsed.currentDifficulty : "orta",
+        currentQuestionId: typeof parsed.currentQuestionId === "number" ? parsed.currentQuestionId : null,
+        currentOptionPerm: Array.isArray(parsed.currentOptionPerm) ? parsed.currentOptionPerm : null,
+      }
+    }
+  } catch { /* ignore */ }
+  return defaultAdaptiveState()
+}
+
+export async function saveAdaptiveState(contentId: number, studentUserId: number, state: AdaptiveState): Promise<void> {
+  await pool.query(
+    `INSERT INTO lms_exam_sessions (content_id, student_user_id, question_ids, adaptive_state)
+     VALUES (?, ?, '[]', ?)
+     ON DUPLICATE KEY UPDATE adaptive_state = VALUES(adaptive_state)`,
+    [contentId, studentUserId, JSON.stringify(state)]
+  )
+}
+
+export function nextAdaptiveDifficulty(current: QuestionDifficulty, correct: boolean): QuestionDifficulty {
+  if (correct) return current === "oson" ? "orta" : "qiyin"
+  return current === "qiyin" ? "orta" : "oson"
+}
+
+/** Javob berilmagan savollar orasidan joriy qiyinlikka mos bo'lganini tanlaydi;
+    shu qiyinlikda savol qolmagan bo'lsa, o'rta darajaga, keyin istalgan savolga o'tadi. */
+export function pickAdaptiveQuestion(pool: ExamQuestion[], answeredIds: Set<number>, difficulty: QuestionDifficulty): ExamQuestion | null {
+  const remaining = pool.filter(q => !answeredIds.has(q.id))
+  if (!remaining.length) return null
+  const exact = remaining.filter(q => q.difficulty === difficulty)
+  if (exact.length) return exact[Math.floor(Math.random() * exact.length)]
+  const mid = remaining.filter(q => q.difficulty === "orta")
+  if (mid.length) return mid[Math.floor(Math.random() * mid.length)]
+  return remaining[Math.floor(Math.random() * remaining.length)]
+}
+
+export function difficultyWeight(d: QuestionDifficulty): number {
+  return d === "oson" ? 1 : d === "qiyin" ? 3 : 2
+}
+
+/** Moslashuvchan test tugagach, qiyinlikka qarab tortilgan ball bilan yakuniy baho qo'yadi */
+export async function finalizeAdaptiveExam(
+  contentId: number,
+  studentUserId: number,
+  studentFullName: string,
+  groupId: number | null,
+  state: AdaptiveState,
+  contentMaxScore?: number | null,
+): Promise<ExamSubmitResult> {
+  const totalWeight = state.answers.reduce((s, a) => s + difficultyWeight(a.difficulty), 0)
+  const earnedWeight = state.answers.reduce((s, a) => s + (a.correct ? difficultyWeight(a.difficulty) : 0), 0)
+  const rawPct = totalWeight > 0 ? earnedWeight / totalWeight : 0
+  const score = (contentMaxScore && contentMaxScore > 0)
+    ? Math.round(rawPct * contentMaxScore)
+    : Math.round(rawPct * 100)
+
+  const questionIds = state.answers.map(a => a.questionId)
+  const answers = state.answers.map(a => a.selectedIndex)
+
+  await pool.query(
+    `INSERT INTO lms_submissions
+      (content_id, student_user_id, student_full_name, group_id, comment, submitted_at,
+       answers, grade, feedback, graded_at, graded_by_user_id, auto_graded, attempts_used, question_ids, option_perms)
+     VALUES (?, ?, ?, ?, NULL, CURRENT_TIMESTAMP, ?, ?, ?, CURRENT_TIMESTAMP, NULL, 1, 1, ?, NULL)
+     ON DUPLICATE KEY UPDATE
+       student_full_name = VALUES(student_full_name),
+       submitted_at      = CURRENT_TIMESTAMP,
+       answers           = VALUES(answers),
+       grade             = VALUES(grade),
+       feedback          = VALUES(feedback),
+       graded_at         = CURRENT_TIMESTAMP,
+       graded_by_user_id = NULL,
+       auto_graded       = 1,
+       attempts_used     = attempts_used + 1,
+       question_ids      = VALUES(question_ids)`,
+    [contentId, studentUserId, studentFullName, groupId, JSON.stringify(answers), score, "Avtomatik baholandi (moslashuvchan test)", JSON.stringify(questionIds)]
+  )
+
+  const submission = await getSubmissionForStudent(contentId, studentUserId)
+  if (!submission) throw new Error("Topshiriq saqlanmadi")
+  return { submission, score }
+}
+
+/* ── Imtihon paytidagi buzilishlar (proctoring) ─────────────────────── */
+export type ViolationType =
+  | "fullscreen_exit"
+  | "tab_blur"
+  | "screenshot_attempt"
+  | "face_mismatch"
+  | "no_face"
+  | "multi_face"
+  | "liveness"
+
+export async function recordExamViolation(input: {
+  contentId: number
+  studentUserId: number
+  studentFullName: string
+  groupId: number | null
+  violationType: ViolationType
+  detail?: string | null
+}): Promise<void> {
+  await pool.query(
+    `INSERT INTO lms_exam_violations (content_id, student_user_id, student_full_name, group_id, violation_type, detail)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [input.contentId, input.studentUserId, input.studentFullName, input.groupId, input.violationType, input.detail ?? null]
+  )
+}
+
+export interface ViolationSummaryRow {
+  studentUserId: number
+  studentFullName: string
+  counts: Record<string, number>
+  total: number
+  lastAt: string
+}
+
+export async function getExamViolationsSummary(contentId: number): Promise<ViolationSummaryRow[]> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT student_user_id, student_full_name, violation_type, COUNT(*) AS cnt, MAX(created_at) AS last_at
+     FROM lms_exam_violations WHERE content_id = ?
+     GROUP BY student_user_id, student_full_name, violation_type`,
+    [contentId]
+  )
+  const map = new Map<number, ViolationSummaryRow>()
+  for (const r of rows) {
+    const sid = Number(r.student_user_id)
+    if (!map.has(sid)) {
+      map.set(sid, { studentUserId: sid, studentFullName: String(r.student_full_name), counts: {}, total: 0, lastAt: String(r.last_at) })
+    }
+    const entry = map.get(sid)!
+    entry.counts[String(r.violation_type)] = Number(r.cnt)
+    entry.total += Number(r.cnt)
+    if (String(r.last_at) > entry.lastAt) entry.lastAt = String(r.last_at)
+  }
+  return Array.from(map.values()).sort((a, b) => b.total - a.total)
 }

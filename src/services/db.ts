@@ -408,9 +408,13 @@ export async function initDatabase() {
   await execIgnoreDuplicate(`ALTER TABLE lms_exam_questions ADD COLUMN image_url VARCHAR(2048) NULL`)
   await execIgnoreDuplicate(`ALTER TABLE lms_exam_questions ADD COLUMN correct_indexes JSON NULL`)
   await execIgnoreDuplicate(`ALTER TABLE lms_exam_questions ADD COLUMN option_images JSON NULL`)
+  // Moslashuvchan (adaptive) test uchun savol qiyinlik darajasi
+  await execIgnoreDuplicate(`ALTER TABLE lms_exam_questions ADD COLUMN difficulty ENUM('oson','orta','qiyin') NOT NULL DEFAULT 'orta'`)
 
   // ── lms_teacher_content: resurs uchun ball + test sozlamalari ──
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN completion_points INT NULL DEFAULT NULL`)
+  // Moslashuvchan test: talaba javobiga qarab keyingi savol qiyinligi moslashadi
+  await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN is_adaptive TINYINT(1) NOT NULL DEFAULT 0 AFTER language`)
 
   // ── Talaba progress: video/audio pozitsiyasi va hujjat sahifalari ──
   await exec(`
@@ -523,6 +527,25 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
   await ensureColumn("lms_exam_sessions", "option_perms", "TEXT NULL DEFAULT NULL")
+  // Moslashuvchan test uchun: javob berilgan savollar, to'g'ri/xato va joriy qiyinlik darajasi (JSON)
+  await ensureColumn("lms_exam_sessions", "adaptive_state", "TEXT NULL DEFAULT NULL")
+
+  // ── Imtihon paytidagi buzilishlar (fullscreen'dan chiqish, oynadan chalg'ish,
+  // Face ID mos kelmasligi) — talaba tomonidan avtomatik yuboriladi, o'qituvchi/admin ko'radi ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_exam_violations (
+      id                INT AUTO_INCREMENT PRIMARY KEY,
+      content_id        INT NOT NULL,
+      student_user_id   INT NOT NULL,
+      student_full_name VARCHAR(255) NOT NULL,
+      group_id          INT NULL,
+      violation_type    VARCHAR(40) NOT NULL,
+      detail            VARCHAR(255) NULL,
+      created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_exam_violations_content (content_id, student_user_id),
+      CONSTRAINT fk_exam_violations_content FOREIGN KEY (content_id) REFERENCES lms_teacher_content(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_exam_violations")
 
   // ── Imtihonni qayta topshirish ruxsati: admin tomonidan yiqilgan talabaga beriladi ──
   await execSafe(`
