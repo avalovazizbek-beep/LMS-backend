@@ -440,6 +440,9 @@ export async function initDatabase() {
   await ensureColumn("lms_submissions", "attempts_used", "INT NOT NULL DEFAULT 1")
   await ensureColumn("lms_submissions", "question_ids", "TEXT NULL DEFAULT NULL")
   await ensureColumn("lms_submissions", "option_perms", "TEXT NULL DEFAULT NULL")
+  // Antiplagiat: fayl/izohdan ajratib olingan matn — LibreOffice orqali bir marta
+  // ajratilib keshlanadi (har safar qayta konvertatsiya qilinmasligi uchun)
+  await ensureColumn("lms_submissions", "extracted_text", "MEDIUMTEXT NULL DEFAULT NULL")
 
   // ── lms_meetings: fan nomi (subjectName) ──
   await ensureColumn("lms_meetings", "subject_name", "VARCHAR(255) NULL")
@@ -647,6 +650,27 @@ export async function initDatabase() {
       CONSTRAINT fk_reedu_grade_group FOREIGN KEY (reedu_group_id) REFERENCES lms_reedu_groups(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_reedu_grades")
+
+  // ── Antiplagiat: talaba-talaba (matn shingling/Jaccard) va internet
+  // qidiruv natijalari — har bir topshiriq uchun keshlanadi ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_plagiarism_checks (
+      id                    INT AUTO_INCREMENT PRIMARY KEY,
+      content_id            INT NOT NULL,
+      submission_id         INT NOT NULL,
+      student_user_id       INT NOT NULL,
+      student_full_name     VARCHAR(255) NOT NULL,
+      max_similarity_pct    DECIMAL(5,2) NOT NULL DEFAULT 0,
+      matched_submission_id INT NULL,
+      matched_student_name  VARCHAR(255) NULL,
+      internet_enabled      TINYINT(1) NOT NULL DEFAULT 0,
+      internet_matches      JSON NULL,
+      checked_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_plag_submission (submission_id),
+      INDEX idx_plag_content (content_id),
+      CONSTRAINT fk_plag_content FOREIGN KEY (content_id) REFERENCES lms_teacher_content(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_plagiarism_checks")
 
   // ── Admin ruxsatnomalar: kimga qanday LMS roli berilgan ──
   await execSafe(`
