@@ -3185,7 +3185,7 @@ router.get("/grades", async (req: AuthRequest, res: Response) => {
     const r = await withHemisCache(reqUserId(req), cacheKey,
       () => hemisGet(HEMIS, "/v1/education/subject-list", hToken, params), TTL_1H)
     const items: any[] = (r.data as any)?.data ?? []
-    const mapped = items.map((item: any) => {
+    let mapped = items.map((item: any) => {
       const cs = item.curriculumSubject ?? {}
       const score = item.overallScore ?? {}
       const totalPoint = score.grade ?? cs.student_ball ?? cs.subject_ball ?? 0
@@ -3206,35 +3206,57 @@ router.get("/grades", async (req: AuthRequest, res: Response) => {
         _education_year:      "",
       }
     })
-    // DIQQAT: bu vaqtinchalik diagnostika — ko'rinadigan ma'lumotni
-    // (mapped) O'ZGARTIRMAYDI, faqat javobga qo'shimcha "debug" maydon
-    // qo'shadi. Maqsad: hali boshlanmagan/yangi semestr uchun HEMIS'ning
-    // qaysi backend resursida (agar bo'lsa) haqiqiy fan ro'yxati borligini
-    // XATOSIZ tekshirib olish — avvalgi urinishda filtr chin emasligi
-    // production'da (foydalanuvchiga ko'rinadigan holda) aniqlangan edi,
-    // shuni endi oldindan, ko'rinmas holda tekshiramiz.
-    let debug: Record<string, unknown> | undefined
+    // Talabaning o'z REST tokeni (/v1/education/subject-list) faqat
+    // HEMIS'da rasmiy "biriktirilgan" (StudentSubject) yozuvi bor
+    // semestrlarni qaytaradi — endi boshlangan/kelajakdagi semestr uchun
+    // bu yozuv hali yaratilmagan bo'lishi mumkin. HEMIS'ning rasmiy API
+    // hujjatiga (backend/api.md) ko'ra, o'quv REJANING o'zi (kimga
+    // biriktirilganidan qat'i nazar) /v1/data/curriculum-subject-list
+    // orqali _curriculum + _semester bilan olinadi — guruhning
+    // _curriculum ID'sini esa /v1/data/group-list?id=<guruh> beradi.
     if (mapped.length === 0 && semester) {
       const groupId = textValue(req.user?.groupId)
       if (groupId) {
         try {
-          const planItems = await employeeDataAllItems(
-            "/v1/data/curriculum-subject-teacher-list",
-            { _group: groupId, _semester: String(semester), limit: "200" },
-            undefined
-          )
-          debug = {
-            groupId,
-            semester: String(semester),
-            planItemsCount: planItems.length,
-            samplePlanItems: planItems.slice(0, 3),
+          const groupItems = await employeeDataAllItems("/v1/data/group-list", { id: groupId, limit: "1" }, undefined)
+          const curriculumId = textValue(asRecord(groupItems[0])._curriculum)
+          if (curriculumId) {
+            const planItems = await employeeDataAllItems(
+              "/v1/data/curriculum-subject-list",
+              { _curriculum: curriculumId, _semester: String(semester), limit: "200" },
+              undefined
+            )
+            // Xavfsizlik: bitta semestrda odatda 5-15 ta fan bo'ladi — agar
+            // filtr kutilganidek ishlamay, butun o'quv reja qaytib kelsa,
+            // buni ko'rsatmaymiz (avvalgi urinishda aynan shu xato yuz bergan edi).
+            if (planItems.length > 0 && planItems.length <= 30) {
+              mapped = planItems.map((item) => {
+                const record = asRecord(item)
+                const subject = asRecord(record.subject)
+                const subjectType = asRecord(record.subjectType)
+                return {
+                  id:                   textValue(subject.id) ?? String(semester),
+                  subject_name:         textValue(subject.name) ?? "",
+                  subject_code:         textValue(subject.code) ?? "",
+                  subject_type:         textValue(subjectType.name) ?? "",
+                  employee_name:        "",
+                  semester_name:        String(semester),
+                  total_acload:         numberValue(record.total_acload) ?? 0,
+                  credit:               numberValue(record.credit) ?? 0,
+                  total_point:          0,
+                  grade:                null,
+                  finish_credit_status: false,
+                  retraining_status:    false,
+                  _semester:            String(semester),
+                  _education_year:      "",
+                }
+              })
+            }
           }
-        } catch (planErr) {
-          debug = { groupId, semester: String(semester), planFallbackError: extractMessage(planErr) }
-        }
+        } catch { /* rejadan ham olib bo'lmasa, bo'sh holat saqlanadi */ }
       }
     }
-    res.json({ success: true, data: mapped, source: r.source, debug })
+    res.json({ success: true, data: mapped, source: r.source })
   } catch (err) {
     res.status(502).json({ success: false, message: extractMessage(err) })
   }
