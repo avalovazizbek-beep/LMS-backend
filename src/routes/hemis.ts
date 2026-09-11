@@ -3189,7 +3189,15 @@ router.get("/grades", async (req: AuthRequest, res: Response) => {
     const cacheKey = `grades:${semester ?? "all"}`
     const r = await withHemisCache(reqUserId(req), cacheKey,
       () => hemisGet(HEMIS, "/v1/education/subject-list", hToken, params), TTL_1H)
-    const items: any[] = (r.data as any)?.data ?? []
+    const rawItems: any[] = (r.data as any)?.data ?? []
+    // HEMIS'ning "semester" so'rov parametri har doim ham chin filtr bo'lib
+    // ishlamaydi — ba'zan so'ralgan semestrdan tashqari, talabaning butun
+    // (barcha semestrlardagi) fanlar ro'yxatini qaytarib yuborishi kuzatildi.
+    // Shu sababli har bir qatorning o'z "_semester" maydoniga qarab, faqat
+    // so'ralgan semestrga mos kelganlarini o'zimiz ham filtrlaymiz.
+    const items = semester
+      ? rawItems.filter((item: any) => String(item?._semester ?? "") === String(semester))
+      : rawItems
     let mapped = items.map((item: any) => {
       const cs = item.curriculumSubject ?? {}
       const score = item.overallScore ?? {}
