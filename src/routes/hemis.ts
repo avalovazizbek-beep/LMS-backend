@@ -9,7 +9,7 @@ import fs from "fs"
 import path from "path"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { localResourcesAsHemisResources } from "../services/localResourceStore"
-import { withHemisCache, upsertHemisUser, pool } from "../services/db"
+import { withHemisCache, upsertHemisUser, pool, clearUserCache } from "../services/db"
 import { recordPlatformSession } from "../services/attendanceStore"
 import {
   isDemoUser, mockStudentMe, mockEmployeeMe, mockSchedule, mockAttendance,
@@ -157,6 +157,11 @@ async function saveUserToDb(token: string, role: string) {
       profile:        decoded.employeeProfile ? JSON.stringify(decoded.employeeProfile) : undefined,
       teacher_user_id: teacherNumId,
     })
+    // Har bir yangi loginda shu foydalanuvchining eski HEMIS keshini
+    // butunlay tozalaymiz — shu bilan LMS'ga kirgan har safar (davomat,
+    // baholar, jadval, reyting va h.k.) HEMIS'dan haqiqatan yangi
+    // ma'lumot bilan qayta to'lg'aziladi, eski keshda "qolib ketmaydi".
+    await clearUserCache(hemisId)
   } catch { /* DB xatosini e'tiborsiz qoldiramiz — asosiy login ishlaversin */ }
 }
 
