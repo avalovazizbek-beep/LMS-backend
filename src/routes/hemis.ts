@@ -425,6 +425,53 @@ export async function fetchGroupRoster(groupId: number): Promise<GroupRosterStud
     .filter((s) => s.hemisId > 0)
 }
 
+export interface HemisGroupSummary {
+  groupId: number
+  groupName: string
+  studentCount: number
+}
+
+/**
+ * So'ragan (admin) xodimning O'Z HEMIS departmenti bo'yicha barcha
+ * guruhlar va har birining talaba soni. `_department` filtri MUHIM —
+ * syncTeacherFromHemis'dagi eslatmada aytilganidek, `/v1/data/*`
+ * so'rovlari biror cheklovchi filtrsiz (bu holda `_department`)
+ * BUTUN UNIVERSITET bo'yicha (boshqa institut/fakultetlar ham) natija
+ * qaytaradi — shu sabab departmentId topilmasa bo'sh ro'yxat qaytariladi,
+ * "hammasi" deb noto'g'ri keng natija ko'rsatilmaydi.
+ */
+export async function fetchInstituteGroupsWithStudentCounts(user?: AuthRequest["user"]): Promise<{
+  groups: HemisGroupSummary[]
+  totalStudents: number
+  departmentId: string | null
+}> {
+  const departmentId = employeeDepartmentId(user)
+  if (!departmentId) return { groups: [], totalStudents: 0, departmentId: null }
+
+  const groupItems = await employeeDataAllItems("/v1/data/group-list", { _department: departmentId, limit: "200" }, undefined)
+
+  const summaries = await mapWithConcurrency(groupItems, 4, async (item): Promise<HemisGroupSummary | null> => {
+    const record = asRecord(item)
+    const groupId = numberValue(record.id)
+    const groupName = textValue(record.name)
+    if (groupId === null || !groupName) return null
+    try {
+      const page = await employeeDataPage("/v1/data/student-list", { _group: String(groupId), limit: "1" }, undefined)
+      const total = numberValue(page.pagination.totalCount) ?? 0
+      return { groupId, groupName, studentCount: total }
+    } catch {
+      return { groupId, groupName, studentCount: 0 }
+    }
+  })
+
+  const groups = summaries
+    .filter((g): g is HemisGroupSummary => g !== null)
+    .sort((a, b) => a.groupName.localeCompare(b.groupName, undefined, { numeric: true }))
+  const totalStudents = groups.reduce((sum, g) => sum + g.studentCount, 0)
+
+  return { groups, totalStudents, departmentId }
+}
+
 
 /* ── helpers ──────────────────────────────────────────────────────── */
 function stripTrailingSlash(value: string) {

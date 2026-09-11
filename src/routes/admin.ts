@@ -19,6 +19,8 @@ import {
   mediaKindFromMime,
   type AnnouncementAudience,
 } from "../services/announcementStore"
+import { fetchInstituteGroupsWithStudentCounts } from "./hemis"
+import { withHemisCache } from "../services/db"
 
 const router = Router()
 router.use(authMiddleware)
@@ -122,7 +124,29 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
   const limitVal = Math.min(Number(req.query.limit ?? 100), 500)
   const offsetVal = Number(req.query.offset ?? 0)
 
-  let sql = `
+  const whereParts: string[] = []
+  const whereParams: unknown[] = []
+
+  if (search) {
+    whereParts.push("(hu.full_name LIKE ? OR hu.username LIKE ? OR hu.hemis_id LIKE ?)")
+    const q = `%${search}%`
+    whereParams.push(q, q, q)
+  }
+  if (roleFilter === "admin" && FIXED_ADMIN_HEMIS_ID) {
+    // "Admin" filtri bosilganda o'zgarmas adminni ham qo'shamiz — u
+    // lms_permissions'da qator sifatida saqlanmaydi (kod ichida
+    // FIXED_ADMIN_HEMIS_ID orqali tekshiriladi), aks holda filtrlanganda
+    // "0 ta foydalanuvchi" chiqib qolardi.
+    whereParts.push("(COALESCE(p.lms_role, 'none') = ? OR hu.hemis_id = ?)")
+    whereParams.push(roleFilter, FIXED_ADMIN_HEMIS_ID)
+  } else if (roleFilter) {
+    whereParts.push("COALESCE(p.lms_role, 'none') = ?")
+    whereParams.push(roleFilter)
+  }
+
+  const whereSql = whereParts.length ? `AND ${whereParts.join(" AND ")}` : ""
+
+  const sql = `
     SELECT
       hu.hemis_id,
       hu.full_name,
@@ -139,28 +163,15 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
       (SELECT COUNT(*) FROM lms_platform_sessions ps WHERE ps.user_id = CAST(hu.hemis_id AS UNSIGNED) ORDER BY NULL) AS session_count
     FROM hemis_users hu
     LEFT JOIN lms_permissions p ON p.hemis_id = hu.hemis_id
-    WHERE 1=1
+    WHERE 1=1 ${whereSql}
+    ORDER BY hu.updated_at DESC LIMIT ? OFFSET ?
   `
-  const params: unknown[] = []
-
-  if (search) {
-    sql += " AND (hu.full_name LIKE ? OR hu.username LIKE ? OR hu.hemis_id LIKE ?)"
-    const q = `%${search}%`
-    params.push(q, q, q)
-  }
-  if (roleFilter) {
-    sql += " AND COALESCE(p.lms_role, 'none') = ?"
-    params.push(roleFilter)
-  }
-
-  sql += " ORDER BY hu.updated_at DESC LIMIT ? OFFSET ?"
-  params.push(limitVal, offsetVal)
 
   const [[rows], [countRow]] = await Promise.all([
-    pool.query<RowDataPacket[]>(sql, params),
+    pool.query<RowDataPacket[]>(sql, [...whereParams, limitVal, offsetVal]),
     pool.query<RowDataPacket[]>(
-      `SELECT COUNT(*) AS total FROM hemis_users hu LEFT JOIN lms_permissions p ON p.hemis_id = hu.hemis_id WHERE 1=1${search ? " AND (hu.full_name LIKE ? OR hu.username LIKE ? OR hu.hemis_id LIKE ?)" : ""}${roleFilter ? " AND COALESCE(p.lms_role,'none')=?" : ""}`,
-      params.slice(0, params.length - 2)
+      `SELECT COUNT(*) AS total FROM hemis_users hu LEFT JOIN lms_permissions p ON p.hemis_id = hu.hemis_id WHERE 1=1 ${whereSql}`,
+      whereParams
     ),
   ])
 
@@ -1002,6 +1013,23 @@ router.get("/login-trend", adminOnly, async (req: AuthRequest, res: Response): P
   const counts: Record<string, number> = {}
   for (const r of rows as RowDataPacket[]) counts[String(r.d)] = Number(r.c)
   res.json({ success: true, data: counts })
+})
+
+/* ── GET /api/admin/hemis-students — institut bo'yicha guruhlar + talaba soni
+   (HEMIS'dan, so'ragan adminning o'z HEMIS departmenti orqali cheklangan) ── */
+router.get("/hemis-students", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const cacheUserId = String(req.user?.userId ?? req.user?.id ?? req.user?.username ?? "admin")
+  try {
+    const r = await withHemisCache(
+      cacheUserId,
+      "hemis-students",
+      () => fetchInstituteGroupsWithStudentCounts(req.user),
+      6 * 60 * 60 * 1000 // 6 soat — guruh/talaba soni tez-tez o'zgarmaydi
+    )
+    res.json({ success: true, ...r.data, source: r.source })
+  } catch (err) {
+    res.status(502).json({ success: false, message: err instanceof Error ? err.message : "HEMIS'dan talabalar ro'yxatini olishda xato" })
+  }
 })
 
 /* ── GET /api/admin/locked-assignments — yakunlangan amaliylar ─────── */
