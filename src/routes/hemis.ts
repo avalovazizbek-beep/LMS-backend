@@ -3185,7 +3185,7 @@ router.get("/grades", async (req: AuthRequest, res: Response) => {
     const r = await withHemisCache(reqUserId(req), cacheKey,
       () => hemisGet(HEMIS, "/v1/education/subject-list", hToken, params), TTL_1H)
     const items: any[] = (r.data as any)?.data ?? []
-    let mapped = items.map((item: any) => {
+    const mapped = items.map((item: any) => {
       const cs = item.curriculumSubject ?? {}
       const score = item.overallScore ?? {}
       const totalPoint = score.grade ?? cs.student_ball ?? cs.subject_ball ?? 0
@@ -3206,49 +3206,7 @@ router.get("/grades", async (req: AuthRequest, res: Response) => {
         _education_year:      "",
       }
     })
-    let debug: Record<string, unknown> | undefined
-    // Talabaning o'z REST tokeni (/v1/education/subject-list) faqat talaba
-    // "yetib kelgan" semestrlarni qaytaradi — hali boshlanmagan semestr uchun
-    // bo'sh keladi, HEMIS'ning o'zida esa o'quv reja (kelajakdagi fanlar ham)
-    // ko'rinadi. Shunday holatda guruh bo'yicha o'quv reja jadvalidan
-    // (backend /v1/data/* API, admin token) so'raymiz.
-    if (mapped.length === 0 && semester) {
-      const groupId = textValue(req.user?.groupId)
-      if (groupId) {
-        try {
-          const planItems = await employeeDataAllItems(
-            "/v1/data/curriculum-subject-list",
-            { _group: groupId, _semester: String(semester), limit: "200" },
-            undefined
-          )
-          mapped = planItems.map((item) => {
-            const record = asRecord(item)
-            const subject = asRecord(record.subject)
-            const subjectType = asRecord(record.subjectType ?? record.trainingType)
-            return {
-              id:                   textValue(subject.id) ?? String(semester),
-              subject_name:         textValue(subject.name) ?? "",
-              subject_code:         textValue(subject.code) ?? "",
-              subject_type:         textValue(subjectType.name) ?? "",
-              employee_name:        "",
-              semester_name:        String(semester),
-              total_acload:         numberValue(record.total_acload, record.acload, record.academic_load) ?? 0,
-              credit:               numberValue(record.credit) ?? 0,
-              total_point:          0,
-              grade:                null,
-              finish_credit_status: false,
-              retraining_status:    false,
-              _semester:            String(semester),
-              _education_year:      "",
-            }
-          })
-          debug = { groupId, semester, planItemsCount: planItems.length, samplePlanItem: planItems[0] ?? null }
-        } catch (planErr) {
-          debug = { groupId, semester, planFallbackError: extractMessage(planErr) }
-        }
-      }
-    }
-    res.json({ success: true, data: mapped, source: r.source, debug })
+    res.json({ success: true, data: mapped, source: r.source })
   } catch (err) {
     res.status(502).json({ success: false, message: extractMessage(err) })
   }
