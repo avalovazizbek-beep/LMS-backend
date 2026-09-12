@@ -50,6 +50,9 @@ import {
   gradeSubmission,
   getContentProgress,
   upsertContentProgress,
+  isTopicReopened,
+  findTopicMarker,
+  setTopicReopen,
   type ContentProgress,
   type SubmissionRecord,
 } from "../services/teachingStore"
@@ -993,6 +996,43 @@ router.get("/content/by-topic", async (req: AuthRequest, res: Response): Promise
   res.json({ success: true, data: items })
 })
 
+/* ── POST /topics/:topicKey/reopen — o'qituvchi o'zi qayta ochadi (faqat
+   mavzu deadline'i hali o'tmagan bo'lsa) ───────────────────────────────── */
+router.post("/topics/:topicKey/reopen", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  const topicKey = textValue(req.params.topicKey)
+  const marker = topicKey ? await findTopicMarker(topicKey) : null
+  if (!marker || marker.teacherUserId !== teacherUserId(req.user)) {
+    res.status(404).json({ success: false, message: "Mavzu topilmadi" })
+    return
+  }
+  if (marker.deadline && new Date(marker.deadline).getTime() < Date.now()) {
+    res.status(403).json({ success: false, message: "Mavzu muddati o'tgan — endi faqat admin qayta ochishi mumkin" })
+    return
+  }
+  await setTopicReopen(topicKey, true, fullNameOf(req.user))
+  res.json({ success: true, message: "Mavzu qayta ochildi" })
+})
+
+/* ── POST /topics/:topicKey/close — o'qituvchi qayta yopadi ───────────── */
+router.post("/topics/:topicKey/close", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  const topicKey = textValue(req.params.topicKey)
+  const marker = topicKey ? await findTopicMarker(topicKey) : null
+  if (!marker || marker.teacherUserId !== teacherUserId(req.user)) {
+    res.status(404).json({ success: false, message: "Mavzu topilmadi" })
+    return
+  }
+  await setTopicReopen(topicKey, false, null)
+  res.json({ success: true, message: "Mavzu yopildi" })
+})
+
 /* ── GET /content/topics — talaba uchun mavzular (ketma-ket qulflash) ── */
 router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.user?.role === "employee") {
@@ -1468,6 +1508,19 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
   const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
   const patch: UpdateContentInput = {}
 
+  // Mavzu deadline'i o'tgach test parametrlari (yoki mavzuning o'z deadline'i)
+  // endi o'zgartirilmaydi — talabalar allaqachon shu shartlar asosida test
+  // topshirgan bo'lishi mumkin, adolat uchun muzlatib qo'yiladi.
+  const isExamSettingsChange = existing.type === "exam" && (
+    "attemptsCount" in body || "questionDisplayCount" in body || "maxScore" in body ||
+    "durationMinutes" in body || "isAdaptive" in body
+  )
+  const isTopicDeadlineChange = existing.type === "mavzu" && existing.kind === "topic" && "deadline" in body
+  if ((isExamSettingsChange || isTopicDeadlineChange) && existing.deadline && new Date(existing.deadline).getTime() < Date.now()) {
+    res.status(403).json({ success: false, message: "Mavzu muddati tugagan — bu parametrlar endi o'zgartirilmaydi" })
+    return
+  }
+
   if (typeof body.title === "string" && body.title.trim()) patch.title = body.title
   if ("description" in body) patch.description = textValue(body.description) || null
   if (typeof body.subjectName === "string" && body.subjectName.trim()) patch.subjectName = body.subjectName
@@ -1565,7 +1618,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
     res.status(403).json({ success: false, message: "Bu topshiriq hali ochilmagan" })
     return
   }
-  if (status === "closed") {
+  if (status === "closed" && !(await isTopicReopened(content.topicKey))) {
     res.status(403).json({ success: false, message: "Topshirish vaqti tugagan — endi hech narsa yuborib bo'lmaydi" })
     return
   }
@@ -1809,7 +1862,8 @@ router.get("/content/:id/questions", async (req: AuthRequest, res: Response): Pr
     return
   }
   const status = contentStatus(new Date(), content.availableFrom, content.deadline)
-  if (status !== "open") {
+  const topicReopened = await isTopicReopened(content.topicKey)
+  if (status === "locked" || (status === "closed" && !topicReopened)) {
     res.status(403).json({ success: false, message: "Imtihon hozircha ochiq emas" })
     return
   }
@@ -1818,11 +1872,12 @@ router.get("/content/:id/questions", async (req: AuthRequest, res: Response): Pr
   // Oldingi urinishni va limitni tekshirish
   const prevSubmission = await getSubmissionForStudent(content.id, sIdForSession)
   const maxAttempts = content.attemptsCount && content.attemptsCount > 0 ? content.attemptsCount : null
-  // Admin qayta urinish ruxsati bergan bo'lsa (retake grant), limitga qaramasdan o'tkaziladi
+  // Admin qayta urinish ruxsati bergan bo'lsa (retake grant) yoki mavzu qayta
+  // ochilgan bo'lsa, limitga qaramasdan o'tkaziladi
   const activeGrant = maxAttempts !== null ? await getActiveRetakeGrant(content.id, sIdForSession) : null
   const attemptsLeft = maxAttempts === null
     ? true
-    : (prevSubmission ? prevSubmission.attemptsUsed < maxAttempts : true) || !!activeGrant
+    : (prevSubmission ? prevSubmission.attemptsUsed < maxAttempts : true) || !!activeGrant || topicReopened
 
   if (prevSubmission && !attemptsLeft) {
     res.status(403).json({ success: false, message: `Urinishlar soni tugadi (${maxAttempts} ta)` })
@@ -1962,7 +2017,8 @@ router.post("/content/:id/exam-submit", async (req: AuthRequest, res: Response):
     return
   }
   const status = contentStatus(new Date(), content.availableFrom, content.deadline)
-  if (status !== "open") {
+  const topicReopened = await isTopicReopened(content.topicKey)
+  if (status === "locked" || (status === "closed" && !topicReopened)) {
     res.status(403).json({ success: false, message: "Imtihon hozircha ochiq emas yoki muddati tugagan" })
     return
   }
@@ -1971,6 +2027,7 @@ router.post("/content/:id/exam-submit", async (req: AuthRequest, res: Response):
   const existing = await getSubmissionForStudent(content.id, sId)
 
   // Agar talaba allaqachon o'tish balini olgan bo'lsa — qayta urinishga yo'l qo'ymaslik
+  // (mavzu qayta ochilgan bo'lsa ham — allaqachon o'tgan talabaning bahosi pasaymasligi kerak)
   if (existing && existing.grade !== null) {
     const passThreshold = (content.maxScore !== null && content.maxScore > 0)
       ? content.maxScore * EXAM_PASS_RATIO
@@ -1983,9 +2040,10 @@ router.post("/content/:id/exam-submit", async (req: AuthRequest, res: Response):
 
   // Urinishlar limitini tekshirish (0 yoki null = cheksiz)
   const maxAttempts = content.attemptsCount && content.attemptsCount > 0 ? content.attemptsCount : null
-  // Admin qayta urinish ruxsati bergan bo'lsa (retake grant), limitga qaramasdan o'tkaziladi
+  // Admin qayta urinish ruxsati bergan bo'lsa (retake grant) yoki mavzu qayta
+  // ochilgan bo'lsa, limitga qaramasdan o'tkaziladi
   const activeGrant = maxAttempts !== null ? await getActiveRetakeGrant(content.id, sId) : null
-  if (existing && maxAttempts !== null && existing.attemptsUsed >= maxAttempts && !activeGrant) {
+  if (existing && maxAttempts !== null && existing.attemptsUsed >= maxAttempts && !activeGrant && !topicReopened) {
     res.status(409).json({
       success: false,
       message: `Siz bu imtihonga ${maxAttempts} marta urinib bo'ldingiz`,
@@ -2059,7 +2117,7 @@ router.get("/content/:id/adaptive/next", async (req: AuthRequest, res: Response)
     return
   }
   const status = contentStatus(new Date(), content.availableFrom, content.deadline)
-  if (status !== "open") {
+  if (status === "locked" || (status === "closed" && !(await isTopicReopened(content.topicKey)))) {
     res.status(403).json({ success: false, message: "Imtihon hozircha ochiq emas" })
     return
   }
@@ -2121,7 +2179,7 @@ router.post("/content/:id/adaptive/answer", async (req: AuthRequest, res: Respon
     return
   }
   const status = contentStatus(new Date(), content.availableFrom, content.deadline)
-  if (status !== "open") {
+  if (status === "locked" || (status === "closed" && !(await isTopicReopened(content.topicKey)))) {
     res.status(403).json({ success: false, message: "Imtihon hozircha ochiq emas" })
     return
   }

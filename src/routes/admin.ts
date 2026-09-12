@@ -4,7 +4,7 @@ import { Router, Response, NextFunction } from "express"
 import type { RowDataPacket } from "mysql2"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
-import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, teacherUserId, studentUserId, safeMimeType } from "../services/teachingStore"
+import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen } from "../services/teachingStore"
 import { listQuestions, isExamPassed } from "../services/examStore"
 import { grantRetake, revokeRetakeGrant } from "../services/retakeStore"
 import {
@@ -1168,6 +1168,74 @@ router.get("/teacher-info", adminOnly, async (req: AuthRequest, res: Response): 
         .sort((a, b) => a.name.localeCompare(b.name)),
     },
   })
+})
+
+/* ── GET /admin/teacher-topics-list — bitta o'qituvchi+fan+guruh bo'yicha
+   mavzular ro'yxati (deadline, qayta ochish holati, test/topshiriq bormi) ── */
+router.get("/teacher-topics-list", requirePermission("retake", "view"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const teacherIdRaw = Number(req.query.teacherId)
+  const teacherId = Number.isFinite(teacherIdRaw) ? teacherIdRaw : null
+  const subjectName = textVal(String(req.query.subject ?? ""))
+  const groupIdRaw = Number(req.query.groupId)
+  const groupId = Number.isFinite(groupIdRaw) ? groupIdRaw : null
+  if (teacherId === null || !subjectName || groupId === null) {
+    res.status(400).json({ success: false, message: "teacherId, subject va groupId majburiy" })
+    return
+  }
+
+  const items = await listTeacherContent({ teacherUserId: teacherId, groupId, subjectName })
+  const byTopic = new Map<string, typeof items>()
+  for (const item of items) {
+    if (!item.topicKey) continue
+    if (!byTopic.has(item.topicKey)) byTopic.set(item.topicKey, [])
+    byTopic.get(item.topicKey)!.push(item)
+  }
+
+  const topics = Array.from(byTopic.entries())
+    .map(([topicKey, group]) => {
+      const marker = group.find(i => i.type === "mavzu" && i.kind === "topic")
+      const test = group.find(i => i.type === "exam")
+      const assignment = group.find(i => i.type === "assignment")
+      if (!marker) return null
+      const deadlinePassed = !!marker.deadline && new Date(marker.deadline).getTime() < Date.now()
+      return {
+        topicKey,
+        title: marker.title,
+        deadline: marker.deadline,
+        deadlinePassed,
+        isReopened: marker.isReopened,
+        reopenedBy: marker.reopenedBy,
+        hasTest: !!test,
+        testId: test?.id ?? null,
+        hasAssignment: !!assignment,
+        assignmentId: assignment?.id ?? null,
+      }
+    })
+    .filter((t): t is NonNullable<typeof t> => t !== null)
+    .sort((a, b) => a.topicKey.localeCompare(b.topicKey, undefined, { numeric: true }))
+
+  res.json({ success: true, data: topics })
+})
+
+/* ── POST /admin/topics/:topicKey/reopen — admin istalgan vaqt qayta ochadi ── */
+router.post("/topics/:topicKey/reopen", requirePermission("retake", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const topicKey = textVal(String(req.params.topicKey ?? ""))
+  const marker = topicKey ? await findTopicMarker(topicKey) : null
+  if (!marker) { res.status(404).json({ success: false, message: "Mavzu topilmadi" }); return }
+  const by = textVal(String(req.user?.fullName ?? ""), String(req.user?.username ?? "")) || "Admin"
+  await setTopicReopen(topicKey, true, by)
+  void logAudit(req, "topic.reopen", "retake", topicKey)
+  res.json({ success: true, message: "Mavzu qayta ochildi" })
+})
+
+/* ── POST /admin/topics/:topicKey/close — admin yopadi ─────────────────── */
+router.post("/topics/:topicKey/close", requirePermission("retake", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const topicKey = textVal(String(req.params.topicKey ?? ""))
+  const marker = topicKey ? await findTopicMarker(topicKey) : null
+  if (!marker) { res.status(404).json({ success: false, message: "Mavzu topilmadi" }); return }
+  await setTopicReopen(topicKey, false, null)
+  void logAudit(req, "topic.close", "retake", topicKey)
+  res.json({ success: true, message: "Mavzu yopildi" })
 })
 
 /* ── GET /api/admin/platform-attendance — platforma asosida davomat ─── */

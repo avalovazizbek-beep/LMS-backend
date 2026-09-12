@@ -334,6 +334,9 @@ export interface TeacherContentRecord {
   lessonDate: string | null
   delivered: boolean
   isActive: boolean
+  isReopened: boolean
+  reopenedBy: string | null
+  reopenedAt: string | null
   status: ContentStatus
   questionCount: number
   createdAt: string
@@ -410,6 +413,9 @@ async function mapContentRow(row: mysql.RowDataPacket): Promise<TeacherContentRe
     lessonDate: row.lesson_date ? toMysqlDateOnly(new Date(row.lesson_date)) : null,
     delivered: Boolean(row.delivered),
     isActive: row.is_active == null ? true : Boolean(row.is_active),
+    isReopened: Boolean(row.is_reopened),
+    reopenedBy: row.reopened_by ?? null,
+    reopenedAt: row.reopened_at ? fromMysqlDate(row.reopened_at) : null,
     status: contentStatus(new Date(), availableFrom, deadline),
     questionCount: row.question_count == null ? 0 : Number(row.question_count),
     createdAt: fromMysqlDate(row.created_at),
@@ -571,6 +577,37 @@ export async function getTeacherContent(id: number): Promise<TeacherContentRecor
     [id]
   )
   return rows.length ? mapContentRow(rows[0]) : null
+}
+
+/** Berilgan topicKey'ning "mavzu" belgi (marker) qatorini topadi — mavzu
+    darajasidagi deadline va "qayta ochish" holati shu qatorda saqlanadi. */
+export async function findTopicMarker(topicKey: string): Promise<TeacherContentRecord | null> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT ${CONTENT_SELECT} FROM lms_teacher_content WHERE topic_key = ? AND type = 'mavzu' AND kind = 'topic' LIMIT 1`,
+    [topicKey]
+  )
+  return rows.length ? mapContentRow(rows[0]) : null
+}
+
+/** Shu mavzu hozir "qayta ochilgan" holatidami — bo'lsa, o'sha mavzudagi
+    test/topshiriq deadline/urinish chegarasidan qat'i nazar qabul qilinadi. */
+export async function isTopicReopened(topicKey: string | null): Promise<boolean> {
+  if (!topicKey) return false
+  const marker = await findTopicMarker(topicKey)
+  return marker?.isReopened === true
+}
+
+/** Mavzuni "qayta ochish" — shu mavzudagi test/topshiriqni deadline/urinish
+    chegarasidan qat'i nazar qayta topshirishga ruxsat beradi (allaqachon
+    o'tgan baho esa hech qachon qayta yozilmaydi — bu boshqa joyda tekshiriladi). */
+export async function setTopicReopen(topicKey: string, reopened: boolean, by: string | null): Promise<boolean> {
+  const [result] = await pool.query<mysql.ResultSetHeader>(
+    `UPDATE lms_teacher_content
+     SET is_reopened = ?, reopened_by = ?, reopened_at = ${reopened ? "CURRENT_TIMESTAMP" : "NULL"}
+     WHERE topic_key = ? AND type = 'mavzu' AND kind = 'topic'`,
+    [reopened ? 1 : 0, reopened ? by : null, topicKey]
+  )
+  return result.affectedRows > 0
 }
 
 export interface UpdateContentInput {

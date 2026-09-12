@@ -305,6 +305,11 @@ export async function initDatabase() {
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN language VARCHAR(20) NULL AFTER question_display_count`)
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN topic_key VARCHAR(255) NULL AFTER subject_name`)
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD INDEX idx_teacher_content_topic_key (topic_key)`)
+  // Mavzuni "qayta ochish" — deadline'dan keyin ham shu mavzudagi test/topshiriqni
+  // qayta topshirishga ruxsat berish (o'qituvchi: faqat deadline'gacha, admin: istalgan vaqt)
+  await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN is_reopened TINYINT(1) NOT NULL DEFAULT 0 AFTER is_active`)
+  await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN reopened_by VARCHAR(255) NULL AFTER is_reopened`)
+  await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN reopened_at TIMESTAMP NULL AFTER reopened_by`)
 
   // ── O'qituvchi yuklagan kontentga biriktirilgan qo'shimcha fayllar (bir nechta) ──
   await exec(`
