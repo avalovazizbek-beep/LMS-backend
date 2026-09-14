@@ -3388,9 +3388,45 @@ router.get("/employee/:resource", async (req: AuthRequest, res: Response) => {
   }
 })
 
+/**
+ * OAuth talaba uchun: guruhning _curriculum'ini (/v1/data/group-list)
+ * topib, shu bo'yicha semestrlar ro'yxatini (/v1/data/semester-list)
+ * admin token bilan o'qiydi — talabaning shaxsiy (Student API'da
+ * ishlamaydigan) tokeniga bog'liq emas.
+ */
+async function semestersFromCurriculum(groupId: string) {
+  const groupItems = await employeeDataAllItems("/v1/data/group-list", { id: groupId, limit: "1" }, undefined)
+  const curriculumId = textValue(asRecord(groupItems[0])._curriculum)
+  if (!curriculumId) return []
+  const items = await employeeDataAllItems("/v1/data/semester-list", { _curriculum: curriculumId, limit: "200" }, undefined)
+  return items.map((item) => {
+    const r = asRecord(item)
+    return {
+      id:      numberValue(r.id) ?? 0,
+      code:    textValue(r.code) ?? "",
+      name:    textValue(r.name) ?? "",
+      current: Boolean(r.current),
+    }
+  })
+}
+
 router.get("/semesters", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
+
+  if (req.user?.studentAuthMode === "oauth") {
+    const groupId = textValue(req.user?.groupId)
+    if (!groupId) { res.json({ success: true, data: [] }); return }
+    try {
+      const r = await withHemisCache(reqUserId(req), "semesters",
+        () => semestersFromCurriculum(groupId), TTL_24H)
+      res.json({ success: true, data: r.data, source: r.source })
+    } catch (err) {
+      res.status(502).json({ success: false, message: extractMessage(err) })
+    }
+    return
+  }
+
   try {
     const r = await withHemisCache(reqUserId(req), "semesters",
       () => hemisGet(HEMIS, "/v1/education/semesters", hToken), TTL_24H)
@@ -3611,11 +3647,45 @@ router.get("/performance", async (req: AuthRequest, res: Response) => {
   }
 })
 
+/**
+ * OAuth talaba uchun: /v1/data/student-gpa-list'dan (_student filtri
+ * bilan, admin token orqali) GPA tarixini o'qiydi.
+ */
+async function gpaFromBackendApi(studentId: string, fullName: string) {
+  const items = await employeeDataAllItems("/v1/data/student-gpa-list", { _student: studentId, limit: "200" }, undefined)
+  return items.map((item) => {
+    const r = asRecord(item)
+    const eduYear = asRecord(r.educationYear)
+    const level = asRecord(r.level)
+    return {
+      id: String(numberValue(r.id) ?? ""),
+      student: { id: studentId, name: fullName },
+      gpa: numberValue(r.gpa) ?? 0,
+      educationYear: { id: textValue(eduYear.code) ?? "", name: textValue(eduYear.name) ?? "" },
+      level: { id: textValue(level.code) ?? "", name: textValue(level.name) ?? "" },
+    }
+  })
+}
+
 /* ── GET /api/hemis/gpa ──────────────────────────────────────────── */
 // Student API: /v1/education/gpa-list  (NOT /v1/data/student-gpa-list)
 router.get("/gpa", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
+
+  if (req.user?.studentAuthMode === "oauth") {
+    const studentId = textValue(req.user?.id, req.user?.userId)
+    if (!studentId) { res.json({ success: true, data: [] }); return }
+    try {
+      const r = await withHemisCache(reqUserId(req), "gpa",
+        () => gpaFromBackendApi(studentId, textValue(req.user?.fullName) ?? ""), TTL_4H)
+      res.json({ success: true, data: r.data, source: r.source })
+    } catch (err) {
+      res.status(502).json({ success: false, message: extractMessage(err) })
+    }
+    return
+  }
+
   try {
     const r = await withHemisCache(reqUserId(req), "gpa",
       () => hemisGet(HEMIS, "/v1/education/gpa-list", hToken), TTL_4H)
