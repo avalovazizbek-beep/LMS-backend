@@ -1,7 +1,7 @@
 import { Router, Response } from "express"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { teacherUserId, studentUserId } from "../services/teachingStore"
-import { getAnnouncement, listActiveForUser, dismissForUser, type AnnouncementRecord } from "../services/announcementStore"
+import { getAnnouncement, listActiveForUser, listActiveForAudience, dismissForUser, type AnnouncementRecord } from "../services/announcementStore"
 import { isAdminUser } from "./admin"
 import { streamPrivateFile } from "./teaching"
 
@@ -37,6 +37,16 @@ router.get("/mine", async (req: AuthRequest, res: Response): Promise<void> => {
   const role = req.user?.role
   if (role !== "student" && role !== "employee") { res.json({ success: true, data: [] }); return }
   const items = await listActiveForUser(role, currentUserId(req))
+  res.json({ success: true, data: items.map(toPublicShape) })
+})
+
+/* ── GET /api/announcements/guide — Yo'riqnoma sahifasi uchun: joriy ── */
+/*    foydalanuvchi auditoriyasiga mos barcha FAOL e'lonlar (popup'dan   */
+/*    farqli — dismiss qilingan bo'lsa ham ko'rinib turadi) ───────────── */
+router.get("/guide", async (req: AuthRequest, res: Response): Promise<void> => {
+  const role = req.user?.role
+  if (role !== "student" && role !== "employee") { res.json({ success: true, data: [] }); return }
+  const items = await listActiveForAudience(role)
   res.json({ success: true, data: items.map(toPublicShape) })
 })
 

@@ -190,6 +190,22 @@ export async function listActiveForUser(role: AnnouncementAudience, userId: numb
   return rows.map(mapRow)
 }
 
+// Yo'riqnoma sahifasi uchun: joriy foydalanuvchi auditoriyasiga mos barcha
+// FAOL e'lonlar — foydalanuvchi popup'ni "X" bosib yopgan (dismiss qilgan)
+// bo'lishidan qat'iy nazar. listActiveForUser'dan farqi shu — u yerda
+// yopilgan e'lon boshqa qaytmaydi (bir martalik popup), bu yerda esa
+// Yo'riqnoma doimiy ko'rinib turishi kerak bo'lgani uchun dismiss'ga
+// qaramaydi.
+export async function listActiveForAudience(role: AnnouncementAudience): Promise<AnnouncementRecord[]> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT * FROM lms_announcements
+     WHERE is_active = 1 AND (audience = 'all' OR audience = ?)
+     ORDER BY created_at DESC`,
+    [role]
+  )
+  return rows.map(mapRow)
+}
+
 export async function dismissForUser(userId: number, announcementIds: number[]): Promise<void> {
   for (const id of announcementIds) {
     await pool.query(
