@@ -617,8 +617,16 @@ function fixName(value: unknown): string {
 }
 
 function extractMessage(err: unknown, fallback = "Xatolik yuz berdi"): string {
-  const e = err as AxiosError<{ message?: string; errors?: unknown }>
-  const hemisMsg = e?.response?.data?.message
+  const e = err as AxiosError<{ message?: string; error?: string; errors?: unknown; data?: { error?: string } }>
+  // HEMIS rate-limit/captcha javobi {"error":"...","data":{"error":"CAPTCHA_REQUIRED"},"code":429}
+  // shaklida keladi — "message" emas "error" maydonini ishlatadi. Buni
+  // "Login yoki parol noto'g'ri"ga aralashtirmaslik MUHIM, aks holda
+  // foydalanuvchi parolini to'g'ri kiritgan bo'lsa ham chalg'ituvchi
+  // xabar ko'radi.
+  if (e?.response?.status === 429 || e?.response?.data?.data?.error === "CAPTCHA_REQUIRED") {
+    return "HEMIS: juda ko'p urinish qilindi, bir necha daqiqadan so'ng qaytadan urinib ko'ring"
+  }
+  const hemisMsg = e?.response?.data?.message || e?.response?.data?.error
   if (hemisMsg && hemisMsg.trim()) return hemisMsg.trim()
   if (e?.response?.status === 401) return "Login yoki parol noto'g'ri"
   if (e?.response?.status === 403) return "Ruxsat yo'q"
