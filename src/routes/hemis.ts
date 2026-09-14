@@ -3543,11 +3543,23 @@ async function semestersFromCurriculum(groupId: string) {
   const items = await employeeDataAllItems("/v1/data/semester-list", { _curriculum: curriculumId, limit: "200" }, undefined)
   return items.map((item) => {
     const r = asRecord(item)
+    const curriculumWeeks = Array.isArray(r.curriculumWeeks)
+      ? r.curriculumWeeks.map((week) => {
+          const value = asRecord(week)
+          return {
+            id:         numberValue(value.id) ?? 0,
+            start_date: numberValue(value.start_date) ?? 0,
+            end_date:   numberValue(value.end_date) ?? 0,
+            current:    Boolean(value.current),
+          }
+        }).filter((week) => week.id > 0 && week.start_date > 0 && week.end_date > 0)
+      : []
     return {
-      id:      numberValue(r.id) ?? 0,
-      code:    textValue(r.code) ?? "",
-      name:    textValue(r.name) ?? "",
-      current: Boolean(r.current),
+      id:              numberValue(r.id) ?? 0,
+      code:            textValue(r.code) ?? "",
+      name:            textValue(r.name) ?? "",
+      current:         Boolean(r.current),
+      curriculumWeeks,
     }
   })
 }
@@ -3560,7 +3572,7 @@ router.get("/semesters", async (req: AuthRequest, res: Response) => {
     const groupId = textValue(req.user?.groupId)
     if (!groupId) { res.json({ success: true, data: [] }); return }
     try {
-      const r = await withHemisCache(reqUserId(req), "semesters",
+      const r = await withHemisCache(reqUserId(req), "semesters:v2",
         () => semestersFromCurriculum(groupId), TTL_24H)
       res.json({ success: true, data: r.data, source: r.source })
     } catch (err) {
