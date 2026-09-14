@@ -2812,13 +2812,15 @@ router.post("/auto-login", async (req, res: Response) => {
   } catch { /* demo tekshiruvi muvaffaqiyatsiz bo'lsa — real HEMIS urinishiga o'tamiz */ }
 
   const details: string[] = []
+  let studentError = ""
   try {
     const result = await createStudentPasswordSession(login, password)
     void saveUserToDb(result.token, "student", password)
     res.json(result)
     return
   } catch (err) {
-    details.push(`Talaba API: ${extractMessage(err, "Login yoki parol noto'g'ri")}`)
+    studentError = extractMessage(err, "Login yoki parol noto'g'ri")
+    details.push(`Talaba API: ${studentError}`)
   }
 
   try {
@@ -2835,10 +2837,17 @@ router.post("/auto-login", async (req, res: Response) => {
     }
   }
 
-  res.status(409).json({
+  // Xodim/Tutor API doim generik "OAuth kerak" turidagi xato beradi (u
+  // orqali oddiy xodim paroli REST'da umuman tasdiqlanmaydi — bu kutilgan
+  // holat, hodimlar OAuth tugmasidan foydalanadi). Shuning uchun
+  // foydalanuvchiga ko'rsatiladigan asosiy xabar HAR DOIM talaba
+  // urinishining haqiqiy natijasi bo'lishi kerak — aks holda parolini
+  // chindan xato kiritgan talabaga "siz xodim ekansiz, OAuth orqali
+  // kiring" degan noto'g'ri va chalg'ituvchi xabar ko'rsatilardi.
+  res.status(401).json({
     success: false,
     oauthRequired: true,
-    message: "Xodim yoki o'qituvchi HEMIS OAuth orqali kirishi kerak",
+    message: studentError || "Login yoki parol noto'g'ri",
     details: process.env.NODE_ENV === "development" ? details : undefined,
   })
 })
