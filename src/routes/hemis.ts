@@ -934,15 +934,18 @@ function signEmployeeToken(
   )
 }
 
-// Send both Bearer header (Student API /v1/education/*) AND ?access-token= (older endpoints)
+// Student API uchun Bearer header va eski `access-token` query parametri kerak.
+// Backend API esa faqat Bearer tokenni qabul qiladi; `access-token` query
+// parametri unda JWT sifatida tekshirilib, Backend API tokenini rad etadi.
 async function hemisGet<T = unknown>(
   base: string,
   path: string,
   token: string,
-  params: Record<string, string> = {}
+  params: Record<string, string> = {},
+  includeAccessTokenParam = true
 ): Promise<T> {
   const url = new URL(`${base}${path}`)
-  url.searchParams.set("access-token", token)
+  if (includeAccessTokenParam) url.searchParams.set("access-token", token)
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
   const res = await axios.get<T>(url.toString(), {
     headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
@@ -1356,7 +1359,7 @@ async function enrichEmployeeProfile(profile: Record<string, unknown>) {
         type: "all",
         limit: "5",
         search,
-      })
+      }, false)
       const items = unwrapHemisData(data)
       if (Array.isArray(items) && items.length) {
         const exact = items.find((item) => {
@@ -1585,12 +1588,12 @@ function employeeDataParams(path: string, params: Record<string, string>, user?:
 }
 
 async function employeeDataItems(path: string, params: Record<string, string>, user?: AuthRequest["user"]) {
-  const data = await hemisGet(HEMIS_BASE, path, HEMIS_TOKEN, employeeDataParams(path, params, user))
+  const data = await hemisGet(HEMIS_BASE, path, HEMIS_TOKEN, employeeDataParams(path, params, user), false)
   return unwrapHemisData(data)
 }
 
 async function employeeDataPage(path: string, params: Record<string, string>, user?: AuthRequest["user"]) {
-  const data = await hemisGet(HEMIS_BASE, path, HEMIS_TOKEN, employeeDataParams(path, params, user))
+  const data = await hemisGet(HEMIS_BASE, path, HEMIS_TOKEN, employeeDataParams(path, params, user), false)
   return {
     items: unwrapHemisData(data),
     pagination: unwrapHemisPagination(data),
@@ -1621,7 +1624,7 @@ async function employeeDataFirstItems(path: string, params: Record<string, strin
 }
 
 async function employeeDataTotal(path: string, params: Record<string, string>, user?: AuthRequest["user"]) {
-  const data = await hemisGet(HEMIS_BASE, path, HEMIS_TOKEN, employeeDataParams(path, { ...params, page: "1", limit: "1" }, user))
+  const data = await hemisGet(HEMIS_BASE, path, HEMIS_TOKEN, employeeDataParams(path, { ...params, page: "1", limit: "1" }, user), false)
   const totalCount = numberValue(unwrapHemisPagination(data).totalCount)
   return totalCount ?? itemCount(unwrapHemisData(data))
 }
