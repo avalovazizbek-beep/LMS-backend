@@ -337,7 +337,12 @@ export async function syncTeacherFromHemis(token: string) {
     // (/ver1/tutor/profile/groups, keyin /ver1/tutor/group/list) —
     // o'qituvchining HEMIS'da unga biriktirilgan guruhlarini
     // to'g'ridan-to'g'ri qaytaradi, _employee filtriga bog'liq emas.
-    let groups = await fetchTutorGroups(user)
+    // Bu endpointlar faqat haqiqiy Tutor JWT'ni qabul qiladi — OAuth yoki
+    // boshqa usulda kirgan xodimning hemisToken'i bilan so'ralsa doim
+    // 401/403 bilan tugaydi, shuning uchun faqat employeeAuthMode==="tutor"
+    // bo'lganda so'raladi (aks holda to'g'ridan-to'g'ri schedule-list
+    // asosidagi zaxira usulga o'tiladi).
+    let groups = user.employeeAuthMode === "tutor" ? await fetchTutorGroups(user) : []
 
     // Dars jadvali (va, agar tutor/group/list bo'sh bo'lsa, undan guruhlar)
     // _employee aniqlangandagina so'raladi — aks holda /v1/data/schedule-list

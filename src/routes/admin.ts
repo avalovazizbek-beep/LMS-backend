@@ -1030,7 +1030,7 @@ router.post("/hemis-sync", adminOnly, async (_req: AuthRequest, res: Response): 
     const [gradeRows] = await pool.query<RowDataPacket[]>(`
       SELECT
         pg.group_id, pg.subject_name, pg.grade_type, pg.student_user_id,
-        MAX(hu.full_name) AS student_name, pg.grade
+        hu.full_name AS student_name, pg.grade
       FROM lms_period_grades pg
       LEFT JOIN hemis_users hu ON CAST(hu.hemis_id AS UNSIGNED) = pg.student_user_id
       WHERE pg.grade IS NOT NULL
