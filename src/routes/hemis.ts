@@ -3903,11 +3903,61 @@ router.get("/tasks", async (req: AuthRequest, res: Response) => {
   }
 })
 
+/**
+ * OAuth talaba uchun: /v1/data/contract-list'dan (_student filtri
+ * bilan, admin token orqali). HEMIS javobidagi "attributes" lug'ati
+ * maydon nomlarining o'zbekcha izohini beradi — shu orqali
+ * paidCreditAmount aynan "To'langan summa" ekani (kredit emas)
+ * tasdiqlangan, shuning uchun moliyaviy summalarni xato talqin qilish
+ * xavfisiz xaritalanadi.
+ */
+async function contractsFromBackendApi(studentId: string, fullName: string) {
+  const items = await employeeDataAllItems("/v1/data/contract-list", { _student: studentId, limit: "50" }, undefined)
+  return {
+    items: items.map((item) => {
+      const r = asRecord(item)
+      const d = asRecord(r._data)
+      return {
+        id: numberValue(r.id) ?? 0,
+        _data: {
+          contractNumber:     textValue(d.contractNumber) ?? "",
+          contractAmount:     numberValue(d.eduContractSum) ?? 0,
+          paidAmount:         numberValue(d.paidCreditAmount) ?? 0,
+          debitAmount:        numberValue(d.endRestDebetAmount) ?? 0,
+          endRestDebetAmount: numberValue(d.endRestDebetAmount) ?? 0,
+          status:             textValue(d.status) ?? "",
+          course:             textValue(d.eduCourse) ?? "",
+          speciality:         textValue(d.eduSpecialityName) ?? "",
+          lastPaymentDate:    "",
+          eduYear:            textValue(d.eduYear) ?? "",
+          fullName,
+        },
+        created_at: numberValue(r.created_at) ?? 0,
+      }
+    }),
+    attributes: {},
+  }
+}
+
 /* ── GET /api/hemis/contract-list ────────────────────────────────── */
 router.get("/contract-list", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
   if (isDemoUser(req.user)) { res.json({ success: true, data: mockContractList(req.user), source: "demo" }); return }
+
+  if (req.user?.studentAuthMode === "oauth") {
+    const studentId = textValue(req.user?.id, req.user?.userId)
+    if (!studentId) { res.json({ success: true, data: { items: [], attributes: {} } }); return }
+    try {
+      const r = await withHemisCache(reqUserId(req), "contract-list",
+        () => contractsFromBackendApi(studentId, textValue(req.user?.fullName) ?? ""), TTL_4H)
+      res.json({ success: true, data: r.data, source: r.source })
+    } catch (err) {
+      res.status(502).json({ success: false, message: extractMessage(err) })
+    }
+    return
+  }
+
   try {
     const r = await withHemisCache(reqUserId(req), "contract-list",
       () => hemisGet(HEMIS, "/v1/student/contract-list", hToken), TTL_4H)
