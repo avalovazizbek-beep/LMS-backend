@@ -120,6 +120,30 @@ export function mockSchedule(user?: AuthUser) {
   }))
 }
 
+/**
+ * O'qituvchining "davomat jurnali" (attendance-journal) resursi —
+ * Meeting yaratish oynasidagi guruh tanlash ro'yxati aynan shu resursdan
+ * o'qiladi (frontend: extractTeacherGroups). Demo hisob uchun bu haqiqiy
+ * HEMIS'ga so'ralmaydi (demo-token bilan HEMIS baribir bo'sh/xato
+ * qaytaradi) — shu sabab guruh nomi "Guruh 9901" kabi umumiy fallback'ga
+ * tushib qolmasligi uchun demo guruhlarni (GROUP_NAMES) shu yerda
+ * to'g'ridan-to'g'ri qaytaramiz.
+ */
+export function mockAttendanceJournal(user?: AuthUser) {
+  const rawIds = Array.isArray(user?.teacherGroupIds) ? user.teacherGroupIds : []
+  const groupIds = rawIds.map(Number).filter((n) => Number.isFinite(n) && n > 0)
+  const ids = groupIds.length ? groupIds : [9901, 9902]
+  return ids.map((groupId, i) => ({
+    id: i + 1,
+    subject: { id: 1, code: "DF-101", name: DEMO_SUBJECT },
+    semester: SEMESTER,
+    employee: { id: 9501, name: "Demo O'qituvchi" },
+    group: { id: groupId, name: groupName(groupId) },
+    lessonPair: { name: "1-para", start_time: "09:00", end_time: "10:20" },
+    lesson_date: Math.floor(Date.now() / 1000),
+  }))
+}
+
 export function mockAttendance(user?: AuthUser) {
   const dates = weekLessonDates(10, 4) // o'tgan ikki hafta
   return dates.map((lesson_date, i) => ({

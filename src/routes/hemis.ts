@@ -15,6 +15,7 @@ import { recordPlatformSession } from "../services/attendanceStore"
 import {
   isDemoUser, mockStudentMe, mockEmployeeMe, mockSchedule, mockAttendance,
   mockGrades, mockPerformance, mockDocuments, mockCertificates, mockContractList,
+  mockAttendanceJournal,
 } from "../services/demoHemis"
 import {
   teacherUserId,
@@ -3329,8 +3330,17 @@ router.get("/employee/:resource", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
 
+  const resource = String(req.params.resource || "").trim()
+
+  // Demo hisob uchun "attendance-journal" haqiqiy HEMIS'ga so'ralganda
+  // bo'sh qaytadi (demo-token ishlamaydi) — shu sabab Meeting yaratishda
+  // guruh nomlari "Guruh 9901" kabi umumiy fallback'ga tushib qolardi.
+  if (isDemoUser(req.user) && resource === "attendance-journal") {
+    res.json({ success: true, data: mockAttendanceJournal(req.user), source: "demo" })
+    return
+  }
+
   try {
-    const resource = String(req.params.resource || "").trim()
     const result = await employeeResourceData(
       resource,
       hToken,
