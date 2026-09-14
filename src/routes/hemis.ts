@@ -140,6 +140,37 @@ const JWT_SECRET = process.env.JWT_SECRET || "secret"
 // bilan muvaffaqiyatsiz tugaydi.
 const HEMIS_TIMEOUT_MS = 20_000
 
+// HEMIS login-bilan-bog'liq so'rovlarini (parol orqali kirish) navbatga
+// qo'yish — 1000+ talaba bir zumda "Kirish" bossa, hammasi bir vaqtda
+// portlab HEMIS'ga bormasin (aynan shu "zarba" HEMIS'ning soniyalik/burst
+// anti-abuse chegarasini tezroq ishga tushiradi). Bir vaqtning o'zida
+// faqat MAX_CONCURRENT_HEMIS_LOGIN dona so'rov yuboriladi, qolganlari
+// navbatda millisekundlar ichida kutib, keyin ketma-ket yuboriladi — umumiy
+// so'rovlar soni o'zgarmaydi, faqat vaqt bo'yicha tekisroq taqsimlanadi.
+// OAuth orqali kirish bu navbatga kirmaydi — u HEMIS'ning parolni
+// tekshiradigan endpointiga umuman tegmaydi.
+const MAX_CONCURRENT_HEMIS_LOGIN = 5
+let activeHemisLogins = 0
+const hemisLoginQueue: Array<() => void> = []
+
+function acquireHemisLoginSlot(): Promise<() => void> {
+  return new Promise((resolve) => {
+    const tryAcquire = () => {
+      if (activeHemisLogins < MAX_CONCURRENT_HEMIS_LOGIN) {
+        activeHemisLogins++
+        resolve(() => {
+          activeHemisLogins--
+          const next = hemisLoginQueue.shift()
+          if (next) next()
+        })
+      } else {
+        hemisLoginQueue.push(tryAcquire)
+      }
+    }
+    tryAcquire()
+  })
+}
+
 /* ── Cache helpers ──────────────────────────────────────────────────── */
 const TTL_1H  = 60 * 60 * 1000
 const TTL_4H  = 4 * 60 * 60 * 1000
@@ -623,6 +654,15 @@ function fixName(value: unknown): string {
   return fixEncoding(String(value ?? "").trim())
 }
 
+// Front-end shu flag orqali "login/parol xato" bilan "HEMIS band, biroz
+// kuting"ni aniq ajratadi — birinchisida foydalanuvchi parolni qayta
+// tekshirsin, ikkinchisida esa unga darhol OAuth orqali kirish yo'lini
+// (bu limitga tegmaydigan yo'l) taklif qilish kerak.
+function isRateLimitedError(err: unknown): boolean {
+  const e = err as AxiosError<{ data?: { error?: string } }>
+  return e?.response?.status === 429 || e?.response?.data?.data?.error === "CAPTCHA_REQUIRED"
+}
+
 function extractMessage(err: unknown, fallback = "Xatolik yuz berdi"): string {
   const e = err as AxiosError<{ message?: string; error?: string; errors?: unknown; data?: { error?: string } }>
   // HEMIS rate-limit/captcha javobi {"error":"...","data":{"error":"CAPTCHA_REQUIRED"},"code":429}
@@ -630,7 +670,7 @@ function extractMessage(err: unknown, fallback = "Xatolik yuz berdi"): string {
   // "Login yoki parol noto'g'ri"ga aralashtirmaslik MUHIM, aks holda
   // foydalanuvchi parolini to'g'ri kiritgan bo'lsa ham chalg'ituvchi
   // xabar ko'radi.
-  if (e?.response?.status === 429 || e?.response?.data?.data?.error === "CAPTCHA_REQUIRED") {
+  if (isRateLimitedError(err)) {
     return "HEMIS: juda ko'p urinish qilindi, bir necha daqiqadan so'ng qaytadan urinib ko'ring"
   }
   const hemisMsg = e?.response?.data?.message || e?.response?.data?.error
@@ -873,6 +913,7 @@ async function tutorPasswordLogin(base: string, login: string, password: string)
   const errors: string[] = []
 
   for (const payload of payloads) {
+    const release = await acquireHemisLoginSlot()
     try {
       const { data } = await axios.post<{ success?: boolean; data?: { token?: string; access_token?: string }; token?: string; access_token?: string; message?: string }>(
         `${base}/ver1/tutor/auth/login`,
@@ -886,6 +927,8 @@ async function tutorPasswordLogin(base: string, login: string, password: string)
       return hemisToken
     } catch (err) {
       errors.push(extractMessage(err, "Login yoki parol noto'g'ri"))
+    } finally {
+      release()
     }
   }
 
@@ -2659,11 +2702,17 @@ async function employeeResourceData(
 async function createStudentPasswordSession(login: string, password: string) {
   const normalizedPassword = password.trim()
 
-  const { data } = await axios.post<{ success?: boolean; data?: { token: string }; message?: string }>(
-    `${HEMIS}/v1/auth/login`,
-    { login, password: normalizedPassword },
-    { headers: { "Content-Type": "application/json", Accept: "application/json" }, timeout: HEMIS_TIMEOUT_MS }
-  )
+  const release = await acquireHemisLoginSlot()
+  let data: { success?: boolean; data?: { token: string }; message?: string }
+  try {
+    ;({ data } = await axios.post<{ success?: boolean; data?: { token: string }; message?: string }>(
+      `${HEMIS}/v1/auth/login`,
+      { login, password: normalizedPassword },
+      { headers: { "Content-Type": "application/json", Accept: "application/json" }, timeout: HEMIS_TIMEOUT_MS }
+    ))
+  } finally {
+    release()
+  }
   const hemisToken = data?.data?.token
   if (!hemisToken) {
     throw new Error(data?.message?.trim() || "Talaba login/paroli tasdiqlanmadi")
@@ -2765,7 +2814,11 @@ router.post("/login", async (req, res: Response) => {
   } catch (err) {
     const e = err as AxiosError<{ message?: string }>
     console.error("[HEMIS student login]", e?.response?.status, e?.response?.data)
-    res.status(401).json({ success: false, message: extractMessage(err, "Login yoki parol noto'g'ri") })
+    res.status(401).json({
+      success: false,
+      message: extractMessage(err, "Login yoki parol noto'g'ri"),
+      rateLimited: isRateLimitedError(err),
+    })
   }
 })
 
@@ -2788,6 +2841,7 @@ router.post("/employee-login", async (req, res: Response) => {
       success: false,
       message: extractMessage(err, "Login yoki parol noto'g'ri"),
       details: (err as { details?: unknown }).details,
+      rateLimited: isRateLimitedError(err),
     })
   }
 })
@@ -2838,6 +2892,7 @@ router.post("/auto-login", async (req, res: Response) => {
 
   const details: string[] = []
   let studentError = ""
+  let studentRateLimited = false
   try {
     const result = await createStudentPasswordSession(login, password)
     void saveUserToDb(result.token, "student", password)
@@ -2845,6 +2900,7 @@ router.post("/auto-login", async (req, res: Response) => {
     return
   } catch (err) {
     studentError = extractMessage(err, "Login yoki parol noto'g'ri")
+    studentRateLimited = isRateLimitedError(err)
     details.push(`Talaba API: ${studentError}`)
     const e = err as AxiosError
     console.error(
@@ -2880,6 +2936,7 @@ router.post("/auto-login", async (req, res: Response) => {
     oauthRequired: true,
     message: studentError || "Login yoki parol noto'g'ri",
     details: process.env.NODE_ENV === "development" ? details : undefined,
+    rateLimited: studentRateLimited,
   })
 })
 
