@@ -132,6 +132,13 @@ const EMPLOYEE_TYPES = (process.env.EMPLOYEE_TYPES || "")
   .map((item) => item.trim().toLowerCase())
   .filter(Boolean)
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
+// Ilgari 2 kun edi — sessionStorage bilan birga bu talabani har safar
+// brauzer/tab yopilganda (yoki 2 kundan keyin) qayta HEMIS orqali login
+// qilishga majburlar edi. Endi 30 kun: bir marta kirgan talaba deyarli
+// hech qachon qayta login qilmaydi, /refresh (keshlangan parol bilan)
+// muddat tugashiga yaqin fon rejimida jim yangilaydi — bu HEMIS login
+// endpointiga tushadigan umumiy yukni keskin kamaytiradi.
+const LMS_TOKEN_TTL = "30d"
 // HEMIS'ga yuboriladigan login-bilan-bog'liq so'rovlar uchun aniq vaqt
 // chegarasi — avval umuman yo'q edi, ya'ni HEMIS sekin/javob bermasa,
 // so'rov CHEKSIZ kutib turar edi. Ko'p foydalanuvchi bir vaqtda kirishga
@@ -880,7 +887,7 @@ function signStudentToken(hemisToken: string, login: string, profile: Record<str
       ...(studentAuthMode === "oauth" ? { studentProfile: profile } : {}),
     },
     JWT_SECRET,
-    { expiresIn: "2d" }
+    { expiresIn: LMS_TOKEN_TTL }
   )
 }
 
@@ -923,7 +930,7 @@ function signEmployeeToken(
       ),
     },
     JWT_SECRET,
-    { expiresIn: "2d" }
+    { expiresIn: LMS_TOKEN_TTL }
   )
 }
 
@@ -1270,7 +1277,7 @@ async function createOAuthSession(requestedRole: OAuthRole, code: string, redire
       ),
     },
     JWT_SECRET,
-    { expiresIn: "2d" }
+    { expiresIn: LMS_TOKEN_TTL }
   )
   return { token, role: "employee" as const }
 }
