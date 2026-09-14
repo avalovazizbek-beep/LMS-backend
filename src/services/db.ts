@@ -71,6 +71,13 @@ export async function initDatabase() {
   await execIgnoreDuplicate(`ALTER TABLE hemis_users ADD COLUMN teacher_user_id INT NULL`)
   await execIgnoreDuplicate(`ALTER TABLE hemis_users ADD INDEX idx_hemis_teacher_user_id (teacher_user_id)`)
 
+  // Login+parol keshi: fon rejimida (JWT muddati tugaganda) foydalanuvchidan
+  // qayta so'ramasdan HEMIS'dan yangi token olish uchun. Parol AES-256-GCM
+  // bilan shifrlangan holda saqlanadi (services/credentialCrypto.ts) — hech
+  // qachon oddiy matnda emas.
+  await execIgnoreDuplicate(`ALTER TABLE hemis_users ADD COLUMN hemis_login VARCHAR(255) NULL AFTER username`)
+  await execIgnoreDuplicate(`ALTER TABLE hemis_users ADD COLUMN password_enc VARCHAR(1000) NULL AFTER hemis_login`)
+
   // ── HEMIS API response cache ──
   await exec(`
     CREATE TABLE IF NOT EXISTS hemis_cache (
@@ -887,12 +894,14 @@ export interface HemisUserRow {
   hemis_token?: string
   profile?: string
   teacher_user_id?: number | null
+  hemis_login?: string | null
+  password_enc?: string | null
 }
 
 export async function upsertHemisUser(row: HemisUserRow) {
   await pool.query(
-    `INSERT INTO hemis_users (hemis_id, role, username, full_name, hemis_token, profile, teacher_user_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO hemis_users (hemis_id, role, username, full_name, hemis_token, profile, teacher_user_id, hemis_login, password_enc)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE
        role            = VALUES(role),
        username        = VALUES(username),
@@ -900,6 +909,8 @@ export async function upsertHemisUser(row: HemisUserRow) {
        hemis_token     = VALUES(hemis_token),
        profile         = VALUES(profile),
        teacher_user_id = COALESCE(VALUES(teacher_user_id), teacher_user_id),
+       hemis_login     = COALESCE(VALUES(hemis_login), hemis_login),
+       password_enc    = COALESCE(VALUES(password_enc), password_enc),
        updated_at      = CURRENT_TIMESTAMP`,
     [
       row.hemis_id,
@@ -909,6 +920,8 @@ export async function upsertHemisUser(row: HemisUserRow) {
       row.hemis_token ?? null,
       row.profile ?? null,
       row.teacher_user_id ?? null,
+      row.hemis_login ?? null,
+      row.password_enc ?? null,
     ]
   )
 }
@@ -919,6 +932,13 @@ export async function getHemisUser(hemisId: string): Promise<HemisUserRow | null
     [hemisId]
   )
   return rows.length ? (rows[0] as HemisUserRow) : null
+}
+
+// HEMIS'da parol o'zgargan-yu, bizdagi kesh eskirgan holatda chaqiriladi —
+// eskirgan parolni saqlab qo'ymaslik uchun tozalaymiz (keyingi refresh
+// urinishlari to'g'ridan-to'g'ri "qayta kiring"ga yo'naltiriladi).
+export async function clearHemisPassword(hemisId: string) {
+  await pool.query("UPDATE hemis_users SET password_enc = NULL WHERE hemis_id = ?", [hemisId])
 }
 
 /* ── HEMIS API cache helpers ────────────────────────────────────────── */

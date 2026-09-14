@@ -9,7 +9,8 @@ import fs from "fs"
 import path from "path"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { localResourcesAsHemisResources } from "../services/localResourceStore"
-import { withHemisCache, upsertHemisUser, pool, clearUserCache } from "../services/db"
+import { withHemisCache, upsertHemisUser, pool, clearUserCache, getHemisUser, clearHemisPassword } from "../services/db"
+import { encryptSecret, decryptSecret } from "../services/credentialCrypto"
 import { recordPlatformSession } from "../services/attendanceStore"
 import {
   isDemoUser, mockStudentMe, mockEmployeeMe, mockSchedule, mockAttendance,
@@ -123,7 +124,7 @@ const HEMIS_OAUTH_STUDENT_FIELDS = csvList(process.env.HEMIS_OAUTH_STUDENT_FIELD
   "student_api_token",
   "groups",
 ])
-const HEMIS_TOKEN    = process.env.HEMIS_TOKEN || "wvCCF_aTdTuD9LrhP0EUgWSdQ1wEGzlZ"
+const HEMIS_TOKEN    = process.env.HEMIS_TOKEN || ""
 const HEMIS_TUTOR_RECAPTCHA = process.env.HEMIS_TUTOR_RECAPTCHA || ""
 const EMPLOYEE_TYPES = (process.env.EMPLOYEE_TYPES || "")
   .split(",")
@@ -140,7 +141,7 @@ function reqUserId(req: AuthRequest): string {
   return String(req.user?.userId ?? req.user?.id ?? req.user?.username ?? "anon")
 }
 
-async function saveUserToDb(token: string, role: string) {
+async function saveUserToDb(token: string, role: string, password?: string) {
   try {
     const decoded = jwt.decode(token) as Record<string, unknown> | null
     if (!decoded) return
@@ -156,6 +157,11 @@ async function saveUserToDb(token: string, role: string) {
       hemis_token:    String(decoded.hemisToken ?? ""),
       profile:        decoded.employeeProfile ? JSON.stringify(decoded.employeeProfile) : undefined,
       teacher_user_id: teacherNumId,
+      // Login+parol faqat parol asosidagi kirishda (talaba/xodim shaklini
+      // to'ldirganda) uzatiladi — OAuth orqali kirganda parol bizga
+      // umuman ma'lum bo'lmaydi, shu holatda avvalgi qiymat saqlanib qoladi.
+      hemis_login:    textValue(decoded.hemisLogin) ?? null,
+      password_enc:   password ? encryptSecret(password) : null,
     })
     // Har bir yangi loginda shu foydalanuvchining eski HEMIS keshini
     // butunlay tozalaymiz — shu bilan LMS'ga kirgan har safar (davomat,
@@ -956,13 +962,21 @@ function buildOAuthAuthorizeUrl(role: OAuthRole, redirectUri: string, state: str
   return url
 }
 
-function readOAuthState(state: unknown, role: OAuthRole, redirectUri: string): OAuthStatePayload | null {
+// E'tibor: `role` HECH QACHON tekshiruvga kiritilmaydi. Sabab — bitta HEMIS
+// OAuth klienti (bitta client_id, bitta ro'yxatdan o'tgan redirect_uri, masalan
+// ".../oauth/employee") talaba, xodim VA "auto" oqimlarining barchasi uchun
+// baravar ishlatilishi mumkin (ko'p HEMIS o'rnatishlarida shunday). Bu holda
+// HEMIS har doim BIR XIL callback yo'liga qaytaradi — demak so'rov yo'lidagi
+// (`req.params.role`) qiymat boshlang'ich `role`dan farq qilishi normal holat,
+// XATO EMAS. Haqiqiy boshlang'ich rol shu yerda `state`ning o'zidan (imzosi biz
+// tomonidan tekshiriladigan JWT) tiklanadi va keyingi ishlov shu asosda ketadi.
+function readOAuthState(state: unknown, redirectUri: string): OAuthStatePayload | null {
   if (!state || typeof state !== "string") return null
   cleanupExpiredOAuthStates()
   const entry = oauthStates.get(state)
   if (entry) {
     oauthStates.delete(state)
-    if (entry.role === role && entry.redirectUri === redirectUri && entry.expiresAt > Date.now()) {
+    if (entry.redirectUri === redirectUri && entry.expiresAt > Date.now()) {
       return {
         purpose: "hemis-oauth",
         role: entry.role,
@@ -977,7 +991,7 @@ function readOAuthState(state: unknown, role: OAuthRole, redirectUri: string): O
   // change was deployed.
   try {
     const decoded = jwt.verify(state, JWT_SECRET) as OAuthStatePayload
-    if (decoded.purpose === "hemis-oauth" && decoded.role === role && decoded.redirectUri === redirectUri) {
+    if (decoded.purpose === "hemis-oauth" && decoded.redirectUri === redirectUri) {
       return decoded
     }
     return null
@@ -986,8 +1000,8 @@ function readOAuthState(state: unknown, role: OAuthRole, redirectUri: string): O
   }
 }
 
-function verifyOAuthState(state: unknown, role: OAuthRole, redirectUri: string) {
-  return Boolean(readOAuthState(state, role, redirectUri))
+function verifyOAuthState(state: unknown, redirectUri: string) {
+  return Boolean(readOAuthState(state, redirectUri))
 }
 
 async function hemisOAuthAccessToken(role: OAuthRole, code: string, redirectUri: string) {
@@ -2688,7 +2702,7 @@ router.post("/login", async (req, res: Response) => {
   }
   try {
     const result = await createStudentPasswordSession(String(login).trim(), String(password))
-    void saveUserToDb(result.token, "student")
+    void saveUserToDb(result.token, "student", String(password))
     try {
       const decoded = JSON.parse(Buffer.from(result.token.split(".")[1], "base64").toString())
       const uid = Number(decoded.userId ?? decoded.id ?? 0)
@@ -2712,7 +2726,7 @@ router.post("/employee-login", async (req, res: Response) => {
   }
   try {
     const result = await createEmployeePasswordSession(String(login).trim(), String(password))
-    void saveUserToDb(result.token, "employee")
+    void saveUserToDb(result.token, "employee", String(password))
     void syncTeacherFromHemis(result.token)  // syncTeacherFromHemis sessiyani to'g'ri ID bilan yozadi
     res.json(result)
   } catch (err) {
@@ -2773,7 +2787,7 @@ router.post("/auto-login", async (req, res: Response) => {
   const details: string[] = []
   try {
     const result = await createStudentPasswordSession(login, password)
-    void saveUserToDb(result.token, "student")
+    void saveUserToDb(result.token, "student", password)
     res.json(result)
     return
   } catch (err) {
@@ -2782,7 +2796,7 @@ router.post("/auto-login", async (req, res: Response) => {
 
   try {
     const result = await createEmployeePasswordSession(login, password)
-    void saveUserToDb(result.token, "employee")
+    void saveUserToDb(result.token, "employee", password)
     void syncTeacherFromHemis(result.token)
     res.json(result)
     return
@@ -2845,10 +2859,6 @@ router.get("/oauth/config", (req, res: Response) => {
 
 router.get("/oauth/start/:role", (req, res: Response) => {
   const requestedRole = normalizeOAuthRole(req.params.role) || "employee"
-  if (requestedRole === "auto") {
-    res.status(400).json({ success: false, message: "OAuth start uchun role employee yoki student bo'lishi kerak" })
-    return
-  }
   if (!HEMIS_OAUTH_CLIENT_ID || !HEMIS_OAUTH_CLIENT_SECRET) {
     res.status(500).json({ success: false, message: "HEMIS OAuth client ID yoki client code sozlanmagan" })
     return
@@ -2862,10 +2872,6 @@ router.get("/oauth/start/:role", (req, res: Response) => {
 
 router.get("/oauth/:role", async (req, res: Response) => {
   const requestedRole = normalizeOAuthRole(req.params.role) || "employee"
-  if (requestedRole === "auto") {
-    res.status(400).json({ success: false, message: "Server-side OAuth uchun role employee yoki student bo'lishi kerak" })
-    return
-  }
   if (!HEMIS_OAUTH_CLIENT_ID || !HEMIS_OAUTH_CLIENT_SECRET) {
     res.status(500).json({ success: false, message: "HEMIS OAuth client ID yoki client code sozlanmagan" })
     return
@@ -2920,10 +2926,6 @@ fetch(${JSON.stringify(`/api/hemis/oauth/exchange/${requestedRole}`)}, {
 
 router.post("/oauth/exchange/:role", async (req, res: Response) => {
   const requestedRole = normalizeOAuthRole(req.params.role) || "employee"
-  if (requestedRole === "auto") {
-    res.status(400).json({ success: false, message: "Server-side OAuth uchun role employee yoki student bo'lishi kerak" })
-    return
-  }
 
   const redirectUri = configuredOAuthRedirectUri(requestedRole)
   const code = oauthCodeValue(req.body?.code)
@@ -2936,16 +2938,19 @@ router.post("/oauth/exchange/:role", async (req, res: Response) => {
     return
   }
 
-  const statePayload = readOAuthState(req.body?.state, requestedRole, redirectUri)
+  const statePayload = readOAuthState(req.body?.state, redirectUri)
   if (!statePayload) {
     callbackUrl.searchParams.set("error", "invalid_state")
     callbackUrl.searchParams.set("message", "HEMIS OAuth state yaroqsiz yoki eskirgan")
     res.json({ redirect: callbackUrl.toString() })
     return
   }
+  // Haqiqiy so'ralgan rol — URL yo'lidagi (`:role`) emas, `state`da imzolangan
+  // qiymat (bitta redirect_uri bir nechta rol uchun umumiy bo'lganda mos keladi).
+  const effectiveRole = normalizeOAuthRole(statePayload.role) || requestedRole
 
   try {
-    const result = await createOAuthSession(requestedRole, code, redirectUri, statePayload.expectedLogin)
+    const result = await createOAuthSession(effectiveRole, code, redirectUri, statePayload.expectedLogin)
     void saveUserToDb(result.token, result.role)
     void syncTeacherFromHemis(result.token)
     callbackUrl.searchParams.set("token", result.token)
@@ -2971,14 +2976,15 @@ router.post("/oauth/callback", async (req, res: Response) => {
     res.status(400).json({ success: false, message: "OAuth code kerak" })
     return
   }
-  const statePayload = readOAuthState(req.body?.state, requestedRole, redirectUri)
+  const statePayload = readOAuthState(req.body?.state, redirectUri)
   if (!statePayload) {
     res.status(400).json({ success: false, message: "OAuth state yaroqsiz yoki eskirgan" })
     return
   }
+  const effectiveRole = normalizeOAuthRole(statePayload.role) || requestedRole
 
   try {
-    const result = await createOAuthSession(requestedRole, code, redirectUri, statePayload.expectedLogin)
+    const result = await createOAuthSession(effectiveRole, code, redirectUri, statePayload.expectedLogin)
     void saveUserToDb(result.token, result.role)
     void syncTeacherFromHemis(result.token)
     res.json({ success: true, ...result })
@@ -3184,6 +3190,60 @@ router.get("/calendar-plan-pdf", async (req, res: Response) => {
     res.send(buffer)
   } catch (err) {
     res.status(502).json({ success: false, message: extractMessage(err) })
+  }
+})
+
+/* ── POST /api/hemis/refresh  (fon rejimida avto-qayta-login) ─────────
+ * JWT/HEMIS tokeni muddati tugaganda foydalanuvchidan qayta login-parol
+ * so'ramasdan, bazadagi shifrlangan parol bilan HEMIS'dan yangi token
+ * olishga urinadi. Shu sabab bu route authMiddleware'dan OLDIN turadi —
+ * eskirgan (expired) tokenni ham qabul qiladi, faqat imzosini tekshiradi.
+ * Parol HEMIS'da o'zgargan bo'lsa (endi ishlamasa), keshdagi eski parol
+ * o'chirilib, foydalanuvchi qo'lda qayta kirishga yo'naltiriladi.
+ * ─────────────────────────────────────────────────────────────────── */
+router.post("/refresh", async (req, res: Response) => {
+  const authHeader = req.headers.authorization
+  const rawToken = textValue(req.body?.token) || (authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined)
+  if (!rawToken) {
+    res.status(400).json({ success: false, message: "Token kerak" })
+    return
+  }
+
+  let decoded: Record<string, unknown>
+  try {
+    decoded = jwt.verify(rawToken, JWT_SECRET, { ignoreExpiration: true }) as Record<string, unknown>
+  } catch {
+    res.status(401).json({ success: false, message: "Token yaroqsiz" })
+    return
+  }
+
+  const hemisId = textValue(decoded.userId, decoded.id, decoded.username)
+  const role = textValue(decoded.role)
+  const login = textValue(decoded.hemisLogin)
+  if (!hemisId || !login || (role !== "student" && role !== "employee")) {
+    res.status(401).json({ success: false, message: "Sessiya tugadi, qaytadan kiring" })
+    return
+  }
+
+  const row = await getHemisUser(hemisId)
+  const password = row?.password_enc ? decryptSecret(row.password_enc) : null
+  if (!password) {
+    res.status(401).json({ success: false, message: "Sessiya tugadi, qaytadan kiring" })
+    return
+  }
+
+  try {
+    const result = role === "student"
+      ? await createStudentPasswordSession(login, password)
+      : await createEmployeePasswordSession(login, password)
+    void saveUserToDb(result.token, role, password)
+    if (role === "employee") void syncTeacherFromHemis(result.token)
+    res.json(result)
+  } catch (err) {
+    // Saqlangan parol endi ishlamayapti (HEMIS'da o'zgargan) — keshni
+    // tozalaymiz, aks holda har refresh urinishida qayta-qayta xato beradi.
+    void clearHemisPassword(hemisId)
+    res.status(401).json({ success: false, message: extractMessage(err, "Sessiya tugadi, qaytadan kiring") })
   }
 })
 

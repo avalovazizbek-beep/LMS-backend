@@ -58,6 +58,12 @@ Notable storage:
 
 HEMIS is an external university system. The route acts as a proxy — it forwards credentials to the HEMIS API and returns the token/data to the client. The `HEMIS_*` env vars (base URL, credentials) must be set for this to work. Error extraction is centralised in a helper inside the file.
 
+Login methods, both available to students and employees:
+- **Direct password** (`POST /login`, `/employee-login`, `/auto-login`): the LMS's own form posts login+password straight to HEMIS's REST/Tutor API. `/auto-login` tries the student API first, then the employee Tutor API.
+- **OAuth** (`GET /oauth/start/:role` → HEMIS login page → `GET /oauth/:role` callback): role is `student`, `employee`, `tutor`, or `auto` (tries to detect student vs employee from the HEMIS OAuth user payload — this is what the frontend's single "HEMIS orqali kirish" button uses).
+
+**Credential cache + silent refresh**: on every successful *password*-based login, the plaintext password is encrypted (AES-256-GCM, `src/services/credentialCrypto.ts`, key from `HEMIS_CREDENTIALS_KEY`) and stored in `hemis_users.password_enc` alongside `hemis_login`, keyed by `hemis_id`. `POST /refresh` (mounted before `authMiddleware` so it accepts an *expired* JWT — signature is still verified) decrypts the stored password and re-authenticates against HEMIS to mint a fresh JWT without asking the user to type their credentials again. If HEMIS rejects the cached password (changed on their end), the cache is cleared and the client must fall back to a normal login. OAuth-based logins never populate this cache (no password is ever seen by the LMS in that flow) — only password-based logins do, and only they benefit from `/refresh` (OAuth sessions simply require a new browser round-trip once their JWT expires).
+
 ### Language note
 
 Error messages, API responses, and some identifiers are written in **Uzbek**. This is intentional — the target users are Uzbek-speaking. Keep new messages consistent with existing language conventions.
@@ -70,5 +76,6 @@ Error messages, API responses, and some identifiers are written in **Uzbek**. Th
 | `JWT_SECRET` | JWT signing secret |
 | `JWT_EXPIRES_IN` | Token lifetime (default `7d`) |
 | `FRONTEND_URL` | Allowed CORS origin (default `http://localhost:3000`) |
+| `HEMIS_CREDENTIALS_KEY` | Key for AES-256-GCM encryption of cached HEMIS passwords (`hemis_users.password_enc`). Falls back to `JWT_SECRET` if unset — set a dedicated value in production. |
 
 Copy `.env.example` if present, or create `.env` manually before running.
