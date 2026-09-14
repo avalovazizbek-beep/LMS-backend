@@ -1091,13 +1091,29 @@ async function createOAuthSession(requestedRole: OAuthRole, code: string, redire
       oauthProfile.student_api_token,
       asRecord(oauthUser.student).student_api_token
     )
+    // Ba'zi HEMIS o'rnatishlari (masalan shu universitetniki) OAuth
+    // /oauth/api/user javobida student_api_token'ni umuman qaytarmaydi —
+    // buning o'rniga to'liq talaba profilini (Student REST API'ning
+    // /v1/account/me bilan deyarli bir xil shaklda: id, full_name, group,
+    // faculty, specialty, avg_gpa va h.k.) to'g'ridan-to'g'ri o'zida olib
+    // keladi. Bunday holda alohida /v1/account/me so'rovi shart emas —
+    // qo'lda kelgan profilning o'zi ishlatiladi, va OAuth access_token
+    // keyingi Student REST so'rovlari uchun token sifatida ishlatiladi
+    // (xuddi xodim OAuth'ida access_token to'g'ridan-to'g'ri ishlatilgani
+    // kabi — ikkalasi ham bitta HEMIS OAuth serverining tokeni).
     if (!studentApiToken) {
-      console.error(
-        "[HEMIS student oauth] student_api_token topilmadi. HEMIS qaytargan maydonlar:",
-        Object.keys(oauthUser),
-        JSON.stringify(oauthUser).slice(0, 2000)
+      console.warn(
+        "[HEMIS student oauth] student_api_token yo'q — profil to'g'ridan-to'g'ri OAuth javobidan olinadi, access_token Student REST tokeni sifatida ishlatiladi. Maydonlar:",
+        Object.keys(oauthUser)
       )
-      throw new Error("HEMIS OAuth student_api_token qaytarmadi")
+      // login/username bu shaklda umuman qaytmaydi — har bir talaba uchun
+      // barqaror va bir-biridan farqli identifikator sifatida
+      // student_id_number ishlatiladi (aks holda hammasi bitta umumiy
+      // "hemis-oauth" qiymatini olib, Face ID kabi login-asosli
+      // funksiyalarda talabalar orasida to'qnashuvga sabab bo'lardi).
+      const loginIdentity = textValue(oauthUser.login, oauthUser.name, oauthUser.student_id_number) || "hemis-oauth"
+      const token = signStudentToken(accessToken, loginIdentity, oauthProfile, "oauth")
+      return { token, role: "student" as const }
     }
 
     let profile = oauthProfile
