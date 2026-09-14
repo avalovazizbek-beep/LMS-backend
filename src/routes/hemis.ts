@@ -780,6 +780,13 @@ function signStudentToken(hemisToken: string, login: string, profile: Record<str
       fullName,
       groupId,
       studentAuthMode,
+      // OAuth access_token Student REST API'da (/v1/account/me va h.k.)
+      // ishlamaydi — shuning uchun OAuth orqali kirganda HEMIS'dan
+      // allaqachon kelgan to'liq profilni tokenning o'ziga joylab
+      // qo'yamiz, /me shu yerdan o'qiydi (xuddi xodim OAuth'idagi
+      // employeeProfile kabi). Parol orqali kirganda /v1/account/me
+      // muvaffaqiyatli ishlaydi, shu sabab bu yerda kerak emas.
+      ...(studentAuthMode === "oauth" ? { studentProfile: profile } : {}),
     },
     JWT_SECRET,
     { expiresIn: "2d" }
@@ -3314,6 +3321,10 @@ router.get("/me", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
   if (isDemoUser(req.user)) { res.json({ success: true, data: mockStudentMe(req.user), source: "demo" }); return }
+  if (req.user?.studentProfile) {
+    res.json({ success: true, data: req.user.studentProfile, source: "token" })
+    return
+  }
   try {
     const r = await withHemisCache(reqUserId(req), "me",
       () => hemisGet(HEMIS, "/v1/account/me", hToken), TTL_24H)

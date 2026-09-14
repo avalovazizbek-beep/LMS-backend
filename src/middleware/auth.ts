@@ -14,6 +14,11 @@ export interface AuthUser {
   role: string
   hemisToken?: string
   studentAuthMode?: "password" | "oauth"
+  // OAuth orqali kirgan talaba uchun HEMIS'dan kelgan to'liq profil —
+  // shu talabaning OAuth access_token'i HEMIS Student REST API'ning
+  // /v1/account/me kabi endpointlarini tan olmaydi, shuning uchun profil
+  // qayta so'ralmasdan shu yerdan (token ichidan) o'qiladi.
+  studentProfile?: Record<string, unknown>
   isEmployee?: boolean
   employeeHemisBase?: string
   employeeProfilePath?: string
