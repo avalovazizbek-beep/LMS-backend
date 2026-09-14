@@ -678,6 +678,25 @@ function logRateLimit(context: string, login: string, err: unknown) {
   )
 }
 
+// HEMIS'ning Retry-After sarlavhasini (agar bersa) soniyaga aylantiradi —
+// yo soniya soni (masalan "120"), yo HTTP sana shaklida ("Wed, 21 Oct
+// 2026 07:28:00 GMT") kelishi mumkin. Topilmasa null qaytadi — bu holda
+// front-end aniq vaqt emas, umumiy "bir necha daqiqadan so'ng" xabarini
+// ko'rsatadi.
+function getRetryAfterSeconds(err: unknown): number | null {
+  const e = err as AxiosError
+  const raw = e?.response?.headers?.["retry-after"] ?? e?.response?.headers?.["Retry-After"]
+  if (!raw) return null
+  const asNumber = Number(raw)
+  if (Number.isFinite(asNumber) && asNumber > 0) return Math.round(asNumber)
+  const asDate = Date.parse(String(raw))
+  if (Number.isFinite(asDate)) {
+    const diff = Math.round((asDate - Date.now()) / 1000)
+    return diff > 0 ? diff : null
+  }
+  return null
+}
+
 function extractMessage(err: unknown, fallback = "Xatolik yuz berdi"): string {
   const e = err as AxiosError<{ message?: string; error?: string; errors?: unknown; data?: { error?: string } }>
   // HEMIS rate-limit/captcha javobi {"error":"...","data":{"error":"CAPTCHA_REQUIRED"},"code":429}
@@ -686,6 +705,15 @@ function extractMessage(err: unknown, fallback = "Xatolik yuz berdi"): string {
   // foydalanuvchi parolini to'g'ri kiritgan bo'lsa ham chalg'ituvchi
   // xabar ko'radi.
   if (isRateLimitedError(err)) {
+    const retrySec = getRetryAfterSeconds(err)
+    if (retrySec) {
+      const mins = Math.floor(retrySec / 60)
+      const secs = retrySec % 60
+      const timeText = mins > 0
+        ? `${mins} daqiqa${secs > 0 ? ` ${secs} soniya` : ""}`
+        : `${secs} soniya`
+      return `HEMIS: juda ko'p urinish qilindi, ${timeText}dan so'ng qaytadan urinib ko'ring`
+    }
     return "HEMIS: juda ko'p urinish qilindi, bir necha daqiqadan so'ng qaytadan urinib ko'ring"
   }
   const hemisMsg = e?.response?.data?.message || e?.response?.data?.error
@@ -2834,6 +2862,7 @@ router.post("/login", async (req, res: Response) => {
       success: false,
       message: extractMessage(err, "Login yoki parol noto'g'ri"),
       rateLimited: isRateLimitedError(err),
+      retryAfterSec: getRetryAfterSeconds(err),
     })
   }
 })
@@ -2859,6 +2888,7 @@ router.post("/employee-login", async (req, res: Response) => {
       message: extractMessage(err, "Login yoki parol noto'g'ri"),
       details: (err as { details?: unknown }).details,
       rateLimited: isRateLimitedError(err),
+      retryAfterSec: getRetryAfterSeconds(err),
     })
   }
 })
@@ -2910,6 +2940,7 @@ router.post("/auto-login", async (req, res: Response) => {
   const details: string[] = []
   let studentError = ""
   let studentRateLimited = false
+  let studentRetryAfterSec: number | null = null
   try {
     const result = await createStudentPasswordSession(login, password)
     void saveUserToDb(result.token, "student", password)
@@ -2918,6 +2949,7 @@ router.post("/auto-login", async (req, res: Response) => {
   } catch (err) {
     studentError = extractMessage(err, "Login yoki parol noto'g'ri")
     studentRateLimited = isRateLimitedError(err)
+    studentRetryAfterSec = getRetryAfterSeconds(err)
     if (studentRateLimited) logRateLimit("auto-login/student", login, err)
     details.push(`Talaba API: ${studentError}`)
     const e = err as AxiosError
@@ -2956,6 +2988,7 @@ router.post("/auto-login", async (req, res: Response) => {
     message: studentError || "Login yoki parol noto'g'ri",
     details: process.env.NODE_ENV === "development" ? details : undefined,
     rateLimited: studentRateLimited,
+    retryAfterSec: studentRetryAfterSec,
   })
 })
 
@@ -3398,6 +3431,7 @@ router.post("/refresh", async (req, res: Response) => {
       success: false,
       message: extractMessage(err, "Sessiya tugadi, qaytadan kiring"),
       rateLimited,
+      retryAfterSec: getRetryAfterSeconds(err),
     })
   }
 })
