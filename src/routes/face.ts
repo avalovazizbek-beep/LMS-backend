@@ -2,6 +2,7 @@ import { Router, Response } from "express"
 import { v4 as uuid } from "uuid"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
+import { isAdminUser } from "./admin"
 import type mysql from "mysql2/promise"
 
 const router = Router()
@@ -197,7 +198,11 @@ router.post("/re-register-request", async (req: AuthRequest, res: Response) => {
 })
 
 /* ── GET /api/face/requests ───────────────────────────────────────── */
-router.get("/requests", async (_req: AuthRequest, res: Response) => {
+// Barcha foydalanuvchilarning qayta-ro'yxatdan-o'tish arizalari — faqat
+// admin ko'rishi kerak (avval hech qanday ruxsat tekshiruvisiz, istalgan
+// kirgan foydalanuvchiga ochiq bo'lgan xato tuzatildi).
+router.get("/requests", async (req: AuthRequest, res: Response) => {
+  if (!(await isAdminUser(req))) { res.status(403).json({ success: false, message: "Admin huquqi yo'q" }); return }
   try {
     const [rows] = await pool.query<mysql.RowDataPacket[]>(
       "SELECT * FROM face_requests ORDER BY created_at DESC"
@@ -209,7 +214,10 @@ router.get("/requests", async (_req: AuthRequest, res: Response) => {
 })
 
 /* ── PUT /api/face/requests/:id ───────────────────────────────────── */
+// Tasdiqlash/rad etish — bu boshqa foydalanuvchining Face ID ma'lumotini
+// o'chirib yuboradi (approve bo'lganda), shuning uchun faqat admin.
 router.put("/requests/:id", async (req: AuthRequest, res: Response) => {
+  if (!(await isAdminUser(req))) { res.status(403).json({ success: false, message: "Admin huquqi yo'q" }); return }
   const { id } = req.params
   const { action, adminNote } = req.body as { action: "approve" | "reject"; adminNote?: string }
 
