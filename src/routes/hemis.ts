@@ -3441,6 +3441,40 @@ router.get("/attendance", async (req: AuthRequest, res: Response) => {
   }
 })
 
+/**
+ * OAuth orqali kirgan talabaning access_token'i Student API'da
+ * (/v1/education/subject-list) ishlamaydi ("invalid JWT" bilan rad
+ * etiladi). Shu sabab admin token orqali Backend API'ning
+ * /v1/data/academic-record-list'idan (_student filtri bilan) o'qiymiz —
+ * bu resurs talabaning shaxsiy tokeniga umuman bog'liq emas va haqiqiy
+ * (o'tgan semestrlardagi) baho yozuvlarini qaytaradi. Natija pastdagi
+ * asosiy yo'ldagi bilan bir xil shaklga keltiriladi.
+ */
+async function gradesFromAcademicRecords(studentId: string, semester?: string) {
+  const params: Record<string, string> = { _student: studentId, limit: "200" }
+  if (semester) params._semester = semester
+  const items = await employeeDataAllItems("/v1/data/academic-record-list", params, undefined)
+  return items.map((item) => {
+    const r = asRecord(item)
+    return {
+      id:                   numberValue(r.id) ?? 0,
+      subject_name:         textValue(r.subject_name) ?? "",
+      subject_code:         textValue(r.subject_code) ?? "",
+      subject_type:         "",
+      employee_name:        textValue(r.employee_name) ?? "",
+      semester_name:        textValue(r.semester_name) ?? "",
+      total_acload:         numberValue(r.total_acload) ?? 0,
+      credit:               numberValue(r.credit) ?? 0,
+      total_point:          numberValue(r.total_point) ?? 0,
+      grade:                numberValue(r.grade),
+      finish_credit_status: Boolean(r.finish_credit_status),
+      retraining_status:    Boolean(r.retraining_status),
+      _semester:            textValue(r._semester) ?? "",
+      _education_year:      textValue(r._education_year) ?? "",
+    }
+  })
+}
+
 /* ── GET /api/hemis/grades ───────────────────────────────────────── */
 // Student API: /v1/education/subject-list  (NOT /v1/data/academic-record-list which is Backend API)
 // Maps StudentSubjectMeta → HemisGrade format for frontend compatibility
@@ -3448,6 +3482,22 @@ router.get("/grades", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
   if (isDemoUser(req.user)) { res.json({ success: true, data: mockGrades(), source: "demo" }); return }
+
+  if (req.user?.studentAuthMode === "oauth") {
+    const studentId = textValue(req.user?.id, req.user?.userId)
+    if (!studentId) { res.json({ success: true, data: [] }); return }
+    try {
+      const semester = req.query._semester || req.query.semester
+      const cacheKey = `grades:${semester ?? "all"}`
+      const r = await withHemisCache(reqUserId(req), cacheKey,
+        () => gradesFromAcademicRecords(studentId, semester ? String(semester) : undefined), TTL_1H)
+      res.json({ success: true, data: r.data, source: r.source })
+    } catch (err) {
+      res.status(502).json({ success: false, message: extractMessage(err) })
+    }
+    return
+  }
+
   try {
     const params: Record<string, string> = {}
     const semester = req.query._semester || req.query.semester
