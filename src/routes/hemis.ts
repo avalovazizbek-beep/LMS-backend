@@ -132,6 +132,13 @@ const EMPLOYEE_TYPES = (process.env.EMPLOYEE_TYPES || "")
   .map((item) => item.trim().toLowerCase())
   .filter(Boolean)
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
+// HEMIS'ga yuboriladigan login-bilan-bog'liq so'rovlar uchun aniq vaqt
+// chegarasi — avval umuman yo'q edi, ya'ni HEMIS sekin/javob bermasa,
+// so'rov CHEKSIZ kutib turar edi. Ko'p foydalanuvchi bir vaqtda kirishga
+// urinayotganda bunday osilib qolgan so'rovlar to'planib, boshqalarga ham
+// ta'sir qilishi mumkin edi — endi belgilangan vaqtdan keyin aniq xato
+// bilan muvaffaqiyatsiz tugaydi.
+const HEMIS_TIMEOUT_MS = 20_000
 
 /* ── Cache helpers ──────────────────────────────────────────────────── */
 const TTL_1H  = 60 * 60 * 1000
@@ -631,6 +638,7 @@ function extractMessage(err: unknown, fallback = "Xatolik yuz berdi"): string {
   if (e?.response?.status === 401) return "Login yoki parol noto'g'ri"
   if (e?.response?.status === 403) return "Ruxsat yo'q"
   if (e?.code === "ECONNREFUSED" || e?.code === "ENOTFOUND") return "HEMIS serveriga ulanib bo'lmadi"
+  if (e?.code === "ECONNABORTED" || e?.code === "ETIMEDOUT") return "HEMIS belgilangan vaqtda javob bermadi, qaytadan urinib ko'ring"
   if (e instanceof Error && e.message && !e.message.includes("status code")) return e.message
   return fallback
 }
@@ -848,6 +856,7 @@ async function hemisGet<T = unknown>(
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
   const res = await axios.get<T>(url.toString(), {
     headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
+    timeout: HEMIS_TIMEOUT_MS,
   })
   return res.data
 }
@@ -868,7 +877,7 @@ async function tutorPasswordLogin(base: string, login: string, password: string)
       const { data } = await axios.post<{ success?: boolean; data?: { token?: string; access_token?: string }; token?: string; access_token?: string; message?: string }>(
         `${base}/ver1/tutor/auth/login`,
         payload,
-        { headers: { "Content-Type": "application/json", Accept: "application/json" } }
+        { headers: { "Content-Type": "application/json", Accept: "application/json" }, timeout: HEMIS_TIMEOUT_MS }
       )
       const hemisToken = data?.data?.token || data?.data?.access_token || data?.token || data?.access_token
       if (!hemisToken) {
@@ -1051,7 +1060,7 @@ async function hemisOAuthAccessToken(role: OAuthRole, code: string, redirectUri:
   }
 
   try {
-    const { data } = await axios.post(tokenUrl, body.toString(), { headers })
+    const { data } = await axios.post(tokenUrl, body.toString(), { headers, timeout: HEMIS_TIMEOUT_MS })
     const payload = asRecord(asRecord(data).data || data)
     const accessToken = textValue(payload.access_token, payload.token)
     if (!accessToken) {
@@ -1091,6 +1100,7 @@ async function hemisOAuthUser(oauthBase: string, accessToken: string, role: OAut
   const { data } = await axios.get(`${oauthBase}/oauth/api/user`, {
     params: { fields },
     headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+    timeout: HEMIS_TIMEOUT_MS,
   })
   return asRecord(asRecord(data).data || data)
 }
@@ -2652,7 +2662,7 @@ async function createStudentPasswordSession(login: string, password: string) {
   const { data } = await axios.post<{ success?: boolean; data?: { token: string }; message?: string }>(
     `${HEMIS}/v1/auth/login`,
     { login, password: normalizedPassword },
-    { headers: { "Content-Type": "application/json", Accept: "application/json" } }
+    { headers: { "Content-Type": "application/json", Accept: "application/json" }, timeout: HEMIS_TIMEOUT_MS }
   )
   const hemisToken = data?.data?.token
   if (!hemisToken) {
