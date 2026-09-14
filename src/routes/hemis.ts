@@ -663,6 +663,21 @@ function isRateLimitedError(err: unknown): boolean {
   return e?.response?.status === 429 || e?.response?.data?.data?.error === "CAPTCHA_REQUIRED"
 }
 
+// HEMIS qancha vaqtga bloklashini serverda o'lchash uchun — har bir "band"
+// javobini aniq vaqt belgisi (ISO) va HEMIS qaytargan Retry-After
+// sarlavhasi (agar bo'lsa) bilan bitta qidirish oson qatorga yozadi.
+// `pm2 logs lms-backend | grep "RATE-LIMIT"` orqali ko'riladi — bitta
+// login uchun birinchi blok vaqti va keyingi muvaffaqiyatli urinish
+// vaqti orasidagi farq = HEMIS'ning haqiqiy blok muddati.
+function logRateLimit(context: string, login: string, err: unknown) {
+  const e = err as AxiosError
+  const retryAfter = e?.response?.headers?.["retry-after"] ?? e?.response?.headers?.["Retry-After"]
+  console.warn(
+    `[HEMIS RATE-LIMIT] context=${context} login=${login} status=${e?.response?.status ?? "?"} ` +
+    `retry-after=${retryAfter ?? "yo'q"} time=${new Date().toISOString()}`
+  )
+}
+
 function extractMessage(err: unknown, fallback = "Xatolik yuz berdi"): string {
   const e = err as AxiosError<{ message?: string; error?: string; errors?: unknown; data?: { error?: string } }>
   // HEMIS rate-limit/captcha javobi {"error":"...","data":{"error":"CAPTCHA_REQUIRED"},"code":429}
@@ -2814,6 +2829,7 @@ router.post("/login", async (req, res: Response) => {
   } catch (err) {
     const e = err as AxiosError<{ message?: string }>
     console.error("[HEMIS student login]", e?.response?.status, e?.response?.data)
+    if (isRateLimitedError(err)) logRateLimit("login", String(login), err)
     res.status(401).json({
       success: false,
       message: extractMessage(err, "Login yoki parol noto'g'ri"),
@@ -2837,6 +2853,7 @@ router.post("/employee-login", async (req, res: Response) => {
   } catch (err) {
     const e = err as AxiosError<{ message?: string }>
     console.error("[HEMIS employee login]", e?.response?.status, e?.response?.data)
+    if (isRateLimitedError(err)) logRateLimit("employee-login", String(login), err)
     res.status(401).json({
       success: false,
       message: extractMessage(err, "Login yoki parol noto'g'ri"),
@@ -2901,6 +2918,7 @@ router.post("/auto-login", async (req, res: Response) => {
   } catch (err) {
     studentError = extractMessage(err, "Login yoki parol noto'g'ri")
     studentRateLimited = isRateLimitedError(err)
+    if (studentRateLimited) logRateLimit("auto-login/student", login, err)
     details.push(`Talaba API: ${studentError}`)
     const e = err as AxiosError
     console.error(
@@ -2917,6 +2935,7 @@ router.post("/auto-login", async (req, res: Response) => {
     res.json(result)
     return
   } catch (err) {
+    if (isRateLimitedError(err)) logRateLimit("auto-login/employee", login, err)
     details.push(`Xodim/Tutor API: ${extractMessage(err, "Login yoki parol noto'g'ri")}`)
     const nested = (err as { details?: unknown }).details
     if (Array.isArray(nested)) {
@@ -3364,10 +3383,22 @@ router.post("/refresh", async (req, res: Response) => {
     if (role === "employee") void syncTeacherFromHemis(result.token)
     res.json(result)
   } catch (err) {
-    // Saqlangan parol endi ishlamayapti (HEMIS'da o'zgargan) — keshni
-    // tozalaymiz, aks holda har refresh urinishida qayta-qayta xato beradi.
-    void clearHemisPassword(hemisId)
-    res.status(401).json({ success: false, message: extractMessage(err, "Sessiya tugadi, qaytadan kiring") })
+    const rateLimited = isRateLimitedError(err)
+    if (rateLimited) {
+      // HEMIS vaqtincha band — bu parol noto'g'ri ekanini anglatmaydi,
+      // keshni tozalash bu yerda XATO bo'lardi (foydalanuvchi keyingi
+      // safar qayta login-parol kiritishga majbur bo'lib qolardi).
+      logRateLimit("refresh", login, err)
+    } else {
+      // Saqlangan parol endi ishlamayapti (HEMIS'da o'zgargan) — keshni
+      // tozalaymiz, aks holda har refresh urinishida qayta-qayta xato beradi.
+      void clearHemisPassword(hemisId)
+    }
+    res.status(401).json({
+      success: false,
+      message: extractMessage(err, "Sessiya tugadi, qaytadan kiring"),
+      rateLimited,
+    })
   }
 })
 
