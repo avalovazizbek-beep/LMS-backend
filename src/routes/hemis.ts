@@ -1092,6 +1092,11 @@ async function createOAuthSession(requestedRole: OAuthRole, code: string, redire
       asRecord(oauthUser.student).student_api_token
     )
     if (!studentApiToken) {
+      console.error(
+        "[HEMIS student oauth] student_api_token topilmadi. HEMIS qaytargan maydonlar:",
+        Object.keys(oauthUser),
+        JSON.stringify(oauthUser).slice(0, 2000)
+      )
       throw new Error("HEMIS OAuth student_api_token qaytarmadi")
     }
 
