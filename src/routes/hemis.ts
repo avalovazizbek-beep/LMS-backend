@@ -3575,16 +3575,46 @@ router.get("/semesters", async (req: AuthRequest, res: Response) => {
   }
 })
 
+/**
+ * OAuth talaba uchun: /v1/data/schedule-list'dan (_group filtri bilan,
+ * admin token orqali) dars jadvalini o'qiydi. api.md'ga ko'ra bu endpoint
+ * ham, Student API'ning /v1/education/schedule'i ham AYNAN bir xil
+ * "SubjectSchedule" sxemasidan foydalanadi — shu sabab natijani hech
+ * qanday qayta xaritalashsiz, to'g'ridan-to'g'ri qaytarish mumkin.
+ */
+async function scheduleFromBackendApi(groupId: string, week?: string, semester?: string) {
+  const params: Record<string, string> = { _group: groupId, limit: "200" }
+  if (week)     params._week     = week
+  if (semester) params._semester = semester
+  return employeeDataAllItems("/v1/data/schedule-list", params, undefined)
+}
+
 /* ── GET /api/hemis/schedule ─────────────────────────────────────── */
 // Student API: /v1/education/schedule  (NOT /v1/data/schedule-list which is Backend API)
 router.get("/schedule", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
   if (isDemoUser(req.user)) { res.json({ success: true, data: mockSchedule(req.user), source: "demo" }); return }
+
+  const week = req.query._week || req.query.week
+  const semester = req.query._semester || req.query.semester
+
+  if (req.user?.studentAuthMode === "oauth") {
+    const groupId = textValue(req.user?.groupId)
+    if (!groupId) { res.json({ success: true, data: [] }); return }
+    try {
+      const cacheKey = `schedule:${semester ?? "all"}:${week ?? "all"}`
+      const r = await withHemisCache(reqUserId(req), cacheKey,
+        () => scheduleFromBackendApi(groupId, week ? String(week) : undefined, semester ? String(semester) : undefined), TTL_1H)
+      res.json({ success: true, data: r.data, source: r.source })
+    } catch (err) {
+      res.status(502).json({ success: false, message: extractMessage(err) })
+    }
+    return
+  }
+
   try {
     const params: Record<string, string> = {}
-    const week = req.query._week || req.query.week
-    const semester = req.query._semester || req.query.semester
     if (week)     params.week     = String(week)
     if (semester) params.semester = String(semester)
     const cacheKey = `schedule:${semester ?? "all"}:${week ?? "all"}`
@@ -3596,15 +3626,55 @@ router.get("/schedule", async (req: AuthRequest, res: Response) => {
   }
 })
 
+/**
+ * OAuth talaba uchun: /v1/data/attendance-list'dan (_student filtri
+ * bilan, admin token orqali) davomatni o'qiydi. Backend'ning "Attendance"
+ * sxemasi Student API'ning "StudentAttendance" sxemasidagi barcha
+ * maydonlarni (subject, employee, trainingType, lessonPair, lesson_date,
+ * absent_on, absent_off) o'z ichiga oladi — faqat "explicable" maydoni
+ * yo'q, lekin frontend (davomat/page.tsx) buni allaqachon absent_on/
+ * absent_off orqali fallback bilan hisoblaydi, shu sabab qo'shimcha
+ * xaritalash shart emas.
+ */
+async function attendanceFromBackendApi(studentId: string, groupId?: string, semester?: string, subject?: string) {
+  const params: Record<string, string> = { _student: studentId, limit: "200" }
+  if (groupId)  params._group    = groupId
+  if (semester) params._semester = semester
+  if (subject)  params._subject  = subject
+  return employeeDataAllItems("/v1/data/attendance-list", params, undefined)
+}
+
 /* ── GET /api/hemis/attendance ───────────────────────────────────── */
 // Student API: /v1/education/attendance  (NOT /v1/data/attendance-list which is Backend API)
 router.get("/attendance", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
   if (isDemoUser(req.user)) { res.json({ success: true, data: mockAttendance(req.user), source: "demo" }); return }
+
+  const semester = req.query._semester || req.query.semester
+
+  if (req.user?.studentAuthMode === "oauth") {
+    const studentId = textValue(req.user?.id, req.user?.userId)
+    if (!studentId) { res.json({ success: true, data: [] }); return }
+    try {
+      const subject = textValue(req.query.subject)
+      const cacheKey = `attendance:${semester ?? "all"}:${subject ?? "all"}`
+      const r = await withHemisCache(reqUserId(req), cacheKey,
+        () => attendanceFromBackendApi(
+          studentId,
+          textValue(req.user?.groupId),
+          semester ? String(semester) : undefined,
+          subject
+        ), TTL_1H)
+      res.json({ success: true, data: r.data, source: r.source })
+    } catch (err) {
+      res.status(502).json({ success: false, message: extractMessage(err) })
+    }
+    return
+  }
+
   try {
     const params: Record<string, string> = {}
-    const semester = req.query._semester || req.query.semester
     if (semester)          params.semester = String(semester)
     if (req.query.subject) params.subject  = String(req.query.subject)
     const cacheKey = `attendance:${semester ?? "all"}`
@@ -3768,13 +3838,67 @@ router.get("/grades", async (req: AuthRequest, res: Response) => {
 
 /* ── GET /api/hemis/performance ──────────────────────────────────── */
 // Student API: /v1/education/performance  (NOT /v1/data/student-performance-list)
+async function performanceFromBackendApi(studentId: string, studentName: string, semester?: string, subject?: string) {
+  const params: Record<string, string> = { _student: studentId, limit: "200" }
+  if (semester) params._semester = semester
+  const items = await employeeDataAllItems("/v1/data/student-performance-list", params, undefined)
+
+  return items
+    .filter((item) => !subject || textValue(asRecord(asRecord(item).subject).id) === subject)
+    .map((item) => {
+      const record = asRecord(item)
+      const itemSubject = asRecord(record.subject)
+      const itemExamType = asRecord(record.examType)
+      const itemEmployee = asRecord(record.employee)
+      return {
+        id: String(textValue(record.id) ?? ""),
+        student: { id: studentId, name: studentName },
+        subject: {
+          id: textValue(itemSubject.id) ?? "",
+          name: textValue(itemSubject.name) ?? "",
+        },
+        examDate: String(textValue(record.exam_date) ?? ""),
+        score: numberValue(record.grade) ?? 0,
+        examType: {
+          id: textValue(itemExamType.id, itemExamType.code) ?? "",
+          name: textValue(itemExamType.name) ?? "",
+        },
+        employee: {
+          id: textValue(itemEmployee.id, record._employee) ?? "",
+          name: textValue(itemEmployee.name, itemEmployee.full_name) ?? "",
+        },
+      }
+    })
+}
+
 router.get("/performance", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
   if (isDemoUser(req.user)) { res.json({ success: true, data: mockPerformance(), source: "demo" }); return }
+
+  const semester = req.query._semester || req.query.semester
+  if (req.user?.studentAuthMode === "oauth") {
+    const studentId = textValue(req.user?.id, req.user?.userId)
+    if (!studentId) { res.json({ success: true, data: [] }); return }
+    try {
+      const subject = textValue(req.query.subject)
+      const cacheKey = `performance:${semester ?? "all"}:${subject ?? "all"}`
+      const r = await withHemisCache(reqUserId(req), cacheKey,
+        () => performanceFromBackendApi(
+          studentId,
+          textValue(req.user?.fullName) ?? "",
+          semester ? String(semester) : undefined,
+          subject
+        ), TTL_1H)
+      res.json({ success: true, data: r.data, source: r.source })
+    } catch (err) {
+      res.status(502).json({ success: false, message: extractMessage(err) })
+    }
+    return
+  }
+
   try {
     const params: Record<string, string> = {}
-    const semester = req.query._semester || req.query.semester
     if (semester)          params.semester = String(semester)
     if (req.query.subject) params.subject  = String(req.query.subject)
     const cacheKey = `performance:${semester ?? "all"}`
