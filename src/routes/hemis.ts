@@ -2821,6 +2821,12 @@ router.post("/auto-login", async (req, res: Response) => {
   } catch (err) {
     studentError = extractMessage(err, "Login yoki parol noto'g'ri")
     details.push(`Talaba API: ${studentError}`)
+    const e = err as AxiosError
+    console.error(
+      "[auto-login] Talaba /v1/auth/login rad etdi — status:", e?.response?.status,
+      "headers:", JSON.stringify(e?.response?.headers ?? {}),
+      "data:", JSON.stringify(e?.response?.data ?? null)
+    )
   }
 
   try {
