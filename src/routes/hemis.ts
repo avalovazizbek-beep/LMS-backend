@@ -3650,18 +3650,58 @@ router.get("/semesters", async (req: AuthRequest, res: Response) => {
 })
 
 /**
+ * MUHIM KASHFIYOT (2026-09-15, jonli HEMIS'ga to'g'ridan-to'g'ri so'rov
+ * bilan tasdiqlandi): /v1/data/* dagi bir nechta resurs (attendance-list,
+ * schedule-list, academic-record-list) `_education_year` berilmasa, buni
+ * "hamma yil" deb emas, HEMIS'ning JORIY tizim yili (masalan 2026-2027)
+ * deb talqin qiladi — talabaning haqiqiy joriy o'qishi undan OLDINGI
+ * yilda (masalan 2025-2026) bo'lsa, natija SOKINGINA bo'sh qaytadi (xato
+ * emas, shunchaki noto'g'ri yil). Buni real talaba misolida (HEMIS'ning
+ * o'z sahifasida 19 ta davomat yozuvi bor edi, lekin `_education_year`
+ * berilmagan so'rov 0 qaytargan, `_education_year=2025` bilan esa aynan
+ * o'sha 19 yozuv chiqdi) tasdiqladim. Shu sabab quyidagi uchta funksiya
+ * (schedule/attendance/grades) endi bir nechta "nomzod" yilni ketma-ket
+ * so'rab, natijalarni birlashtiradi — faqat "joriy tizim yili"ga
+ * ishonmaydi.
+ */
+function candidateEducationYearCodes(): string[] {
+  const now = new Date()
+  // O'zbekiston OTM'larida o'quv yili sentyabrda boshlanadi — shu sabab
+  // yanvar-avgust oylarida "joriy" o'quv yili kodi hali oldingi kalendar
+  // yiliga teng bo'ladi (masalan 2026-yil mart = 2025-2026 o'quv yili).
+  const academicYearStart = now.getMonth() >= 8 /* 8 = sentyabr (0-based) */ ? now.getFullYear() : now.getFullYear() - 1
+  return [String(academicYearStart), String(academicYearStart - 1)]
+}
+
+async function fetchAcrossEducationYears(
+  path: string,
+  baseParams: Record<string, string>,
+  explicitEducationYear?: string
+): Promise<unknown[]> {
+  const years = explicitEducationYear ? [explicitEducationYear] : candidateEducationYearCodes()
+  const byId = new Map<unknown, unknown>()
+  for (const year of years) {
+    const items = await employeeDataAllItems(path, { ...baseParams, _education_year: year }, undefined)
+    for (const item of items) {
+      const id = asRecord(item).id
+      if (!byId.has(id)) byId.set(id, item)
+    }
+  }
+  return Array.from(byId.values())
+}
+
+/**
  * OAuth talaba uchun: /v1/data/schedule-list'dan (_group filtri bilan,
  * admin token orqali) dars jadvalini o'qiydi. api.md'ga ko'ra bu endpoint
  * ham, Student API'ning /v1/education/schedule'i ham AYNAN bir xil
  * "SubjectSchedule" sxemasidan foydalanadi — shu sabab natijani hech
  * qanday qayta xaritalashsiz, to'g'ridan-to'g'ri qaytarish mumkin.
  */
-async function scheduleFromBackendApi(groupId: string, week?: string, semester?: string) {
+async function scheduleFromBackendApi(groupId: string, week?: string, semester?: string, educationYear?: string) {
   const params: Record<string, string> = { _group: groupId, limit: "200" }
   if (week)     params._week     = week
   if (semester) params._semester = semester
-  const items = await employeeDataAllItems("/v1/data/schedule-list", params, undefined)
-  // TASHXIS (vaqtinchalik, attendance-debug bilan bir xil sabab).
+  const items = await fetchAcrossEducationYears("/v1/data/schedule-list", params, educationYear)
   console.log(`[hemis schedule oauth-debug] params=${JSON.stringify(params)} itemsCount=${Array.isArray(items) ? items.length : "not-array"}`)
   return items
 }
@@ -3713,15 +3753,12 @@ router.get("/schedule", async (req: AuthRequest, res: Response) => {
  * absent_off orqali fallback bilan hisoblaydi, shu sabab qo'shimcha
  * xaritalash shart emas.
  */
-async function attendanceFromBackendApi(studentId: string, groupId?: string, semester?: string, subject?: string) {
+async function attendanceFromBackendApi(studentId: string, groupId?: string, semester?: string, subject?: string, educationYear?: string) {
   const params: Record<string, string> = { _student: studentId, limit: "200" }
   if (groupId)  params._group    = groupId
   if (semester) params._semester = semester
   if (subject)  params._subject  = subject
-  const items = await employeeDataAllItems("/v1/data/attendance-list", params, undefined)
-  // TASHXIS (vaqtincha): OAuth orqali kirgan talabalarda bu sahifa bo'sh
-  // chiqayotgani sababini aniqlash uchun — qaysi parametrlar bilan
-  // so'ralgani va nechta yozuv qaytgani. Sabab aniqlangach olib tashlanadi.
+  const items = await fetchAcrossEducationYears("/v1/data/attendance-list", params, educationYear)
   console.log(`[hemis attendance oauth-debug] params=${JSON.stringify(params)} itemsCount=${Array.isArray(items) ? items.length : "not-array"}`)
   return items
 }
