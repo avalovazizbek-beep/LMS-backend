@@ -3660,7 +3660,10 @@ async function scheduleFromBackendApi(groupId: string, week?: string, semester?:
   const params: Record<string, string> = { _group: groupId, limit: "200" }
   if (week)     params._week     = week
   if (semester) params._semester = semester
-  return employeeDataAllItems("/v1/data/schedule-list", params, undefined)
+  const items = await employeeDataAllItems("/v1/data/schedule-list", params, undefined)
+  // TASHXIS (vaqtinchalik, attendance-debug bilan bir xil sabab).
+  console.log(`[hemis schedule oauth-debug] params=${JSON.stringify(params)} itemsCount=${Array.isArray(items) ? items.length : "not-array"}`)
+  return items
 }
 
 /* ── GET /api/hemis/schedule ─────────────────────────────────────── */
@@ -3778,6 +3781,7 @@ async function gradesFromAcademicRecords(studentId: string, semester?: string) {
   const params: Record<string, string> = { _student: studentId, limit: "200" }
   if (semester) params._semester = semester
   const items = await employeeDataAllItems("/v1/data/academic-record-list", params, undefined)
+  console.log(`[hemis grades oauth-debug] params=${JSON.stringify(params)} itemsCount=${Array.isArray(items) ? items.length : "not-array"}`)
   return items.map((item) => {
     const r = asRecord(item)
     return {
