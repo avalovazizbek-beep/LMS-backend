@@ -64,6 +64,12 @@ Login methods, both available to students and employees:
 
 **Credential cache + silent refresh**: on every successful *password*-based login, the plaintext password is encrypted (AES-256-GCM, `src/services/credentialCrypto.ts`, key from `HEMIS_CREDENTIALS_KEY`) and stored in `hemis_users.password_enc` alongside `hemis_login`, keyed by `hemis_id`. `POST /refresh` (mounted before `authMiddleware` so it accepts an *expired* JWT — signature is still verified) decrypts the stored password and re-authenticates against HEMIS to mint a fresh JWT without asking the user to type their credentials again. If HEMIS rejects the cached password (changed on their end), the cache is cleared and the client must fall back to a normal login. OAuth-based logins never populate this cache (no password is ever seen by the LMS in that flow) — only password-based logins do, and only they benefit from `/refresh` (OAuth sessions simply require a new browser round-trip once their JWT expires).
 
+**Rate limits (measured live, 2026-09-15)**: HEMIS's password endpoints (`/v1/auth/login`, `/ver1/tutor/auth/login`) enforce a hard per-IP anti-abuse block (`429`/`CAPTCHA_REQUIRED`) — this is what pushed OAuth to become the primary login path in the frontend. Separately, the admin-token `/v1/data/*` family (`HEMIS_TOKEN`) has its own, gentler rate limit — observed `X-Rate-Limit-Limit: 10` per window on every response. `src/services/hemisSync.ts` respects this with a strict sequential+throttled pagination loop (~6.5s between requests); do not add concurrency back to that file without re-measuring the limit.
+
+### HEMIS full directory sync (`src/services/hemisSync.ts`)
+
+Independent of login entirely — pulls the full **active** student list, employee list, and group list university-wide via the admin `HEMIS_TOKEN` (`/v1/data/student-list`, `/v1/data/employee-list`, `/v1/data/group-list`), storing them in `hemis_students_directory` / `hemis_employees_directory` / `lms_groups`. Runs once on server startup and then on a `HEMIS_SYNC_INTERVAL_MS` interval (`server.ts`); can also be triggered on demand via `POST /api/admin/hemis-directory-sync` (status at `GET /api/admin/hemis-directory-sync/status`). Purpose: let roster/lookup features read from local MySQL instead of calling HEMIS live on every request — it does **not** and cannot replace password verification (HEMIS never exposes passwords via any API).
+
 ### Language note
 
 Error messages, API responses, and some identifiers are written in **Uzbek**. This is intentional — the target users are Uzbek-speaking. Keep new messages consistent with existing language conventions.
@@ -77,5 +83,6 @@ Error messages, API responses, and some identifiers are written in **Uzbek**. Th
 | `JWT_EXPIRES_IN` | Token lifetime (default `7d`) |
 | `FRONTEND_URL` | Allowed CORS origin (default `http://localhost:3000`) |
 | `HEMIS_CREDENTIALS_KEY` | Key for AES-256-GCM encryption of cached HEMIS passwords (`hemis_users.password_enc`). Falls back to `JWT_SECRET` if unset — set a dedicated value in production. |
+| `HEMIS_SYNC_INTERVAL_MS` | How often the full HEMIS directory sync (`src/services/hemisSync.ts`) re-runs in the background (default 6h = `21600000`). |
 
 Copy `.env.example` if present, or create `.env` manually before running.

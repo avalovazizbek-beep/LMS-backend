@@ -819,6 +819,50 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
 
+  // ── HEMIS to'liq talaba/xodim ro'yxati (fon rejimida sinxronlanadi,
+  // services/hemisSync.ts) — login blokidan mustaqil, admin-token
+  // (/v1/data/*) orqali oldindan olib qo'yiladi, shu bilan ro'yxatni
+  // ko'rish HEMIS'ning login endpointiga umuman bog'liq bo'lmaydi ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS hemis_students_directory (
+      hemis_id           INT PRIMARY KEY,
+      full_name          VARCHAR(255) NOT NULL,
+      student_id_number  VARCHAR(100) NULL,
+      login              VARCHAR(255) NULL,
+      group_id           INT NULL,
+      group_name         VARCHAR(255) NULL,
+      department         VARCHAR(255) NULL,
+      profile            LONGTEXT NULL,
+      synced_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_students_dir_group (group_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "hemis_students_directory")
+
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS hemis_employees_directory (
+      hemis_id            INT PRIMARY KEY,
+      full_name           VARCHAR(255) NOT NULL,
+      employee_id_number  VARCHAR(100) NULL,
+      login               VARCHAR(255) NULL,
+      department          VARCHAR(255) NULL,
+      position            VARCHAR(255) NULL,
+      profile             LONGTEXT NULL,
+      synced_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "hemis_employees_directory")
+
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS hemis_sync_status (
+      id                 INT PRIMARY KEY DEFAULT 1,
+      last_started_at    TIMESTAMP NULL,
+      last_finished_at   TIMESTAMP NULL,
+      students_count     INT NOT NULL DEFAULT 0,
+      employees_count     INT NOT NULL DEFAULT 0,
+      groups_count       INT NOT NULL DEFAULT 0,
+      last_error         TEXT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "hemis_sync_status")
+
   // Default sozlamalar
   await pool.query(`
     INSERT IGNORE INTO lms_settings (key_name, value) VALUES
@@ -1014,4 +1058,115 @@ export async function withHemisCache<T>(
     }
     throw err
   }
+}
+
+/* ── HEMIS to'liq talaba/xodim ro'yxati (services/hemisSync.ts) ───────── */
+export interface StudentDirectoryRow {
+  hemis_id: number
+  full_name: string
+  student_id_number?: string | null
+  login?: string | null
+  group_id?: number | null
+  group_name?: string | null
+  department?: string | null
+  profile?: unknown
+}
+
+export interface EmployeeDirectoryRow {
+  hemis_id: number
+  full_name: string
+  employee_id_number?: string | null
+  login?: string | null
+  department?: string | null
+  position?: string | null
+  profile?: unknown
+}
+
+export async function upsertStudentDirectory(rows: StudentDirectoryRow[]) {
+  for (const r of rows) {
+    await pool.query(
+      `INSERT INTO hemis_students_directory (hemis_id, full_name, student_id_number, login, group_id, group_name, department, profile)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         full_name         = VALUES(full_name),
+         student_id_number = VALUES(student_id_number),
+         login             = VALUES(login),
+         group_id          = VALUES(group_id),
+         group_name        = VALUES(group_name),
+         department        = VALUES(department),
+         profile           = VALUES(profile),
+         synced_at         = CURRENT_TIMESTAMP`,
+      [
+        r.hemis_id,
+        r.full_name,
+        r.student_id_number ?? null,
+        r.login ?? null,
+        r.group_id ?? null,
+        r.group_name ?? null,
+        r.department ?? null,
+        r.profile ? JSON.stringify(r.profile) : null,
+      ]
+    )
+  }
+}
+
+export async function upsertEmployeeDirectory(rows: EmployeeDirectoryRow[]) {
+  for (const r of rows) {
+    await pool.query(
+      `INSERT INTO hemis_employees_directory (hemis_id, full_name, employee_id_number, login, department, position, profile)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         full_name          = VALUES(full_name),
+         employee_id_number = VALUES(employee_id_number),
+         login              = VALUES(login),
+         department         = VALUES(department),
+         position           = VALUES(position),
+         profile            = VALUES(profile),
+         synced_at          = CURRENT_TIMESTAMP`,
+      [
+        r.hemis_id,
+        r.full_name,
+        r.employee_id_number ?? null,
+        r.login ?? null,
+        r.department ?? null,
+        r.position ?? null,
+        r.profile ? JSON.stringify(r.profile) : null,
+      ]
+    )
+  }
+}
+
+export interface HemisSyncStatus {
+  last_started_at: string | null
+  last_finished_at: string | null
+  students_count: number
+  employees_count: number
+  groups_count: number
+  last_error: string | null
+}
+
+export async function markHemisSyncStarted() {
+  await pool.query(
+    `INSERT INTO hemis_sync_status (id, last_started_at, last_error)
+     VALUES (1, CURRENT_TIMESTAMP, NULL)
+     ON DUPLICATE KEY UPDATE last_started_at = CURRENT_TIMESTAMP, last_error = NULL`
+  )
+}
+
+export async function markHemisSyncFinished(counts: { students: number; employees: number; groups: number }) {
+  await pool.query(
+    `UPDATE hemis_sync_status
+     SET last_finished_at = CURRENT_TIMESTAMP, students_count = ?, employees_count = ?, groups_count = ?
+     WHERE id = 1`,
+    [counts.students, counts.employees, counts.groups]
+  )
+}
+
+export async function markHemisSyncFailed(message: string) {
+  await pool.query(`UPDATE hemis_sync_status SET last_error = ? WHERE id = 1`, [message.slice(0, 2000)])
+}
+
+export async function getHemisSyncStatus(): Promise<HemisSyncStatus | null> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>("SELECT * FROM hemis_sync_status WHERE id = 1 LIMIT 1")
+  return rows.length ? (rows[0] as unknown as HemisSyncStatus) : null
 }

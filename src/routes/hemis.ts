@@ -1155,6 +1155,13 @@ async function hemisOAuthAccessToken(role: OAuthRole, code: string, redirectUri:
     Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
   }
 
+  // Parol orqali kirish uchun ishlatiladigan navbatning aynan o'zi — OAuth
+  // token almashinuvi ham HEMIS'ga server tomondan (bizning IP'imizdan)
+  // yuboriladi, shuning uchun 800+ talaba bir vaqtda OAuth callback'dan
+  // qaytganda bu ham HEMIS'ni "zarba" bilan portlatmasligi kerak. Shu bilan
+  // bitta umumiy chegara (MAX_CONCURRENT_HEMIS_LOGIN) HEMIS'ga yuboriladigan
+  // BARCHA autentifikatsiya turdagi so'rovlarni birga tekislaydi.
+  const release = await acquireHemisLoginSlot()
   try {
     const { data } = await axios.post(tokenUrl, body.toString(), { headers, timeout: HEMIS_TIMEOUT_MS })
     const payload = asRecord(asRecord(data).data || data)
@@ -1181,6 +1188,8 @@ async function hemisOAuthAccessToken(role: OAuthRole, code: string, redirectUri:
       new Error("HEMIS OAuth client authentication failed. Client ID/client code yoki OAuth redirect URL HEMISdagi klient sozlamasiga mos emas"),
       { details: [detail] }
     )
+  } finally {
+    release()
   }
 }
 
@@ -1193,12 +1202,19 @@ function oauthFieldsForRole(role: OAuthRole) {
 async function hemisOAuthUser(oauthBase: string, accessToken: string, role: OAuthRole) {
   const fields = oauthFieldsForRole(role).join(",")
 
-  const { data } = await axios.get(`${oauthBase}/oauth/api/user`, {
-    params: { fields },
-    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-    timeout: HEMIS_TIMEOUT_MS,
-  })
-  return asRecord(asRecord(data).data || data)
+  // hemisOAuthAccessToken kabi — bu ham HEMIS'ga bizning server IP'imizdan
+  // ketadigan so'rov, shu sabab xuddi shu navbatdan o'tadi.
+  const release = await acquireHemisLoginSlot()
+  try {
+    const { data } = await axios.get(`${oauthBase}/oauth/api/user`, {
+      params: { fields },
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+      timeout: HEMIS_TIMEOUT_MS,
+    })
+    return asRecord(asRecord(data).data || data)
+  } finally {
+    release()
+  }
 }
 
 async function createOAuthSession(requestedRole: OAuthRole, code: string, redirectUri: string, expectedLogin?: string) {

@@ -35,6 +35,7 @@ import {
 } from "./services/meetingStore"
 import { publicResourcePath } from "./services/localResourceStore"
 import { initDatabase } from "./services/db"
+import { runFullHemisSync } from "./services/hemisSync"
 import * as mediasoupService from "./services/mediasoupService"
 
 process.on("unhandledRejection", (reason) => {
@@ -504,6 +505,14 @@ async function start() {
   try {
     await initDatabase()
     console.log("✓ MySQL tayyor")
+
+    // HEMIS to'liq talaba/xodim/guruh ro'yxati — login blokidan mustaqil
+    // admin-token orqali fon rejimida sinxronlanadi (services/hemisSync.ts).
+    // Serverni ishga tushirishni kutdirmasin deb fire-and-forget qilinadi,
+    // so'ng belgilangan interval bilan takrorlanadi.
+    void runFullHemisSync()
+    const syncIntervalMs = Number(process.env.HEMIS_SYNC_INTERVAL_MS || 6 * 60 * 60 * 1000)
+    setInterval(() => void runFullHemisSync(), syncIntervalMs)
   } catch (err) {
     console.error("✗ MySQL ulanmadi:", err instanceof Error ? err.message : err)
     console.log("  → OSPanel ni oching va MySQL 8.0 ni yoqing")

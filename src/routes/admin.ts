@@ -20,7 +20,8 @@ import {
   type AnnouncementAudience,
 } from "../services/announcementStore"
 import { fetchInstituteGroupsWithStudentCounts } from "./hemis"
-import { withHemisCache } from "../services/db"
+import { withHemisCache, getHemisSyncStatus } from "../services/db"
+import { runFullHemisSync } from "../services/hemisSync"
 import {
   getManagedRolePermissions,
   setRolePermission,
@@ -1130,6 +1131,18 @@ router.get("/hemis-students", adminOnly, async (req: AuthRequest, res: Response)
   } catch (err) {
     res.status(502).json({ success: false, message: err instanceof Error ? err.message : "HEMIS'dan talabalar ro'yxatini olishda xato" })
   }
+})
+
+/* ── HEMIS to'liq talaba/xodim/guruh ro'yxati (login blokidan mustaqil,
+   admin-token orqali — services/hemisSync.ts) ──────────────────────── */
+router.post("/hemis-directory-sync", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
+  void runFullHemisSync()
+  res.json({ success: true, started: true })
+})
+
+router.get("/hemis-directory-sync/status", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
+  const status = await getHemisSyncStatus()
+  res.json({ success: true, data: status })
 })
 
 /* ── GET /api/admin/locked-assignments — yakunlangan amaliylar ─────── */
