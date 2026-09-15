@@ -3664,13 +3664,20 @@ router.get("/semesters", async (req: AuthRequest, res: Response) => {
  * so'rab, natijalarni birlashtiradi — faqat "joriy tizim yili"ga
  * ishonmaydi.
  */
+// Talaba eski semestrni (masalan 1-kursdagi 1-semestrni) tanlasa ham
+// ishlashi kerak — bakalavr 4 yil, magistratura odatda 2 yil, ba'zan
+// qayta o'qish bilan uzayadi. 5 yil orqaga (joriy + oldingi 4 ta o'quv
+// yili) YETARLICHA keng zaxira, haddan tashqari ko'p qo'shimcha so'rov
+// yaratmasdan (har biri baribir 1 soatga withHemisCache orqali keshlanadi).
+const EDUCATION_YEAR_LOOKBACK = 5
+
 function candidateEducationYearCodes(): string[] {
   const now = new Date()
   // O'zbekiston OTM'larida o'quv yili sentyabrda boshlanadi — shu sabab
   // yanvar-avgust oylarida "joriy" o'quv yili kodi hali oldingi kalendar
   // yiliga teng bo'ladi (masalan 2026-yil mart = 2025-2026 o'quv yili).
   const academicYearStart = now.getMonth() >= 8 /* 8 = sentyabr (0-based) */ ? now.getFullYear() : now.getFullYear() - 1
-  return [String(academicYearStart), String(academicYearStart - 1)]
+  return Array.from({ length: EDUCATION_YEAR_LOOKBACK }, (_, i) => String(academicYearStart - i))
 }
 
 async function fetchAcrossEducationYears(
