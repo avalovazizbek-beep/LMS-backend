@@ -3698,17 +3698,50 @@ async function fetchAcrossEducationYears(
 }
 
 /**
+ * schedule-list'da attendance-list'dagidek _student filtri YO'Q — faqat
+ * _group bilan so'raladi. Talaba eski semestrda BOSHQA guruhda bo'lgan
+ * bo'lishi mumkin (HATAMOV misolida: 1-kursda "MN-423", hozir "MN-K-323"),
+ * shu holda hozirgi guruh bilan so'ralgan eski semestr jadvali bo'sh
+ * qaytadi. Buni aylanib o'tish uchun — talabaning O'ZI haqidagi
+ * (attendance-list, _student bilan, guruhsiz) bitta yozuvidan o'sha
+ * semestrdagi HAQIQIY guruhini bilib olamiz.
+ */
+async function resolveHistoricalGroupId(studentId: string, semester: string): Promise<string | null> {
+  try {
+    const items = await fetchAcrossEducationYears("/v1/data/attendance-list", { _student: studentId, _semester: semester, limit: "1" })
+    const groupId = numberValue(asRecord(asRecord(items[0]).group).id)
+    return groupId ? String(groupId) : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * OAuth talaba uchun: /v1/data/schedule-list'dan (_group filtri bilan,
  * admin token orqali) dars jadvalini o'qiydi. api.md'ga ko'ra bu endpoint
  * ham, Student API'ning /v1/education/schedule'i ham AYNAN bir xil
  * "SubjectSchedule" sxemasidan foydalanadi — shu sabab natijani hech
  * qanday qayta xaritalashsiz, to'g'ridan-to'g'ri qaytarish mumkin.
  */
-async function scheduleFromBackendApi(groupId: string, week?: string, semester?: string, educationYear?: string) {
+async function scheduleFromBackendApi(studentId: string, groupId: string, week?: string, semester?: string, educationYear?: string) {
   const params: Record<string, string> = { _group: groupId, limit: "200" }
   if (week)     params._week     = week
   if (semester) params._semester = semester
-  const items = await fetchAcrossEducationYears("/v1/data/schedule-list", params, educationYear)
+  let items = await fetchAcrossEducationYears("/v1/data/schedule-list", params, educationYear)
+
+  // Hozirgi guruh bilan bo'sh chiqdi-yu, aniq semestr so'ralgan bo'lsa —
+  // talaba o'sha semestrda boshqa guruhda bo'lgan bo'lishi mumkin.
+  if (items.length === 0 && semester) {
+    const historicalGroupId = await resolveHistoricalGroupId(studentId, semester)
+    if (historicalGroupId && historicalGroupId !== groupId) {
+      items = await fetchAcrossEducationYears(
+        "/v1/data/schedule-list",
+        { ...params, _group: historicalGroupId },
+        educationYear
+      )
+    }
+  }
+
   console.log(`[hemis schedule oauth-debug] params=${JSON.stringify(params)} itemsCount=${Array.isArray(items) ? items.length : "not-array"}`)
   return items
 }
@@ -3760,9 +3793,15 @@ router.get("/schedule", async (req: AuthRequest, res: Response) => {
  * absent_off orqali fallback bilan hisoblaydi, shu sabab qo'shimcha
  * xaritalash shart emas.
  */
-async function attendanceFromBackendApi(studentId: string, groupId?: string, semester?: string, subject?: string, educationYear?: string) {
+// MUHIM: _group qo'shilmaydi — talaba o'qish davomida guruh almashtirishi
+// mumkin (masalan HATAMOV 1-kursda "MN-423"da, hozir "MN-K-323"da edi),
+// va req.user.groupId doim FAQAT hozirgi guruhni bildiradi. _group bilan
+// filtrlash eski semestrlardagi (boshqa guruhdagi) yozuvlarni butunlay
+// yashirib qo'yar edi — _student o'zi yetarli va guruh o'zgarishidan
+// mustaqil ishlaydi (2026-09-15 jonli tekshiruvda aynan shu sabab
+// aniqlandi: guruhsiz so'rov 8 ta yozuv topdi, guruh bilan esa 0).
+async function attendanceFromBackendApi(studentId: string, semester?: string, subject?: string, educationYear?: string) {
   const params: Record<string, string> = { _student: studentId, limit: "200" }
-  if (groupId)  params._group    = groupId
   if (semester) params._semester = semester
   if (subject)  params._subject  = subject
   const items = await fetchAcrossEducationYears("/v1/data/attendance-list", params, educationYear)
@@ -3788,7 +3827,6 @@ router.get("/attendance", async (req: AuthRequest, res: Response) => {
       const r = await withHemisCache(reqUserId(req), cacheKey,
         () => attendanceFromBackendApi(
           studentId,
-          textValue(req.user?.groupId),
           semester ? String(semester) : undefined,
           subject
         ), TTL_1H)
