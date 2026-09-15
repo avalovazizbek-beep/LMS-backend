@@ -3762,7 +3762,12 @@ router.get("/schedule", async (req: AuthRequest, res: Response) => {
     try {
       const cacheKey = `schedule:${semester ?? "all"}:${week ?? "all"}`
       const r = await withHemisCache(reqUserId(req), cacheKey,
-        () => scheduleFromBackendApi(groupId, week ? String(week) : undefined, semester ? String(semester) : undefined), TTL_1H)
+        () => scheduleFromBackendApi(
+            reqUserId(req),
+            groupId,
+            week ? String(week) : undefined,
+            semester ? String(semester) : undefined
+          ), TTL_1H)
       res.json({ success: true, data: r.data, source: r.source })
     } catch (err) {
       res.status(502).json({ success: false, message: extractMessage(err) })
