@@ -9,7 +9,7 @@ import fs from "fs"
 import path from "path"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { localResourcesAsHemisResources } from "../services/localResourceStore"
-import { withHemisCache, upsertHemisUser, pool, clearUserCache, getHemisUser, clearHemisPassword } from "../services/db"
+import { withHemisCache, upsertHemisUser, pool, clearUserCache, getHemisUser, getHemisUserByLogin, clearHemisPassword } from "../services/db"
 import { encryptSecret, decryptSecret } from "../services/credentialCrypto"
 import { recordPlatformSession } from "../services/attendanceStore"
 import {
@@ -889,6 +889,38 @@ function signStudentToken(hemisToken: string, login: string, profile: Record<str
     JWT_SECRET,
     { expiresIn: LMS_TOKEN_TTL }
   )
+}
+
+/**
+ * Qaytgan talaba uchun HEMIS'ga UMUMAN so'rov yubormasdan kirish — 800+
+ * talaba bir zumda "Kirish" bossa ham HEMIS'ning /v1/auth/login'ini
+ * bloklamaslik uchun. Oldin muvaffaqiyatli parol-login qilgan har bir
+ * talabaning shifrlangan paroli, so'nggi HEMIS sessiya tokeni va profili
+ * allaqachon hemis_users'da saqlanadi (saveUserToDb, /refresh uchun
+ * qurilgan kesh). Bu funksiya aynan shu keshni login vaqtida ham
+ * ishlatadi: parol mos kelsa, keshdagi hemisToken'ning O'ZINI qayta
+ * ishlatib (yangisini so'ramasdan) JWT tuziladi.
+ *
+ * Mos kelmasa yoki kesh yo'q bo'lsa (birinchi marta kirish, yoki HEMIS'da
+ * parol o'zgargan) — null qaytaradi, chaqiruvchi joy avvalgidek jonli
+ * HEMIS tekshiruviga o'tadi. Hech kim keshi eskirgani uchun kirishdan
+ * mahrum bo'lmaydi — faqat sekinroq (avvalgi) yo'lni bosib o'tadi.
+ */
+async function tryLocalStudentLogin(login: string, password: string): Promise<{ token: string } | null> {
+  const row = await getHemisUserByLogin(login)
+  if (!row || row.role !== "student" || !row.password_enc || !row.hemis_token || !row.profile) return null
+
+  const cachedPassword = decryptSecret(row.password_enc)
+  if (cachedPassword === null || cachedPassword !== password) return null
+
+  let profile: Record<string, unknown>
+  try {
+    profile = JSON.parse(row.profile) as Record<string, unknown>
+  } catch {
+    return null
+  }
+
+  return { token: signStudentToken(row.hemis_token, login, profile, "password") }
 }
 
 function signEmployeeToken(
@@ -2871,8 +2903,11 @@ router.post("/login", async (req, res: Response) => {
     return
   }
   try {
-    const result = await createStudentPasswordSession(String(login).trim(), String(password))
-    void saveUserToDb(result.token, "student", String(password))
+    const local = await tryLocalStudentLogin(String(login).trim(), String(password))
+    const result = local
+      ? { success: true as const, token: local.token, role: "student" as const, source: "cache" }
+      : await createStudentPasswordSession(String(login).trim(), String(password))
+    if (!local) void saveUserToDb(result.token, "student", String(password))
     try {
       const decoded = JSON.parse(Buffer.from(result.token.split(".")[1], "base64").toString())
       const uid = Number(decoded.userId ?? decoded.id ?? 0)
@@ -2962,6 +2997,14 @@ router.post("/auto-login", async (req, res: Response) => {
       return
     }
   } catch { /* demo tekshiruvi muvaffaqiyatsiz bo'lsa — real HEMIS urinishiga o'tamiz */ }
+
+  // ── Qaytgan talaba: keshlangan parol/HEMIS tokeni mos kelsa, HEMIS'ga
+  // umuman tegmasdan kirish (800+ talaba bir vaqtda kirganda ham) ──
+  const local = await tryLocalStudentLogin(login, password)
+  if (local) {
+    res.json({ success: true, token: local.token, role: "student", source: "cache" })
+    return
+  }
 
   const details: string[] = []
   let studentError = ""

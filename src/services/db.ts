@@ -13,7 +13,11 @@ export const pool = mysql.createPool({
   ...baseConfig,
   database: DB_NAME,
   waitForConnections: true,
-  connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 10),
+  // Avval 10 edi — 800-1000 talaba bir vaqtda login qilganda (masalan
+  // imtihon boshlanishida) bu havza o'zi tirbandlik nuqtasiga aylanib
+  // qolardi. HEMIS bilan bog'liq muammo bartaraf etilgan taqdirda ham,
+  // MySQL ulanish havzasi buning uchun yetarli bo'lishi kerak.
+  connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 50),
   maxIdle:          Number(process.env.DB_MAX_IDLE || 10),
   idleTimeout:      60_000,
   enableKeepAlive:  true,
@@ -77,6 +81,9 @@ export async function initDatabase() {
   // qachon oddiy matnda emas.
   await execIgnoreDuplicate(`ALTER TABLE hemis_users ADD COLUMN hemis_login VARCHAR(255) NULL AFTER username`)
   await execIgnoreDuplicate(`ALTER TABLE hemis_users ADD COLUMN password_enc VARCHAR(1000) NULL AFTER hemis_login`)
+  // Qaytgan foydalanuvchini login bo'yicha tez topish uchun — lokal
+  // parol tekshiruvi (routes/hemis.ts, tryLocalStudentLogin) shu orqali ishlaydi.
+  await execIgnoreDuplicate(`ALTER TABLE hemis_users ADD INDEX idx_hemis_users_login (hemis_login)`)
 
   // ── HEMIS API response cache ──
   await exec(`
@@ -1059,6 +1066,19 @@ export async function getHemisUser(hemisId: string): Promise<HemisUserRow | null
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
     "SELECT * FROM hemis_users WHERE hemis_id = ? LIMIT 1",
     [hemisId]
+  )
+  return rows.length ? (rows[0] as HemisUserRow) : null
+}
+
+/** Qaytgan foydalanuvchini login bo'yicha topadi — lokal parol tekshiruvi
+ *  (routes/hemis.ts, tryLocalStudentLogin) shu orqali ishlaydi. Katta-kichik
+ *  harf farqini e'tiborsiz qoldiradi — mavjud qatorlar dastlab qanday
+ *  kiritilgan bo'lsa o'shanday saqlanib qolgan (qayta normalizatsiya
+ *  qilinmagan), shu sabab qidiruv tarafida moslashamiz. */
+export async function getHemisUserByLogin(login: string): Promise<HemisUserRow | null> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT * FROM hemis_users WHERE LOWER(hemis_login) = LOWER(?) LIMIT 1",
+    [login]
   )
   return rows.length ? (rows[0] as HemisUserRow) : null
 }
