@@ -1272,10 +1272,13 @@ async function createOAuthSession(requestedRole: OAuthRole, code: string, redire
     // (xuddi xodim OAuth'ida access_token to'g'ridan-to'g'ri ishlatilgani
     // kabi — ikkalasi ham bitta HEMIS OAuth serverining tokeni).
     if (!studentApiToken) {
-      console.warn(
-        "[HEMIS student oauth] student_api_token yo'q — profil to'g'ridan-to'g'ri OAuth javobidan olinadi, access_token Student REST tokeni sifatida ishlatiladi. Maydonlar:",
-        Object.keys(oauthUser)
-      )
+      // MUHIM: bu XATO EMAS — bu universitet HEMIS'ining OAuth javobida
+      // student_api_token umuman bo'lmaydi, shu sabab har bir talaba OAuth
+      // orqali kirganda bu qator DOIM chiqadi (kutilgan, mo'ljallangan
+      // xatti-harakat, pastdagi fallback shu uchun yozilgan). Terminalda
+      // "xato"day ko'rinib chalg'itmasligi uchun ataylab console.log
+      // (console.warn emas).
+      console.log("[HEMIS student oauth] student_api_token yo'q, profil OAuth javobidan to'g'ridan-to'g'ri olindi (normal holat)")
       // login/username bu shaklda umuman qaytmaydi — har bir talaba uchun
       // barqaror va bir-biridan farqli identifikator sifatida
       // student_id_number ishlatiladi (aks holda hammasi bitta umumiy
