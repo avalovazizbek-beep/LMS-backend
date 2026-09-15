@@ -3672,7 +3672,12 @@ async function attendanceFromBackendApi(studentId: string, groupId?: string, sem
   if (groupId)  params._group    = groupId
   if (semester) params._semester = semester
   if (subject)  params._subject  = subject
-  return employeeDataAllItems("/v1/data/attendance-list", params, undefined)
+  const items = await employeeDataAllItems("/v1/data/attendance-list", params, undefined)
+  // TASHXIS (vaqtincha): OAuth orqali kirgan talabalarda bu sahifa bo'sh
+  // chiqayotgani sababini aniqlash uchun — qaysi parametrlar bilan
+  // so'ralgani va nechta yozuv qaytgani. Sabab aniqlangach olib tashlanadi.
+  console.log(`[hemis attendance oauth-debug] params=${JSON.stringify(params)} itemsCount=${Array.isArray(items) ? items.length : "not-array"}`)
+  return items
 }
 
 /* ── GET /api/hemis/attendance ───────────────────────────────────── */
