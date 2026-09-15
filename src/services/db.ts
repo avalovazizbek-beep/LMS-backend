@@ -832,11 +832,15 @@ export async function initDatabase() {
       group_id           INT NULL,
       group_name         VARCHAR(255) NULL,
       department         VARCHAR(255) NULL,
+      is_active          TINYINT(1) NOT NULL DEFAULT 1,
       profile            LONGTEXT NULL,
       synced_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      INDEX idx_students_dir_group (group_id)
+      INDEX idx_students_dir_group (group_id),
+      INDEX idx_students_dir_active (is_active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "hemis_students_directory")
+  await execIgnoreDuplicate(`ALTER TABLE hemis_students_directory ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER department`)
+  await execIgnoreDuplicate(`ALTER TABLE hemis_students_directory ADD INDEX idx_students_dir_active (is_active)`)
 
   await execSafe(`
     CREATE TABLE IF NOT EXISTS hemis_employees_directory (
@@ -846,10 +850,66 @@ export async function initDatabase() {
       login               VARCHAR(255) NULL,
       department          VARCHAR(255) NULL,
       position            VARCHAR(255) NULL,
-      profile             LONGTEXT NULL,
-      synced_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      is_active           TINYINT(1) NOT NULL DEFAULT 1,
+      profile              LONGTEXT NULL,
+      synced_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_employees_dir_active (is_active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "hemis_employees_directory")
+  await execIgnoreDuplicate(`ALTER TABLE hemis_employees_directory ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER position`)
+  await execIgnoreDuplicate(`ALTER TABLE hemis_employees_directory ADD INDEX idx_employees_dir_active (is_active)`)
+
+  // ── Fakultet/Kafedra (HEMIS'da bitta resurs — /v1/data/department-list,
+  // structure_type orqali ajratiladi: "Fakultet", "Kafedra", "Bo'lim" va h.k.) ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS hemis_departments_directory (
+      hemis_id        INT PRIMARY KEY,
+      name            VARCHAR(255) NOT NULL,
+      code            VARCHAR(100) NULL,
+      parent_id       INT NULL,
+      structure_type  VARCHAR(120) NULL,
+      is_active       TINYINT(1) NOT NULL DEFAULT 1,
+      profile         LONGTEXT NULL,
+      synced_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_dept_dir_parent (parent_id),
+      INDEX idx_dept_dir_type (structure_type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "hemis_departments_directory")
+
+  // ── Fanlar (/v1/data/subject-meta-list) ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS hemis_subjects_directory (
+      hemis_id        INT PRIMARY KEY,
+      name            VARCHAR(255) NOT NULL,
+      code            VARCHAR(100) NULL,
+      is_active       TINYINT(1) NOT NULL DEFAULT 1,
+      subject_group   VARCHAR(255) NULL,
+      education_type  VARCHAR(120) NULL,
+      synced_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "hemis_subjects_directory")
+
+  // ── Semestrlar (/v1/data/semester-list — HEMIS'da har bir o'quv reja
+  // (_curriculum) o'zining semestr kalendarini olib yuradi, shu sabab
+  // curriculum_id ham saqlanadi) ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS hemis_semesters_directory (
+      hemis_id        INT PRIMARY KEY,
+      code            VARCHAR(20) NULL,
+      name            VARCHAR(120) NOT NULL,
+      curriculum_id   INT NULL,
+      education_year  VARCHAR(20) NULL,
+      level_code      VARCHAR(20) NULL,
+      level_name      VARCHAR(120) NULL,
+      position        INT NULL,
+      is_active       TINYINT(1) NOT NULL DEFAULT 0,
+      is_current      TINYINT(1) NOT NULL DEFAULT 0,
+      start_date      DATE NULL,
+      end_date        DATE NULL,
+      synced_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_sem_dir_curriculum (curriculum_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "hemis_semesters_directory")
 
   await execSafe(`
     CREATE TABLE IF NOT EXISTS hemis_sync_status (
@@ -859,9 +919,34 @@ export async function initDatabase() {
       students_count     INT NOT NULL DEFAULT 0,
       employees_count     INT NOT NULL DEFAULT 0,
       groups_count       INT NOT NULL DEFAULT 0,
+      departments_count  INT NOT NULL DEFAULT 0,
+      subjects_count     INT NOT NULL DEFAULT 0,
+      semesters_count    INT NOT NULL DEFAULT 0,
       last_error         TEXT NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "hemis_sync_status")
+  await execIgnoreDuplicate(`ALTER TABLE hemis_sync_status ADD COLUMN departments_count INT NOT NULL DEFAULT 0 AFTER groups_count`)
+  await execIgnoreDuplicate(`ALTER TABLE hemis_sync_status ADD COLUMN subjects_count INT NOT NULL DEFAULT 0 AFTER departments_count`)
+  await execIgnoreDuplicate(`ALTER TABLE hemis_sync_status ADD COLUMN semesters_count INT NOT NULL DEFAULT 0 AFTER subjects_count`)
+
+  // ── HEMIS to'liq sinxronizatsiyaning HAR BIR urinishi tarixi (nafaqat
+  // oxirgisi) — admin panelda "Sync History" uchun ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS hemis_sync_log (
+      id                 INT AUTO_INCREMENT PRIMARY KEY,
+      started_at         TIMESTAMP NOT NULL,
+      finished_at        TIMESTAMP NULL,
+      status             ENUM('running','success','failed') NOT NULL DEFAULT 'running',
+      students_count     INT NOT NULL DEFAULT 0,
+      employees_count    INT NOT NULL DEFAULT 0,
+      groups_count       INT NOT NULL DEFAULT 0,
+      departments_count  INT NOT NULL DEFAULT 0,
+      subjects_count     INT NOT NULL DEFAULT 0,
+      semesters_count    INT NOT NULL DEFAULT 0,
+      error_message      TEXT NULL,
+      INDEX idx_sync_log_started (started_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "hemis_sync_log")
 
   // Default sozlamalar
   await pool.query(`
@@ -1085,8 +1170,8 @@ export interface EmployeeDirectoryRow {
 export async function upsertStudentDirectory(rows: StudentDirectoryRow[]) {
   for (const r of rows) {
     await pool.query(
-      `INSERT INTO hemis_students_directory (hemis_id, full_name, student_id_number, login, group_id, group_name, department, profile)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO hemis_students_directory (hemis_id, full_name, student_id_number, login, group_id, group_name, department, is_active, profile)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
        ON DUPLICATE KEY UPDATE
          full_name         = VALUES(full_name),
          student_id_number = VALUES(student_id_number),
@@ -1094,6 +1179,7 @@ export async function upsertStudentDirectory(rows: StudentDirectoryRow[]) {
          group_id          = VALUES(group_id),
          group_name        = VALUES(group_name),
          department        = VALUES(department),
+         is_active         = 1,
          profile           = VALUES(profile),
          synced_at         = CURRENT_TIMESTAMP`,
       [
@@ -1113,14 +1199,15 @@ export async function upsertStudentDirectory(rows: StudentDirectoryRow[]) {
 export async function upsertEmployeeDirectory(rows: EmployeeDirectoryRow[]) {
   for (const r of rows) {
     await pool.query(
-      `INSERT INTO hemis_employees_directory (hemis_id, full_name, employee_id_number, login, department, position, profile)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO hemis_employees_directory (hemis_id, full_name, employee_id_number, login, department, position, is_active, profile)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?)
        ON DUPLICATE KEY UPDATE
          full_name          = VALUES(full_name),
          employee_id_number = VALUES(employee_id_number),
          login              = VALUES(login),
          department         = VALUES(department),
          position           = VALUES(position),
+         is_active          = 1,
          profile            = VALUES(profile),
          synced_at          = CURRENT_TIMESTAMP`,
       [
@@ -1136,37 +1223,196 @@ export async function upsertEmployeeDirectory(rows: EmployeeDirectoryRow[]) {
   }
 }
 
+/**
+ * HEMIS'ning FAOL ro'yxatidan endi tushib qolgan (chiqarilgan/bitirgan/
+ * ishdan bo'shagan) talaba/xodimlarni DELETE qilmasdan is_active=0 qilib
+ * belgilaydi — tarixiy ma'lumotlar (baholar, topshiriqlar va h.k., ular
+ * hemis_id orqali bog'langan) yo'qolib qolmasligi uchun. "runStartedAt"dan
+ * OLDIN yozilgan (demak shu yugurishda YANGILANMAGAN) qatorlar — aynan
+ * shu tushib qolganlar, chunki upsert* funksiyalari har safar synced_at'ni
+ * CURRENT_TIMESTAMP'ga yangilaydi.
+ */
+export async function deactivateStaleStudents(runStartedAt: Date): Promise<number> {
+  const [result] = await pool.query(
+    "UPDATE hemis_students_directory SET is_active = 0 WHERE is_active = 1 AND synced_at < ?",
+    [toMysqlDate(runStartedAt)]
+  )
+  return (result as mysql.ResultSetHeader).affectedRows
+}
+
+export async function deactivateStaleEmployees(runStartedAt: Date): Promise<number> {
+  const [result] = await pool.query(
+    "UPDATE hemis_employees_directory SET is_active = 0 WHERE is_active = 1 AND synced_at < ?",
+    [toMysqlDate(runStartedAt)]
+  )
+  return (result as mysql.ResultSetHeader).affectedRows
+}
+
+/* ── Fakultet/Kafedra, Fan, Semestr (services/hemisSync.ts) ──────────── */
+export interface DepartmentDirectoryRow {
+  hemis_id: number
+  name: string
+  code?: string | null
+  parent_id?: number | null
+  structure_type?: string | null
+  is_active: boolean
+  profile?: unknown
+}
+
+export interface SubjectDirectoryRow {
+  hemis_id: number
+  name: string
+  code?: string | null
+  is_active: boolean
+  subject_group?: string | null
+  education_type?: string | null
+}
+
+export interface SemesterDirectoryRow {
+  hemis_id: number
+  code?: string | null
+  name: string
+  curriculum_id?: number | null
+  education_year?: string | null
+  level_code?: string | null
+  level_name?: string | null
+  position?: number | null
+  is_active: boolean
+  is_current: boolean
+  start_date?: string | null
+  end_date?: string | null
+}
+
+export async function upsertDepartmentDirectory(rows: DepartmentDirectoryRow[]) {
+  for (const r of rows) {
+    await pool.query(
+      `INSERT INTO hemis_departments_directory (hemis_id, name, code, parent_id, structure_type, is_active, profile)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         name           = VALUES(name),
+         code           = VALUES(code),
+         parent_id      = VALUES(parent_id),
+         structure_type = VALUES(structure_type),
+         is_active      = VALUES(is_active),
+         profile        = VALUES(profile),
+         synced_at      = CURRENT_TIMESTAMP`,
+      [r.hemis_id, r.name, r.code ?? null, r.parent_id ?? null, r.structure_type ?? null, r.is_active ? 1 : 0, r.profile ? JSON.stringify(r.profile) : null]
+    )
+  }
+}
+
+export async function upsertSubjectDirectory(rows: SubjectDirectoryRow[]) {
+  for (const r of rows) {
+    await pool.query(
+      `INSERT INTO hemis_subjects_directory (hemis_id, name, code, is_active, subject_group, education_type)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         name           = VALUES(name),
+         code           = VALUES(code),
+         is_active      = VALUES(is_active),
+         subject_group  = VALUES(subject_group),
+         education_type = VALUES(education_type),
+         synced_at      = CURRENT_TIMESTAMP`,
+      [r.hemis_id, r.name, r.code ?? null, r.is_active ? 1 : 0, r.subject_group ?? null, r.education_type ?? null]
+    )
+  }
+}
+
+export async function upsertSemesterDirectory(rows: SemesterDirectoryRow[]) {
+  for (const r of rows) {
+    await pool.query(
+      `INSERT INTO hemis_semesters_directory (hemis_id, code, name, curriculum_id, education_year, level_code, level_name, position, is_active, is_current, start_date, end_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         code           = VALUES(code),
+         name           = VALUES(name),
+         curriculum_id  = VALUES(curriculum_id),
+         education_year = VALUES(education_year),
+         level_code     = VALUES(level_code),
+         level_name     = VALUES(level_name),
+         position       = VALUES(position),
+         is_active      = VALUES(is_active),
+         is_current     = VALUES(is_current),
+         start_date     = VALUES(start_date),
+         end_date       = VALUES(end_date),
+         synced_at      = CURRENT_TIMESTAMP`,
+      [
+        r.hemis_id, r.code ?? null, r.name, r.curriculum_id ?? null, r.education_year ?? null,
+        r.level_code ?? null, r.level_name ?? null, r.position ?? null,
+        r.is_active ? 1 : 0, r.is_current ? 1 : 0, r.start_date ?? null, r.end_date ?? null,
+      ]
+    )
+  }
+}
+
 export interface HemisSyncStatus {
   last_started_at: string | null
   last_finished_at: string | null
   students_count: number
   employees_count: number
   groups_count: number
+  departments_count: number
+  subjects_count: number
+  semesters_count: number
   last_error: string | null
 }
 
-export async function markHemisSyncStarted() {
+export type HemisSyncCounts = {
+  students: number
+  employees: number
+  groups: number
+  departments: number
+  subjects: number
+  semesters: number
+}
+
+export async function markHemisSyncStarted(): Promise<number> {
   await pool.query(
     `INSERT INTO hemis_sync_status (id, last_started_at, last_error)
      VALUES (1, CURRENT_TIMESTAMP, NULL)
      ON DUPLICATE KEY UPDATE last_started_at = CURRENT_TIMESTAMP, last_error = NULL`
   )
+  const [result] = await pool.query(
+    `INSERT INTO hemis_sync_log (started_at, status) VALUES (CURRENT_TIMESTAMP, 'running')`
+  )
+  return (result as mysql.ResultSetHeader).insertId
 }
 
-export async function markHemisSyncFinished(counts: { students: number; employees: number; groups: number }) {
+export async function markHemisSyncFinished(logId: number, counts: HemisSyncCounts) {
   await pool.query(
     `UPDATE hemis_sync_status
-     SET last_finished_at = CURRENT_TIMESTAMP, students_count = ?, employees_count = ?, groups_count = ?
+     SET last_finished_at = CURRENT_TIMESTAMP, students_count = ?, employees_count = ?, groups_count = ?,
+         departments_count = ?, subjects_count = ?, semesters_count = ?
      WHERE id = 1`,
-    [counts.students, counts.employees, counts.groups]
+    [counts.students, counts.employees, counts.groups, counts.departments, counts.subjects, counts.semesters]
+  )
+  await pool.query(
+    `UPDATE hemis_sync_log
+     SET finished_at = CURRENT_TIMESTAMP, status = 'success', students_count = ?, employees_count = ?,
+         groups_count = ?, departments_count = ?, subjects_count = ?, semesters_count = ?
+     WHERE id = ?`,
+    [counts.students, counts.employees, counts.groups, counts.departments, counts.subjects, counts.semesters, logId]
   )
 }
 
-export async function markHemisSyncFailed(message: string) {
+export async function markHemisSyncFailed(logId: number | null, message: string) {
   await pool.query(`UPDATE hemis_sync_status SET last_error = ? WHERE id = 1`, [message.slice(0, 2000)])
+  if (logId !== null) {
+    await pool.query(
+      `UPDATE hemis_sync_log SET finished_at = CURRENT_TIMESTAMP, status = 'failed', error_message = ? WHERE id = ?`,
+      [message.slice(0, 2000), logId]
+    )
+  }
 }
 
 export async function getHemisSyncStatus(): Promise<HemisSyncStatus | null> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>("SELECT * FROM hemis_sync_status WHERE id = 1 LIMIT 1")
   return rows.length ? (rows[0] as unknown as HemisSyncStatus) : null
+}
+
+export async function getHemisSyncLog(limit = 20) {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT * FROM hemis_sync_log ORDER BY started_at DESC LIMIT ?", [limit]
+  )
+  return rows
 }

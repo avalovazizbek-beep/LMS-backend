@@ -2,11 +2,19 @@ import axios from "axios"
 import {
   upsertStudentDirectory,
   upsertEmployeeDirectory,
+  upsertDepartmentDirectory,
+  upsertSubjectDirectory,
+  upsertSemesterDirectory,
+  deactivateStaleStudents,
+  deactivateStaleEmployees,
   markHemisSyncStarted,
   markHemisSyncFinished,
   markHemisSyncFailed,
   type StudentDirectoryRow,
   type EmployeeDirectoryRow,
+  type DepartmentDirectoryRow,
+  type SubjectDirectoryRow,
+  type SemesterDirectoryRow,
 } from "./db"
 import { upsertGroups, type SyncedGroup } from "./teachingStore"
 
@@ -98,15 +106,20 @@ function normalizeItems(value: unknown): unknown[] {
   return []
 }
 
+const MAX_PAGE_ATTEMPTS = 4
+
 /** Admin token (HEMIS_TOKEN) bilan /v1/data/* dan bitta sahifa oladi —
- *  navbatga qo'yilgan (throttle), va 429 kelsa Retry-After'ga qarab kutib
- *  bir marta qayta urinadi (butun sinxronizatsiyani bekor qilmaslik uchun,
- *  lekin cheksiz urinib HEMIS'ni battar band qilmaslik uchun ham faqat bir marta). */
+ *  navbatga qo'yilgan (throttle). 429 kelsa Retry-After'ga qarab kutib
+ *  qayta uradi; tarmoq xatosi/timeout (masalan HEMIS vaqtincha sekin javob
+ *  bergani) bo'lsa ham — bittasi butun ko'p yuzlab sahifali sinxronizatsiyani
+ *  bekor qilib qo'ymasligi uchun — ortib boruvchi pauza bilan qayta uradi.
+ *  MAX_PAGE_ATTEMPTS'dan keyin ham chiqmasa, chindan qattiq muammo deb
+ *  yuqoriga uzatiladi (cheksiz urinilmaydi). */
 async function fetchDataPage(path: string, params: Record<string, string>) {
   const url = new URL(`${HEMIS_BASE}${path}`)
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < MAX_PAGE_ATTEMPTS; attempt++) {
     await throttle()
     try {
       const { data } = await axios.get(url.toString(), {
@@ -115,19 +128,26 @@ async function fetchDataPage(path: string, params: Record<string, string>) {
       })
       return { items: normalizeItems(unwrapData(data)), pagination: unwrapPagination(data) }
     } catch (err) {
-      const status = (err as { response?: { status?: number; headers?: Record<string, string> } })?.response?.status
-      if (status === 429 && attempt === 0) {
+      const isLastAttempt = attempt === MAX_PAGE_ATTEMPTS - 1
+      if (isLastAttempt) throw err
+
+      const status = (err as { response?: { status?: number } })?.response?.status
+      if (status === 429) {
         const retryAfterRaw = (err as { response?: { headers?: Record<string, string> } })?.response?.headers?.["retry-after"]
         const retryAfterSec = Number(retryAfterRaw)
         const waitMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : 60_000
-        console.warn(`[hemisSync] 429 (${path}) — ${Math.round(waitMs / 1000)}s kutib bir marta qayta urinilmoqda`)
+        console.warn(`[hemisSync] 429 (${path}) — ${Math.round(waitMs / 1000)}s kutib qayta urinilmoqda (${attempt + 1}/${MAX_PAGE_ATTEMPTS})`)
         await sleep(waitMs)
         continue
       }
-      throw err
+      // Boshqa xatolar (tarmoq/timeout/5xx) — HEMIS'ni battar band qilmaslik
+      // uchun ortib boruvchi pauza (10s, 20s, 30s...) bilan qayta uriniladi.
+      const waitMs = 10_000 * (attempt + 1)
+      console.warn(`[hemisSync] xato (${path}): ${err instanceof Error ? err.message : err} — ${Math.round(waitMs / 1000)}s kutib qayta urinilmoqda (${attempt + 1}/${MAX_PAGE_ATTEMPTS})`)
+      await sleep(waitMs)
     }
   }
-  throw new Error(`${path}: 429 dan keyin qayta urinish ham muvaffaqiyatsiz`)
+  throw new Error(`${path}: ${MAX_PAGE_ATTEMPTS} marta urinishdan keyin ham muvaffaqiyatsiz`)
 }
 
 /** Berilgan /v1/data/* resursidan universitet bo'yicha HAMMA sahifani,
@@ -149,7 +169,10 @@ async function fetchAllPages(path: string, baseParams: Record<string, string> = 
 export async function syncStudentDirectory(): Promise<number> {
   // _student_status berilmasa HEMIS o'zi default 11 (faol talaba) qo'yadi —
   // aynan shu bizga kerak, chiqarib yuborilgan/bitirgan talabalar LMS
-  // hisobiga muhtoj emas.
+  // hisobiga muhtoj emas. Shu ro'yxatdan endi tushib qolganlar pastda
+  // deactivateStaleStudents orqali is_active=0 qilinadi (DELETE emas —
+  // tarixiy ma'lumotlar hemis_id orqali bog'langanicha qoladi).
+  const runStartedAt = new Date()
   const items = await fetchAllPages("/v1/data/student-list")
   const rows: StudentDirectoryRow[] = items.map((raw) => {
     const r = asRecord(raw)
@@ -168,11 +191,14 @@ export async function syncStudentDirectory(): Promise<number> {
   }).filter((r) => r.hemis_id > 0)
 
   await upsertStudentDirectory(rows)
+  const deactivated = await deactivateStaleStudents(runStartedAt)
+  if (deactivated > 0) console.log(`[hemisSync] ${deactivated} talaba endi HEMIS faol ro'yxatida yo'q — inactive qilindi`)
   return rows.length
 }
 
 /* ── Xodimlar ──────────────────────────────────────────────────────── */
 export async function syncEmployeeDirectory(): Promise<number> {
+  const runStartedAt = new Date()
   const items = await fetchAllPages("/v1/data/employee-list", { type: "all" })
   const rows: EmployeeDirectoryRow[] = items.map((raw) => {
     const r = asRecord(raw)
@@ -190,6 +216,8 @@ export async function syncEmployeeDirectory(): Promise<number> {
   }).filter((r) => r.hemis_id > 0)
 
   await upsertEmployeeDirectory(rows)
+  const deactivated = await deactivateStaleEmployees(runStartedAt)
+  if (deactivated > 0) console.log(`[hemisSync] ${deactivated} xodim endi HEMIS faol ro'yxatida yo'q — inactive qilindi`)
   return rows.length
 }
 
@@ -205,11 +233,109 @@ export async function syncGroupDirectory(): Promise<number> {
   return groups.length
 }
 
+/* ── Fakultet/Kafedra (bitta resurs, structure_type orqali ajratiladi) ── */
+export async function syncDepartmentDirectory(): Promise<number> {
+  const items = await fetchAllPages("/v1/data/department-list", { active: "all" })
+  const rows: DepartmentDirectoryRow[] = items.map((raw) => {
+    const r = asRecord(raw)
+    const structureType = asRecord(r.structureType)
+    return {
+      hemis_id: numberValue(r.id) ?? 0,
+      name: textValue(r.name) || "Bo'lim",
+      code: textValue(r.code) ?? null,
+      parent_id: numberValue(r.parent),
+      structure_type: textValue(structureType.name) ?? null,
+      is_active: r.active !== false,
+      profile: raw,
+    }
+  }).filter((r) => r.hemis_id > 0)
+
+  await upsertDepartmentDirectory(rows)
+  return rows.length
+}
+
+/* ── Fanlar ────────────────────────────────────────────────────────── */
+export async function syncSubjectDirectory(): Promise<number> {
+  const items = await fetchAllPages("/v1/data/subject-meta-list")
+  const rows: SubjectDirectoryRow[] = items.map((raw) => {
+    const r = asRecord(raw)
+    const subjectGroup = asRecord(r.subjectGroup)
+    const educationType = asRecord(r.educationType)
+    return {
+      hemis_id: numberValue(r.id) ?? 0,
+      name: textValue(r.name) || "Fan",
+      code: textValue(r.code) ?? null,
+      is_active: r.active !== false,
+      subject_group: textValue(subjectGroup.name) ?? null,
+      education_type: textValue(educationType.name) ?? null,
+    }
+  }).filter((r) => r.hemis_id > 0)
+
+  await upsertSubjectDirectory(rows)
+  return rows.length
+}
+
+/* ── Semestrlar ────────────────────────────────────────────────────────
+ * HEMIS'da semestr kalendari har bir o'quv reja (_curriculum) bo'yicha
+ * alohida — global "1/2-semestr" ro'yxati emas. Filtrsiz so'rov ham
+ * ishlaydi (butun universitet bo'yicha, sahifalab), shu sabab har bir
+ * curriculum uchun alohida so'ramasdan, to'g'ridan-to'g'ri shundan
+ * o'qiymiz. */
+function dateFromUnixSeconds(value: unknown): string | null {
+  const num = numberValue(value)
+  if (num === null) return null
+  return new Date(num * 1000).toISOString().slice(0, 10)
+}
+
+export async function syncSemesterDirectory(): Promise<number> {
+  const items = await fetchAllPages("/v1/data/semester-list")
+  const rows: SemesterDirectoryRow[] = items.map((raw) => {
+    const r = asRecord(raw)
+    const level = asRecord(r.level)
+    return {
+      hemis_id: numberValue(r.id) ?? 0,
+      code: textValue(r.code) ?? null,
+      name: textValue(r.name) || "Semestr",
+      curriculum_id: numberValue(r._curriculum),
+      education_year: textValue(r._education_year) ?? null,
+      level_code: textValue(level.code) ?? null,
+      level_name: textValue(level.name) ?? null,
+      position: numberValue(r.position),
+      is_active: Boolean(r.active),
+      is_current: Boolean(r.current),
+      start_date: dateFromUnixSeconds(r.start_date),
+      end_date: dateFromUnixSeconds(r.end_date),
+    }
+  }).filter((r) => r.hemis_id > 0)
+
+  await upsertSemesterDirectory(rows)
+  return rows.length
+}
+
 let syncInFlight: Promise<void> | null = null
 
-/** Uchala ro'yxatni ketma-ket sinxronlaydi va natijani hemis_sync_status'ga
- *  yozadi. Bir vaqtning o'zida faqat bitta sinxronizatsiya yurishi mumkin —
- *  qo'lda "hozir sinxronlash" va vaqt jadvali bo'yicha ishga tushish bir-biriga
+/** Bitta resursni sinxronlaydi, xato bo'lsa qolganlarini to'xtatmaydi —
+ *  faqat shu resurs uchun 0 qaytaradi va xatoni errors ro'yxatiga yozadi. */
+async function syncOneResource(name: string, fn: () => Promise<number>, errors: string[]): Promise<number> {
+  try {
+    return await fn()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "noma'lum xatolik"
+    console.error(`[hemisSync] ${name} sinxronlanmadi:`, message)
+    errors.push(`${name}: ${message}`)
+    return 0
+  }
+}
+
+/** Har bir resursni (talaba/xodim/guruh/fakultet/fan/semestr) ketma-ket
+ *  sinxronlaydi va natijani hemis_sync_status + hemis_sync_log'ga yozadi.
+ *  Bittasi xato bersa ham (masalan tarmoq uzilib qolsa) qolganlari davom
+ *  etadi — "success" faqat hech biri xato bermasa, aks holda "failed"
+ *  qilib belgilanadi-yu, lekin muvaffaqiyatli bo'lgan resurslarning
+ *  natijalari baribir bazaga yozilgan bo'ladi (har biri o'z upsert'ida
+ *  darhol commit qilinadi, umumiy tranzaksiya kutilmaydi).
+ *  Bir vaqtning o'zida faqat bitta sinxronizatsiya yurishi mumkin — qo'lda
+ *  "hozir sinxronlash" va vaqt jadvali bo'yicha ishga tushish bir-biriga
  *  to'g'ri kelib qolsa, ikkinchisi birinchisi tugashini kutadi. */
 export async function runFullHemisSync(): Promise<void> {
   if (syncInFlight) return syncInFlight
@@ -219,17 +345,32 @@ export async function runFullHemisSync(): Promise<void> {
       console.warn("[hemisSync] HEMIS_TOKEN sozlanmagan — to'liq sinxronizatsiya o'tkazib yuborildi")
       return
     }
-    await markHemisSyncStarted()
+    let logId: number | null = null
+    const errors: string[] = []
     try {
-      const students = await syncStudentDirectory()
-      const employees = await syncEmployeeDirectory()
-      const groups = await syncGroupDirectory()
-      await markHemisSyncFinished({ students, employees, groups })
-      console.log(`[hemisSync] tayyor — talaba: ${students}, xodim: ${employees}, guruh: ${groups}`)
+      logId = await markHemisSyncStarted()
+      const students    = await syncOneResource("talaba",          syncStudentDirectory,   errors)
+      const employees   = await syncOneResource("xodim",            syncEmployeeDirectory,  errors)
+      const groups      = await syncOneResource("guruh",            syncGroupDirectory,     errors)
+      const departments = await syncOneResource("fakultet/kafedra", syncDepartmentDirectory, errors)
+      const subjects    = await syncOneResource("fan",              syncSubjectDirectory,   errors)
+      const semesters   = await syncOneResource("semestr",          syncSemesterDirectory,  errors)
+      const counts = { students, employees, groups, departments, subjects, semesters }
+
+      if (errors.length) {
+        await markHemisSyncFailed(logId, errors.join(" | "))
+        console.warn(`[hemisSync] QISMAN tugadi (${errors.length} ta resurs xato berdi) —`, counts, errors)
+      } else {
+        await markHemisSyncFinished(logId, counts)
+        console.log(
+          `[hemisSync] tayyor — talaba: ${students}, xodim: ${employees}, guruh: ${groups}, ` +
+          `fakultet/kafedra: ${departments}, fan: ${subjects}, semestr: ${semesters}`
+        )
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "HEMIS sinxronizatsiyasida noma'lum xatolik"
       console.error("[hemisSync] xato:", message)
-      await markHemisSyncFailed(message)
+      await markHemisSyncFailed(logId, message)
     }
   })()
 

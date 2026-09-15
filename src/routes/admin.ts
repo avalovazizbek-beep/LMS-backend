@@ -20,7 +20,7 @@ import {
   type AnnouncementAudience,
 } from "../services/announcementStore"
 import { fetchInstituteGroupsWithStudentCounts } from "./hemis"
-import { withHemisCache, getHemisSyncStatus } from "../services/db"
+import { withHemisCache, getHemisSyncStatus, getHemisSyncLog } from "../services/db"
 import { runFullHemisSync } from "../services/hemisSync"
 import {
   getManagedRolePermissions,
@@ -1143,6 +1143,12 @@ router.post("/hemis-directory-sync", adminOnly, async (_req: AuthRequest, res: R
 router.get("/hemis-directory-sync/status", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
   const status = await getHemisSyncStatus()
   res.json({ success: true, data: status })
+})
+
+router.get("/hemis-directory-sync/log", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const limit = Math.min(Number(req.query.limit ?? 20), 100)
+  const log = await getHemisSyncLog(limit)
+  res.json({ success: true, data: log })
 })
 
 /* ── GET /api/admin/locked-assignments — yakunlangan amaliylar ─────── */
