@@ -240,7 +240,7 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
     FROM hemis_users hu
     LEFT JOIN lms_permissions p ON p.hemis_id = hu.hemis_id
     LEFT JOIN hemis_students_directory hsd ON hsd.hemis_id = CAST(hu.hemis_id AS UNSIGNED)
-    LEFT JOIN face_registrations fr ON fr.username = hsd.login
+    LEFT JOIN face_registrations fr ON fr.username = hsd.student_id_number
     WHERE 1=1 ${whereSql}
     ORDER BY hu.updated_at DESC LIMIT ? OFFSET ?
   `
@@ -1209,11 +1209,11 @@ router.get("/hemis-students/:groupId/roster", adminOnly, async (req: AuthRequest
 
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT
-       d.hemis_id, d.full_name, d.student_id_number, d.login,
+       d.hemis_id, d.full_name, d.student_id_number,
        fr.registered_at AS face_registered_at,
-       (SELECT status FROM face_requests WHERE username = d.login AND initiated_by = 'admin' AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1) AS admin_request_status
+       (SELECT status FROM face_requests WHERE username = d.student_id_number AND initiated_by = 'admin' AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1) AS admin_request_status
      FROM hemis_students_directory d
-     LEFT JOIN face_registrations fr ON fr.username = d.login
+     LEFT JOIN face_registrations fr ON fr.username = d.student_id_number
      WHERE d.is_active = 1 AND d.group_id = ?
      ORDER BY d.full_name`,
     [groupId]
@@ -1243,15 +1243,19 @@ router.post("/hemis-students/:hemisId/request-face-reregister", adminOnly, async
   if (!hemisId) { res.status(400).json({ success: false, message: "hemisId noto'g'ri" }); return }
 
   const [studentRows] = await pool.query<RowDataPacket[]>(
-    "SELECT login, full_name FROM hemis_students_directory WHERE hemis_id = ? LIMIT 1",
+    "SELECT student_id_number, full_name FROM hemis_students_directory WHERE hemis_id = ? LIMIT 1",
     [hemisId]
   )
-  const login = studentRows[0]?.login
-  if (!login) { res.status(404).json({ success: false, message: "Talaba yoki uning HEMIS login'i topilmadi" }); return }
+  // Bu HEMIS o'rnatishida talaba yozuvida `login` maydoni umuman bo'sh
+  // keladi (production'da tekshirilgan) — face_registrations.username
+  // sifatida OAuth orqali kirishda shu sabab student_id_number ishlatilgan
+  // (identityKey fallback zanjiri), shu bilan moslashtiriladi.
+  const studentIdNumber = studentRows[0]?.student_id_number
+  if (!studentIdNumber) { res.status(404).json({ success: false, message: "Talaba yoki uning ID raqami topilmadi" }); return }
 
   const [existing] = await pool.query<RowDataPacket[]>(
     "SELECT id FROM face_requests WHERE username = ? AND initiated_by = 'admin' AND status IN ('pending','approved') LIMIT 1",
-    [login]
+    [studentIdNumber]
   )
   if (existing.length) { res.json({ success: true, message: "Bu talabaga so'rov allaqachon yuborilgan" }); return }
 
@@ -1259,7 +1263,7 @@ router.post("/hemis-students/:hemisId/request-face-reregister", adminOnly, async
   await pool.query(
     `INSERT INTO face_requests (id, username, reason, initiated_by, status, admin_note, created_at, reviewed_at)
      VALUES (UUID(), ?, ?, 'admin', 'approved', ?, ?, ?)`,
-    [login, "Admin: Face ID eskirgan yoki noto'g'ri formatda bo'lishi mumkin", grantedBy, Date.now(), Date.now()]
+    [studentIdNumber, "Admin: Face ID eskirgan yoki noto'g'ri formatda bo'lishi mumkin", grantedBy, Date.now(), Date.now()]
   )
   void logAudit(req, "face.request_reregister", "face-id", String(hemisId))
   res.json({ success: true, message: "So'rov yuborildi — talaba keyingi kirishda ko'radi" })
@@ -1276,9 +1280,9 @@ router.get("/face-id/not-registered", adminOnly, async (req: AuthRequest, res: R
   const [[rows], [totalRow]] = await Promise.all([
     pool.query<RowDataPacket[]>(
       `SELECT d.hemis_id, d.full_name, d.group_name, d.student_id_number,
-         (SELECT status FROM face_requests WHERE username = d.login AND initiated_by = 'admin' AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1) AS admin_request_status
+         (SELECT status FROM face_requests WHERE username = d.student_id_number AND initiated_by = 'admin' AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1) AS admin_request_status
        FROM hemis_students_directory d
-       LEFT JOIN face_registrations fr ON fr.username = d.login
+       LEFT JOIN face_registrations fr ON fr.username = d.student_id_number
        WHERE d.is_active = 1 AND d.education_form_code = '16' AND fr.id IS NULL
        ORDER BY d.full_name
        LIMIT ? OFFSET ?`,
@@ -1287,7 +1291,7 @@ router.get("/face-id/not-registered", adminOnly, async (req: AuthRequest, res: R
     pool.query<RowDataPacket[]>(
       `SELECT COUNT(*) AS total
        FROM hemis_students_directory d
-       LEFT JOIN face_registrations fr ON fr.username = d.login
+       LEFT JOIN face_registrations fr ON fr.username = d.student_id_number
        WHERE d.is_active = 1 AND d.education_form_code = '16' AND fr.id IS NULL`
     ),
   ])

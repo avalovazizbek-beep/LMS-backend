@@ -1285,6 +1285,24 @@ async function hemisOAuthUser(oauthBase: string, accessToken: string, role: OAut
   }
 }
 
+/**
+ * Bu LMS FAQAT masofaviy ta'lim yo'nalishidagi talabalar uchun —
+ * kunduzgi/kechki/sirtqi talabalar kira olmasligi kerak. Mahalliy
+ * sinxronlangan `hemis_students_directory.education_form_code` orqali
+ * tekshiriladi (talabaning o'z yozuvidan, guruh/curriculum orqali emas
+ * — production'da tekshirilgan, eng ishonchli manba). `student_id_number`
+ * orqali qidiriladi, `login` orqali EMAS — bu HEMIS o'rnatishida talaba
+ * yozuvida `login` maydoni umuman bo'sh keladi (tekshirilgan).
+ */
+async function isMasofaviyStudent(studentIdNumber?: string): Promise<boolean> {
+  if (!studentIdNumber) return false
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT education_form_code FROM hemis_students_directory WHERE student_id_number = ? AND is_active = 1 LIMIT 1",
+    [studentIdNumber]
+  )
+  return rows[0]?.education_form_code === "16"
+}
+
 async function createOAuthSession(requestedRole: OAuthRole, code: string, redirectUri: string, expectedLogin?: string) {
   const { oauthBase, accessToken } = await hemisOAuthAccessToken(requestedRole, code, redirectUri)
   const oauthUser = await hemisOAuthUser(oauthBase, accessToken, requestedRole)
@@ -1292,6 +1310,11 @@ async function createOAuthSession(requestedRole: OAuthRole, code: string, redire
   const oauthProfile = profileFromOAuthUser(oauthUser, role)
 
   if (role === "student") {
+    const studentIdNumber = textValue(oauthUser.student_id_number, asRecord(oauthUser.student).student_id_number, oauthProfile.student_id_number)
+    if (!(await isMasofaviyStudent(studentIdNumber))) {
+      throw new Error("Bu tizim faqat masofaviy ta'lim yo'nalishidagi talabalar uchun mo'ljallangan. Sizning ta'lim shaklingiz (kunduzgi/kechki/sirtqi) bu platformaga kirish huquqini bermaydi.")
+    }
+
     const studentApiToken = textValue(
       oauthUser.student_api_token,
       oauthProfile.student_api_token,
@@ -3180,16 +3203,6 @@ router.get("/oauth/:role", async (req, res: Response) => {
 
   const state = textValue(req.query.state) ?? ""
 
-  // VAQTINCHALIK DIAGNOSTIKA (2026-09-16) — "Authorization code has been
-  // revoked" xatosi qayta boshlanib, talabalar OAuth orqali kira olmayapti.
-  // Bu log shu GET manzilga BIR XIL kod bilan necha marta va kimdan
-  // (IP/User-Agent) so'rov kelayotganini ko'rsatadi — muammoning aynan
-  // qayerdan (dublikat so'rov yoki HEMIS'ning o'zidan) kelib chiqayotganini
-  // aniqlash uchun. Xatolik aniqlangach olib tashlanadi.
-  console.log(
-    `[OAUTH-DIAG] GET /oauth/${requestedRole} code=${code.slice(0, 12)}... ip=${req.ip} ua=${req.headers["user-agent"]} referer=${req.headers.referer ?? "yo'q"} time=${new Date().toISOString()}`
-  )
-
   // Render an interstitial page instead of exchanging the code directly on
   // this GET response. Corporate proxies / antivirus / link-scanners fetch
   // GET redirect URLs in the background to inspect them, which silently
@@ -3224,12 +3237,6 @@ router.post("/oauth/exchange/:role", async (req, res: Response) => {
   const redirectUri = configuredOAuthRedirectUri(requestedRole)
   const code = oauthCodeValue(req.body?.code)
   const callbackUrl = new URL(OAUTH_CALLBACK_PATH, FRONTEND_URL)
-
-  // VAQTINCHALIK DIAGNOSTIKA — yuqoridagi GET logi bilan solishtirish uchun:
-  // shu kod uchun exchange nechta marta chaqirilyapti va qaysi IP'dan.
-  console.log(
-    `[OAUTH-DIAG] POST /oauth/exchange/${requestedRole} code=${(code ?? "yo'q").slice(0, 12)}... ip=${req.ip} ua=${req.headers["user-agent"]} time=${new Date().toISOString()}`
-  )
 
   if (!code) {
     callbackUrl.searchParams.set("error", "invalid_request")
