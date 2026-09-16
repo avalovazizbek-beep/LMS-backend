@@ -111,6 +111,16 @@ async function getAttendanceThresholdSeconds(): Promise<number> {
   return (Number.isFinite(minutes) && minutes > 0 ? minutes : DEFAULT_ATTENDANCE_MINUTES) * 60
 }
 
+/** Admin panelidan tanlangan davomat rejimi: "auto" (standart — Face ID
+ *  orqali kamerada ko'ringan vaqt nisbatiga qarab) yoki "manual" (o'qituvchi
+ *  meeting ichida o'zi "Davomat" tugmasi orqali bor/yo'q belgilaydi). */
+export async function getAttendanceMode(): Promise<"auto" | "manual"> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT value FROM lms_settings WHERE key_name = 'attendance_mode' LIMIT 1"
+  )
+  return rows[0]?.value === "manual" ? "manual" : "auto"
+}
+
 const defaultSettings: MeetingSettings = {
   allowCamera: true,
   allowMicrophone: true,
@@ -391,8 +401,14 @@ export async function endMeeting(meeting: MeetingRecord): Promise<MeetingRecord>
   )
   meeting.status = "ended"
 
-  // Kirgan talabalarni lms_attendance ga avtomatik ko'chirish
-  await syncMeetingAttendanceToMain(meeting)
+  // Kirgan talabalarni lms_attendance ga avtomatik ko'chirish — faqat admin
+  // "Avtomatik" rejimni tanlagan bo'lsa. "Qo'lda" rejimda o'qituvchi davomatni
+  // meeting ichidagi "Davomat" tugmasi orqali o'zi belgilab saqlagan bo'ladi
+  // (POST /api/teaching/attendance), shuni Face-ID asosidagi hisob-kitob
+  // bilan qayta ustidan yozib qo'ymaslik uchun bu yerda o'tkazib yuboriladi.
+  if (await getAttendanceMode() === "auto") {
+    await syncMeetingAttendanceToMain(meeting)
+  }
 
   return meeting
 }

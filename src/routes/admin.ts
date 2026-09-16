@@ -814,7 +814,7 @@ router.get("/settings", adminOnly, async (_req: AuthRequest, res: Response): Pro
 /* ── PUT /api/admin/settings ────────────────────────────────────────── */
 router.put("/settings", requirePermission("settings", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const updates = req.body as Record<string, unknown>
-  const allowed = new Set(["face_block_threshold", "test_max_attempts", "meeting_attendance_minutes"])
+  const allowed = new Set(["face_block_threshold", "test_max_attempts", "meeting_attendance_minutes", "attendance_mode"])
   const applied: Record<string, string> = {}
 
   for (const [key, val] of Object.entries(updates)) {

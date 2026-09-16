@@ -1000,7 +1000,8 @@ export async function initDatabase() {
   await pool.query(`
     INSERT IGNORE INTO lms_settings (key_name, value) VALUES
       ('face_block_threshold', '3'),
-      ('test_max_attempts', '1')
+      ('test_max_attempts', '1'),
+      ('attendance_mode', 'auto')
   `)
 
   // hemis_users.teacher_user_id ni profile JSON'dagi raqamli ID dan to'ldirish

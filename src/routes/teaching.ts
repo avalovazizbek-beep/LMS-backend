@@ -817,7 +817,7 @@ router.use(authMiddleware)
    foydalanuvchi o'qiy oladi, faqat admin panelida o'zgartirish mumkin. ── */
 router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
   const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
-    "SELECT key_name, value FROM lms_settings WHERE key_name IN ('face_block_threshold', 'test_max_attempts')"
+    "SELECT key_name, value FROM lms_settings WHERE key_name IN ('face_block_threshold', 'test_max_attempts', 'attendance_mode')"
   )
   const raw: Record<string, string> = {}
   for (const r of rows) raw[String(r.key_name)] = String(r.value)
@@ -828,6 +828,7 @@ router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
     data: {
       faceBlockThreshold: Number.isFinite(faceBlockThreshold) && faceBlockThreshold > 0 ? faceBlockThreshold : 5,
       testMaxAttempts: Number.isFinite(testMaxAttempts) && testMaxAttempts > 0 ? testMaxAttempts : null,
+      attendanceMode: raw.attendance_mode === "manual" ? "manual" : "auto",
     },
   })
 })
