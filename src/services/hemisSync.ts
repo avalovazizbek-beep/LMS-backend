@@ -180,6 +180,12 @@ export async function syncStudentDirectory(): Promise<number> {
     const r = asRecord(raw)
     const group = asRecord(r.group)
     const faculty = asRecord(r.faculty)
+    // Talabaning o'zida to'g'ridan-to'g'ri bor — guruh/curriculum orqali
+    // aylanib o'tish shart emas (production'da tekshirildi). `faculty`dan
+    // farqli o'laroq bu maydonlar bo'sh kelmaydi.
+    const educationForm = asRecord(r.educationForm)
+    const educationType = asRecord(r.educationType)
+    const level = asRecord(r.level)
     return {
       hemis_id: numberValue(r.id) ?? 0,
       full_name: textValue(r.full_name) || "Talaba",
@@ -188,6 +194,12 @@ export async function syncStudentDirectory(): Promise<number> {
       group_id: numberValue(group.id),
       group_name: textValue(group.name) ?? null,
       department: textValue(faculty.name) ?? null,
+      education_form_code: textValue(educationForm.code) ?? null,
+      education_form_name: textValue(educationForm.name) ?? null,
+      education_type_code: textValue(educationType.code) ?? null,
+      education_type_name: textValue(educationType.name) ?? null,
+      level_code: textValue(level.code) ?? null,
+      level_name: textValue(level.name) ?? null,
       profile: raw,
     }
   }).filter((r) => r.hemis_id > 0)

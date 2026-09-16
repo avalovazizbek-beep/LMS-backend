@@ -855,6 +855,17 @@ export async function initDatabase() {
   `, "hemis_students_directory")
   await execIgnoreDuplicate(`ALTER TABLE hemis_students_directory ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER department`)
   await execIgnoreDuplicate(`ALTER TABLE hemis_students_directory ADD INDEX idx_students_dir_active (is_active)`)
+  // Talabaning o'z yozuvida to'g'ridan-to'g'ri bor ekan (guruh/curriculum
+  // orqali aylanib o'tish shart emas) — ta'lim shakli (Kunduzgi/Masofaviy/...),
+  // daraja (Bakalavr/Magistr) va kurs (1-kurs, 2-kurs...). Admin panelda
+  // "faqat masofaviy, N-kurs, Bakalavr/Magistr" filtri shu ustunlarga tayanadi.
+  await execIgnoreDuplicate(`ALTER TABLE hemis_students_directory ADD COLUMN education_form_code VARCHAR(20) NULL AFTER department`)
+  await execIgnoreDuplicate(`ALTER TABLE hemis_students_directory ADD COLUMN education_form_name VARCHAR(100) NULL AFTER education_form_code`)
+  await execIgnoreDuplicate(`ALTER TABLE hemis_students_directory ADD COLUMN education_type_code VARCHAR(20) NULL AFTER education_form_name`)
+  await execIgnoreDuplicate(`ALTER TABLE hemis_students_directory ADD COLUMN education_type_name VARCHAR(100) NULL AFTER education_type_code`)
+  await execIgnoreDuplicate(`ALTER TABLE hemis_students_directory ADD COLUMN level_code VARCHAR(20) NULL AFTER education_type_name`)
+  await execIgnoreDuplicate(`ALTER TABLE hemis_students_directory ADD COLUMN level_name VARCHAR(100) NULL AFTER level_code`)
+  await execIgnoreDuplicate(`ALTER TABLE hemis_students_directory ADD INDEX idx_students_dir_form (education_form_code)`)
 
   await execSafe(`
     CREATE TABLE IF NOT EXISTS hemis_employees_directory (
@@ -1204,6 +1215,12 @@ export interface StudentDirectoryRow {
   group_id?: number | null
   group_name?: string | null
   department?: string | null
+  education_form_code?: string | null
+  education_form_name?: string | null
+  education_type_code?: string | null
+  education_type_name?: string | null
+  level_code?: string | null
+  level_name?: string | null
   profile?: unknown
 }
 
@@ -1220,18 +1237,24 @@ export interface EmployeeDirectoryRow {
 export async function upsertStudentDirectory(rows: StudentDirectoryRow[]) {
   for (const r of rows) {
     await pool.query(
-      `INSERT INTO hemis_students_directory (hemis_id, full_name, student_id_number, login, group_id, group_name, department, is_active, profile)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+      `INSERT INTO hemis_students_directory (hemis_id, full_name, student_id_number, login, group_id, group_name, department, education_form_code, education_form_name, education_type_code, education_type_name, level_code, level_name, is_active, profile)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
        ON DUPLICATE KEY UPDATE
-         full_name         = VALUES(full_name),
-         student_id_number = VALUES(student_id_number),
-         login             = VALUES(login),
-         group_id          = VALUES(group_id),
-         group_name        = VALUES(group_name),
-         department        = VALUES(department),
-         is_active         = 1,
-         profile           = VALUES(profile),
-         synced_at         = CURRENT_TIMESTAMP`,
+         full_name           = VALUES(full_name),
+         student_id_number   = VALUES(student_id_number),
+         login               = VALUES(login),
+         group_id            = VALUES(group_id),
+         group_name          = VALUES(group_name),
+         department          = VALUES(department),
+         education_form_code = VALUES(education_form_code),
+         education_form_name = VALUES(education_form_name),
+         education_type_code = VALUES(education_type_code),
+         education_type_name = VALUES(education_type_name),
+         level_code          = VALUES(level_code),
+         level_name          = VALUES(level_name),
+         is_active           = 1,
+         profile             = VALUES(profile),
+         synced_at           = CURRENT_TIMESTAMP`,
       [
         r.hemis_id,
         r.full_name,
@@ -1240,6 +1263,12 @@ export async function upsertStudentDirectory(rows: StudentDirectoryRow[]) {
         r.group_id ?? null,
         r.group_name ?? null,
         r.department ?? null,
+        r.education_form_code ?? null,
+        r.education_form_name ?? null,
+        r.education_type_code ?? null,
+        r.education_type_name ?? null,
+        r.level_code ?? null,
+        r.level_name ?? null,
         r.profile ? JSON.stringify(r.profile) : null,
       ]
     )

@@ -489,98 +489,79 @@ export interface HemisGroupSummary {
 }
 
 /**
- * Xodimning HEMIS profilidagi department.id ko'pincha KAFEDRA bo'ladi —
- * talabalar esa kafedraga emas, FAKULTETga bog'lanadi
- * (hemis_students_directory.department talabaning `faculty.name`'idan
- * sinxronlanadi, syncStudentDirectory'da). Shu sabab parent_id zanjiri
- * bo'ylab "Fakultet/Institut" turidagi ajdodgacha (yoki eng yuqori,
- * parentsiz qatorgacha) ko'tariladi.
+ * Bu LMS FAQAT masofaviy ta'lim yo'nalishi uchun (bakalavr ham, magistr
+ * ham) — shu sabab guruhlar ro'yxati doim shu filtr bilan chiqadi,
+ * so'ragan adminning o'z fakultetidan qat'i nazar. `education_form_code
+ * = '16'` — talaba yozuvining o'zidan sinxronlanadi (`educationForm`,
+ * syncStudentDirectory'da), guruh yoki fakultet orqali emas: production'da
+ * tekshirilgan — bitta HEMIS "Magistratura" bo'limining o'zi ichida ham
+ * Kunduzgi, ham Masofaviy o'quv rejalar aralash turadi, bo'lim/fakultet
+ * darajasida ajratib bo'lmaydi.
  */
-async function fetchDepartmentDirectoryRow(id: number): Promise<mysql.RowDataPacket | undefined> {
-  const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    "SELECT name, parent_id, structure_type FROM hemis_departments_directory WHERE hemis_id = ?",
-    [id]
-  )
-  return rows[0]
-}
+const MASOFAVIY_FORM_CODE = "16"
 
-async function resolveFacultyName(departmentId: string, hop = 0): Promise<string | null> {
-  const id = Number(departmentId)
-  if (!id || hop >= 5) return null
-  const row = await fetchDepartmentDirectoryRow(id)
-  if (!row) return null
-  const type = String(row.structure_type ?? "").toLowerCase()
-  if (type.includes("fakultet") || type.includes("institut") || type.includes("faculty") || !row.parent_id) {
-    return String(row.name)
-  }
-  return resolveFacultyName(String(row.parent_id), hop + 1)
-}
-
-/**
- * So'ragan (admin) xodimning O'Z fakulteti/institutiga qarashli barcha
- * guruhlar va har birining talaba soni — mahalliy sinxronlangan
- * `hemis_students_directory`/`hemis_departments_directory` jadvallaridan
- * (services/hemisSync.ts), LIVE HEMIS so'rovisiz. Ilgari bu funksiya har
- * guruh uchun alohida `/v1/data/student-list` so'rovi qilardi — o'nlab
- * guruhli institutda HEMIS'ning ~10/oyna rate-limitiga tez-tez tegib,
- * natija sukut bo'yicha bo'sh (0 guruh) kelib, keyin 6 soatga cache'lanib
- * qolardi.
- *
- * Fakultet bo'yicha cheklash IKKI holatda ishlamaydi (tekshirilgan,
- * production'da uchragan): (1) so'ragan xodim biror akademik
- * fakultet/institutga emas, markaziy/IT bo'limga tegishli bo'lsa
- * (parent'siz, "Fakultet"/"Institut" turida bo'lmagan tugun) — bunda
- * moslashtiradigan fakultet nomi umuman topilmaydi; (2) bu HEMIS
- * o'rnatishida talaba-ro'yxati javobida `faculty` maydoni umuman
- * qaytmaydi (kuzatilgan: 10,000+ talabaning barchasida `department`
- * NULL) — bunda hatto haqiqiy dekan uchun ham solishtiradigan narsa
- * yo'q. Ikkala holatda ham BUTUN institut bo'yicha ko'rsatiladi —
- * bo'sh (yolg'on-buzuq ko'rinadigan) ro'yxat qaytarishdan ko'ra bu
- * to'g'riroq, chunki bu route allaqachon faqat adminlar uchun ochiq.
- */
-export async function fetchInstituteGroupsWithStudentCounts(user?: AuthRequest["user"]): Promise<{
+export async function fetchMasofaviyGroupsWithStudentCounts(filters: {
+  levelCode?: string
+  educationTypeName?: string
+  limit: number
+  offset: number
+}): Promise<{
   groups: HemisGroupSummary[]
+  totalGroups: number
   totalStudents: number
-  departmentId: string | null
-  universityWide: boolean
+  courses: { code: string; name: string }[]
+  degrees: { code: string; name: string }[]
 }> {
-  const departmentId = employeeDepartmentId(user) ?? null
-  const facultyName = departmentId ? await resolveFacultyName(departmentId) : null
+  const where = ["is_active = 1", "group_id IS NOT NULL", "education_form_code = ?"]
+  const params: unknown[] = [MASOFAVIY_FORM_CODE]
+  if (filters.levelCode) { where.push("level_code = ?"); params.push(filters.levelCode) }
+  if (filters.educationTypeName) { where.push("education_type_name = ?"); params.push(filters.educationTypeName) }
+  const whereSql = where.join(" AND ")
 
-  let rows: mysql.RowDataPacket[]
-  let universityWide = false
-  if (facultyName) {
-    ;[rows] = await pool.query<mysql.RowDataPacket[]>(
+  const [[groupRows], [totalRow], [courseRows], [degreeRows]] = await Promise.all([
+    pool.query<mysql.RowDataPacket[]>(
       `SELECT group_id, group_name, COUNT(*) AS student_count
        FROM hemis_students_directory
-       WHERE is_active = 1 AND group_id IS NOT NULL AND TRIM(department) = TRIM(?)
-       GROUP BY group_id, group_name`,
-      [facultyName]
-    )
-  } else {
-    rows = []
-  }
-
-  if (!facultyName || rows.length === 0) {
-    universityWide = true
-    ;[rows] = await pool.query<mysql.RowDataPacket[]>(
-      `SELECT group_id, group_name, COUNT(*) AS student_count
+       WHERE ${whereSql}
+       GROUP BY group_id, group_name
+       ORDER BY group_name
+       LIMIT ? OFFSET ?`,
+      [...params, filters.limit, filters.offset]
+    ),
+    pool.query<mysql.RowDataPacket[]>(
+      `SELECT COUNT(DISTINCT group_id) AS total_groups, COUNT(*) AS total_students
+       FROM hemis_students_directory WHERE ${whereSql}`,
+      params
+    ),
+    pool.query<mysql.RowDataPacket[]>(
+      `SELECT DISTINCT level_code AS code, level_name AS name
        FROM hemis_students_directory
-       WHERE is_active = 1 AND group_id IS NOT NULL
-       GROUP BY group_id, group_name`
-    )
+       WHERE is_active = 1 AND education_form_code = ? AND level_code IS NOT NULL
+       ORDER BY level_code`,
+      [MASOFAVIY_FORM_CODE]
+    ),
+    pool.query<mysql.RowDataPacket[]>(
+      `SELECT DISTINCT education_type_code AS code, education_type_name AS name
+       FROM hemis_students_directory
+       WHERE is_active = 1 AND education_form_code = ? AND education_type_name IS NOT NULL
+       ORDER BY education_type_code`,
+      [MASOFAVIY_FORM_CODE]
+    ),
+  ])
+
+  const groups: HemisGroupSummary[] = groupRows.map((r): HemisGroupSummary => ({
+    groupId: Number(r.group_id),
+    groupName: String(r.group_name ?? `Guruh #${r.group_id}`),
+    studentCount: Number(r.student_count),
+  }))
+
+  return {
+    groups,
+    totalGroups: Number(totalRow[0]?.total_groups ?? 0),
+    totalStudents: Number(totalRow[0]?.total_students ?? 0),
+    courses: courseRows.map(r => ({ code: String(r.code), name: String(r.name) })),
+    degrees: degreeRows.map(r => ({ code: String(r.code), name: String(r.name) })),
   }
-
-  const groups: HemisGroupSummary[] = rows
-    .map((r): HemisGroupSummary => ({
-      groupId: Number(r.group_id),
-      groupName: String(r.group_name ?? `Guruh #${r.group_id}`),
-      studentCount: Number(r.student_count),
-    }))
-    .sort((a, b) => a.groupName.localeCompare(b.groupName, undefined, { numeric: true }))
-  const totalStudents = groups.reduce((sum, g) => sum + g.studentCount, 0)
-
-  return { groups, totalStudents, departmentId, universityWide }
 }
 
 export interface AcademicDebtor {

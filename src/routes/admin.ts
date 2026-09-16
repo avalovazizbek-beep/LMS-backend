@@ -19,7 +19,7 @@ import {
   mediaKindFromMime,
   type AnnouncementAudience,
 } from "../services/announcementStore"
-import { fetchInstituteGroupsWithStudentCounts } from "./hemis"
+import { fetchMasofaviyGroupsWithStudentCounts } from "./hemis"
 import { getHemisSyncStatus, getHemisSyncLog } from "../services/db"
 import { runFullHemisSync } from "../services/hemisSync"
 import {
@@ -1173,15 +1173,20 @@ router.get("/login-trend", adminOnly, async (req: AuthRequest, res: Response): P
   res.json({ success: true, data: counts })
 })
 
-/* ── GET /api/admin/hemis-students — institut bo'yicha guruhlar + talaba soni.
-   Mahalliy sinxronlangan jadvallardan (LIVE HEMIS so'rovisiz) o'qiladi, shu
-   sabab bu yerda 6-soatlik hemis-cache endi KERAK EMAS — avval shu keshlash
-   qatlami LIVE HEMIS so'rovlarini rate-limitdan asrash uchun qo'shilgan edi;
-   endi yo'q, faqat keraksiz eskirish xavfi qoladi (masalan sinxronizatsiya
-   yangi tuzatishdan keyin ham eski bo'sh natija soatlab keshda qolib ketardi). ── */
+/* ── GET /api/admin/hemis-students — masofaviy ta'lim guruhlari + talaba
+   soni (bakalavr va magistr), ixtiyoriy kurs/daraja filtri va 20 talik
+   sahifalash bilan. Mahalliy sinxronlangan jadvallardan (LIVE HEMIS
+   so'rovisiz) o'qiladi — bu yerda 6-soatlik hemis-cache endi kerak emas,
+   avval shu keshlash qatlami LIVE HEMIS so'rovlarini rate-limitdan
+   asrash uchun qo'shilgan edi. ── */
 router.get("/hemis-students", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const levelCode = typeof req.query.course === "string" ? req.query.course : undefined
+  const educationTypeName = typeof req.query.degree === "string" ? req.query.degree : undefined
+  const limit = Math.min(Math.max(Number(req.query.limit ?? 20), 1), 100)
+  const offset = Math.max(Number(req.query.offset ?? 0), 0)
+
   try {
-    const data = await fetchInstituteGroupsWithStudentCounts(req.user)
+    const data = await fetchMasofaviyGroupsWithStudentCounts({ levelCode, educationTypeName, limit, offset })
     res.json({ success: true, ...data })
   } catch (err) {
     res.status(502).json({ success: false, message: err instanceof Error ? err.message : "Talabalar ro'yxatini olishda xato" })
