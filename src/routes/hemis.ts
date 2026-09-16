@@ -489,13 +489,43 @@ export interface HemisGroupSummary {
 }
 
 /**
- * So'ragan (admin) xodimning O'Z HEMIS departmenti bo'yicha barcha
- * guruhlar va har birining talaba soni. `_department` filtri MUHIM —
- * syncTeacherFromHemis'dagi eslatmada aytilganidek, `/v1/data/*`
- * so'rovlari biror cheklovchi filtrsiz (bu holda `_department`)
- * BUTUN UNIVERSITET bo'yicha (boshqa institut/fakultetlar ham) natija
- * qaytaradi — shu sabab departmentId topilmasa bo'sh ro'yxat qaytariladi,
- * "hammasi" deb noto'g'ri keng natija ko'rsatilmaydi.
+ * Xodimning HEMIS profilidagi department.id ko'pincha KAFEDRA bo'ladi —
+ * talabalar esa kafedraga emas, FAKULTETga bog'lanadi
+ * (hemis_students_directory.department talabaning `faculty.name`'idan
+ * sinxronlanadi, syncStudentDirectory'da). Shu sabab parent_id zanjiri
+ * bo'ylab "Fakultet/Institut" turidagi ajdodgacha (yoki eng yuqori,
+ * parentsiz qatorgacha) ko'tariladi.
+ */
+async function fetchDepartmentDirectoryRow(id: number): Promise<mysql.RowDataPacket | undefined> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT name, parent_id, structure_type FROM hemis_departments_directory WHERE hemis_id = ?",
+    [id]
+  )
+  return rows[0]
+}
+
+async function resolveFacultyName(departmentId: string, hop = 0): Promise<string | null> {
+  const id = Number(departmentId)
+  if (!id || hop >= 5) return null
+  const row = await fetchDepartmentDirectoryRow(id)
+  if (!row) return null
+  const type = String(row.structure_type ?? "").toLowerCase()
+  if (type.includes("fakultet") || type.includes("institut") || type.includes("faculty") || !row.parent_id) {
+    return String(row.name)
+  }
+  return resolveFacultyName(String(row.parent_id), hop + 1)
+}
+
+/**
+ * So'ragan (admin) xodimning O'Z fakulteti/institutiga qarashli barcha
+ * guruhlar va har birining talaba soni — mahalliy sinxronlangan
+ * `hemis_students_directory`/`hemis_departments_directory` jadvallaridan
+ * (services/hemisSync.ts), LIVE HEMIS so'rovisiz. Ilgari bu funksiya har
+ * guruh uchun alohida `/v1/data/student-list` so'rovi qilardi — o'nlab
+ * guruhli institutda HEMIS'ning ~10/oyna rate-limitiga tez-tez tegib,
+ * natija sukut bo'yicha bo'sh (0 guruh) kelib, keyin 6 soatga cache'lanib
+ * qolardi. Departament aniqlanmasa bo'sh ro'yxat qaytariladi — "hammasi"
+ * deb noto'g'ri keng natija ko'rsatilmaydi.
  */
 export async function fetchInstituteGroupsWithStudentCounts(user?: AuthRequest["user"]): Promise<{
   groups: HemisGroupSummary[]
@@ -505,24 +535,23 @@ export async function fetchInstituteGroupsWithStudentCounts(user?: AuthRequest["
   const departmentId = employeeDepartmentId(user)
   if (!departmentId) return { groups: [], totalStudents: 0, departmentId: null }
 
-  const groupItems = await employeeDataAllItems("/v1/data/group-list", { _department: departmentId, limit: "200" }, undefined)
+  const facultyName = await resolveFacultyName(departmentId)
+  if (!facultyName) return { groups: [], totalStudents: 0, departmentId }
 
-  const summaries = await mapWithConcurrency(groupItems, 4, async (item): Promise<HemisGroupSummary | null> => {
-    const record = asRecord(item)
-    const groupId = numberValue(record.id)
-    const groupName = textValue(record.name)
-    if (groupId === null || !groupName) return null
-    try {
-      const page = await employeeDataPage("/v1/data/student-list", { _group: String(groupId), limit: "1" }, undefined)
-      const total = numberValue(page.pagination.totalCount) ?? 0
-      return { groupId, groupName, studentCount: total }
-    } catch {
-      return { groupId, groupName, studentCount: 0 }
-    }
-  })
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT group_id, group_name, COUNT(*) AS student_count
+     FROM hemis_students_directory
+     WHERE is_active = 1 AND group_id IS NOT NULL AND TRIM(department) = TRIM(?)
+     GROUP BY group_id, group_name`,
+    [facultyName]
+  )
 
-  const groups = summaries
-    .filter((g): g is HemisGroupSummary => g !== null)
+  const groups: HemisGroupSummary[] = rows
+    .map((r): HemisGroupSummary => ({
+      groupId: Number(r.group_id),
+      groupName: String(r.group_name ?? `Guruh #${r.group_id}`),
+      studentCount: Number(r.student_count),
+    }))
     .sort((a, b) => a.groupName.localeCompare(b.groupName, undefined, { numeric: true }))
   const totalStudents = groups.reduce((sum, g) => sum + g.studentCount, 0)
 

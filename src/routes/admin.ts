@@ -74,6 +74,20 @@ function getHemisId(req: AuthRequest): string {
   return String(req.user?.userId ?? req.user?.id ?? req.user?.username ?? "")
 }
 
+/** Foydalanuvchining "Foydalanuvchilar" ro'yxatidagi effektiv LMS roli.
+    Ko'pchilik foydalanuvchiga hech qachon lms_permissions'da qator
+    yozilmaydi (faqat aniq ko'tarilgan/bloklangan holatlarda yoziladi) —
+    shuning uchun aniq grant bo'lmasa HEMIS rolidan (talaba/xodim) kelib
+    chiqib sukut bo'yicha rol beriladi, aks holda "Talaba"/"O'qituvchi"
+    sanoqlari haqiqiy son bo'lishi kerak bo'lgan joyda doim 0 chiqib
+    qolardi. isDefault=true — bu qatorda hech kim qo'lda rol bermagan. */
+function classifyLmsRole(hemisRole: unknown, explicitLmsRole: unknown): { role: string | null; isDefault: boolean } {
+  if (explicitLmsRole) return { role: String(explicitLmsRole), isDefault: false }
+  if (hemisRole === "employee") return { role: "teacher", isDefault: true }
+  if (hemisRole === "student") return { role: "student", isDefault: true }
+  return { role: null, isDefault: false }
+}
+
 /** Foydalanuvchining admin panelidagi rolini qaytaradi: 'admin' (to'liq huquqli),
     'dean' (kengaytirilgan boshqaruv — lms_role_permissions jadvali bo'yicha
     cheklangan) yoki null (admin panelga umuman kirolmaydi). */
@@ -162,6 +176,16 @@ router.get("/check", async (req: AuthRequest, res: Response): Promise<void> => {
   })
 })
 
+// Aniq grant (lms_permissions) bo'lmasa HEMIS rolidan (talaba/xodim) kelib
+// chiqib sukut bo'yicha effektiv rol — classifyLmsRole bilan bir xil
+// mantiq, faqat SQL darajasida (rol bo'yicha filtr/agregat sanoq uchun).
+const EFFECTIVE_ROLE_SQL = `CASE
+  WHEN p.lms_role IS NOT NULL AND p.lms_role <> '' THEN p.lms_role
+  WHEN hu.role = 'employee' THEN 'teacher'
+  WHEN hu.role = 'student' THEN 'student'
+  ELSE NULL
+END`
+
 /* ── GET /api/admin/users ───────────────────────────────────────────── */
 router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
   const search = typeof req.query.search === "string" ? req.query.search.trim() : ""
@@ -169,23 +193,28 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
   const limitVal = Math.min(Number(req.query.limit ?? 100), 500)
   const offsetVal = Number(req.query.offset ?? 0)
 
-  const whereParts: string[] = []
-  const whereParams: unknown[] = []
-
+  // Qidiruv-only shart — rol bo'yicha jami taqsimot kartalari (roleCounts)
+  // faol tab/filtrdan mustaqil, faqat qidiruvga bog'liq bo'lishi kerak.
+  const searchWhereParts: string[] = []
+  const searchWhereParams: unknown[] = []
   if (search) {
-    whereParts.push("(hu.full_name LIKE ? OR hu.username LIKE ? OR hu.hemis_id LIKE ?)")
+    searchWhereParts.push("(hu.full_name LIKE ? OR hu.username LIKE ? OR hu.hemis_id LIKE ?)")
     const q = `%${search}%`
-    whereParams.push(q, q, q)
+    searchWhereParams.push(q, q, q)
   }
+  const searchWhereSql = searchWhereParts.length ? `AND ${searchWhereParts.join(" AND ")}` : ""
+
+  const whereParts = [...searchWhereParts]
+  const whereParams = [...searchWhereParams]
   if (roleFilter === "admin" && FIXED_ADMIN_HEMIS_ID) {
     // "Admin" filtri bosilganda o'zgarmas adminni ham qo'shamiz — u
     // lms_permissions'da qator sifatida saqlanmaydi (kod ichida
     // FIXED_ADMIN_HEMIS_ID orqali tekshiriladi), aks holda filtrlanganda
     // "0 ta foydalanuvchi" chiqib qolardi.
-    whereParts.push("(COALESCE(p.lms_role, 'none') = ? OR hu.hemis_id = ?)")
+    whereParts.push(`(${EFFECTIVE_ROLE_SQL} = ? OR hu.hemis_id = ?)`)
     whereParams.push(roleFilter, FIXED_ADMIN_HEMIS_ID)
   } else if (roleFilter) {
-    whereParts.push("COALESCE(p.lms_role, 'none') = ?")
+    whereParts.push(`${EFFECTIVE_ROLE_SQL} = ?`)
     whereParams.push(roleFilter)
   }
 
@@ -212,11 +241,24 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
     ORDER BY hu.updated_at DESC LIMIT ? OFFSET ?
   `
 
-  const [[rows], [countRow]] = await Promise.all([
+  const [[rows], [countRow], [roleCountRow]] = await Promise.all([
     pool.query<RowDataPacket[]>(sql, [...whereParams, limitVal, offsetVal]),
     pool.query<RowDataPacket[]>(
       `SELECT COUNT(*) AS total FROM hemis_users hu LEFT JOIN lms_permissions p ON p.hemis_id = hu.hemis_id WHERE 1=1 ${whereSql}`,
       whereParams
+    ),
+    pool.query<RowDataPacket[]>(
+      `SELECT
+         SUM(CASE WHEN ${EFFECTIVE_ROLE_SQL} = 'admin' OR hu.hemis_id = ? THEN 1 ELSE 0 END) AS admin_count,
+         SUM(CASE WHEN ${EFFECTIVE_ROLE_SQL} = 'dean' THEN 1 ELSE 0 END) AS dean_count,
+         SUM(CASE WHEN hu.hemis_id <> ? AND ${EFFECTIVE_ROLE_SQL} = 'teacher' THEN 1 ELSE 0 END) AS teacher_count,
+         SUM(CASE WHEN hu.hemis_id <> ? AND ${EFFECTIVE_ROLE_SQL} = 'student' THEN 1 ELSE 0 END) AS student_count,
+         SUM(CASE WHEN ${EFFECTIVE_ROLE_SQL} = 'blocked' THEN 1 ELSE 0 END) AS blocked_count,
+         SUM(CASE WHEN ${EFFECTIVE_ROLE_SQL} = 'pending' THEN 1 ELSE 0 END) AS pending_count
+       FROM hemis_users hu
+       LEFT JOIN lms_permissions p ON p.hemis_id = hu.hemis_id
+       WHERE 1=1 ${searchWhereSql}`,
+      [FIXED_ADMIN_HEMIS_ID, FIXED_ADMIN_HEMIS_ID, FIXED_ADMIN_HEMIS_ID, ...searchWhereParams]
     ),
   ])
 
@@ -228,14 +270,16 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
       typeof rr === "string" ? rr : textVal(asRecord(rr).code, asRecord(rr).name)
     )
     const isAutoAdmin = !!FIXED_ADMIN_HEMIS_ID && String(r.hemis_id) === FIXED_ADMIN_HEMIS_ID
+    const classified = classifyLmsRole(r.hemis_role, r.lms_role)
     return {
       hemisId: r.hemis_id,
       fullName: r.full_name,
       username: r.username,
       hemisRole: r.hemis_role,
       hemisRoleCodes: roleCodes,
-      lmsRole: r.lms_role ?? (isAutoAdmin ? "admin" : null),
+      lmsRole: isAutoAdmin ? "admin" : classified.role,
       isAutoAdmin,
+      roleIsDefault: !isAutoAdmin && classified.isDefault,
       grantedBy: r.granted_by,
       grantedAt: r.granted_at,
       note: r.note,
@@ -246,7 +290,20 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
     }
   })
 
-  res.json({ success: true, data: users, total: Number((countRow as RowDataPacket[])[0]?.total ?? 0) })
+  const rc = (roleCountRow as RowDataPacket[])[0] ?? {}
+  res.json({
+    success: true,
+    data: users,
+    total: Number((countRow as RowDataPacket[])[0]?.total ?? 0),
+    roleCounts: {
+      admin: Number(rc.admin_count ?? 0),
+      dean: Number(rc.dean_count ?? 0),
+      teacher: Number(rc.teacher_count ?? 0),
+      student: Number(rc.student_count ?? 0),
+      blocked: Number(rc.blocked_count ?? 0),
+      pending: Number(rc.pending_count ?? 0),
+    },
+  })
 })
 
 /* ── PATCH /api/admin/users/:hemisId/role ──────────────────────────── */
