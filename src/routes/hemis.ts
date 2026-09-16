@@ -524,27 +524,52 @@ async function resolveFacultyName(departmentId: string, hop = 0): Promise<string
  * guruh uchun alohida `/v1/data/student-list` so'rovi qilardi — o'nlab
  * guruhli institutda HEMIS'ning ~10/oyna rate-limitiga tez-tez tegib,
  * natija sukut bo'yicha bo'sh (0 guruh) kelib, keyin 6 soatga cache'lanib
- * qolardi. Departament aniqlanmasa bo'sh ro'yxat qaytariladi — "hammasi"
- * deb noto'g'ri keng natija ko'rsatilmaydi.
+ * qolardi.
+ *
+ * Fakultet bo'yicha cheklash IKKI holatda ishlamaydi (tekshirilgan,
+ * production'da uchragan): (1) so'ragan xodim biror akademik
+ * fakultet/institutga emas, markaziy/IT bo'limga tegishli bo'lsa
+ * (parent'siz, "Fakultet"/"Institut" turida bo'lmagan tugun) — bunda
+ * moslashtiradigan fakultet nomi umuman topilmaydi; (2) bu HEMIS
+ * o'rnatishida talaba-ro'yxati javobida `faculty` maydoni umuman
+ * qaytmaydi (kuzatilgan: 10,000+ talabaning barchasida `department`
+ * NULL) — bunda hatto haqiqiy dekan uchun ham solishtiradigan narsa
+ * yo'q. Ikkala holatda ham BUTUN institut bo'yicha ko'rsatiladi —
+ * bo'sh (yolg'on-buzuq ko'rinadigan) ro'yxat qaytarishdan ko'ra bu
+ * to'g'riroq, chunki bu route allaqachon faqat adminlar uchun ochiq.
  */
 export async function fetchInstituteGroupsWithStudentCounts(user?: AuthRequest["user"]): Promise<{
   groups: HemisGroupSummary[]
   totalStudents: number
   departmentId: string | null
+  universityWide: boolean
 }> {
-  const departmentId = employeeDepartmentId(user)
-  if (!departmentId) return { groups: [], totalStudents: 0, departmentId: null }
+  const departmentId = employeeDepartmentId(user) ?? null
+  const facultyName = departmentId ? await resolveFacultyName(departmentId) : null
 
-  const facultyName = await resolveFacultyName(departmentId)
-  if (!facultyName) return { groups: [], totalStudents: 0, departmentId }
+  let rows: mysql.RowDataPacket[]
+  let universityWide = false
+  if (facultyName) {
+    ;[rows] = await pool.query<mysql.RowDataPacket[]>(
+      `SELECT group_id, group_name, COUNT(*) AS student_count
+       FROM hemis_students_directory
+       WHERE is_active = 1 AND group_id IS NOT NULL AND TRIM(department) = TRIM(?)
+       GROUP BY group_id, group_name`,
+      [facultyName]
+    )
+  } else {
+    rows = []
+  }
 
-  const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    `SELECT group_id, group_name, COUNT(*) AS student_count
-     FROM hemis_students_directory
-     WHERE is_active = 1 AND group_id IS NOT NULL AND TRIM(department) = TRIM(?)
-     GROUP BY group_id, group_name`,
-    [facultyName]
-  )
+  if (!facultyName || rows.length === 0) {
+    universityWide = true
+    ;[rows] = await pool.query<mysql.RowDataPacket[]>(
+      `SELECT group_id, group_name, COUNT(*) AS student_count
+       FROM hemis_students_directory
+       WHERE is_active = 1 AND group_id IS NOT NULL
+       GROUP BY group_id, group_name`
+    )
+  }
 
   const groups: HemisGroupSummary[] = rows
     .map((r): HemisGroupSummary => ({
@@ -555,7 +580,7 @@ export async function fetchInstituteGroupsWithStudentCounts(user?: AuthRequest["
     .sort((a, b) => a.groupName.localeCompare(b.groupName, undefined, { numeric: true }))
   const totalStudents = groups.reduce((sum, g) => sum + g.studentCount, 0)
 
-  return { groups, totalStudents, departmentId }
+  return { groups, totalStudents, departmentId, universityWide }
 }
 
 export interface AcademicDebtor {
