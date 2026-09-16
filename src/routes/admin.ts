@@ -233,10 +233,14 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
       p.granted_by,
       p.granted_at,
       p.note,
+      hsd.group_name,
+      fr.id AS face_registration_id,
       (SELECT COUNT(*) FROM lms_teacher_content tc WHERE CAST(hu.hemis_id AS UNSIGNED) = tc.teacher_user_id) AS content_count,
       (SELECT COUNT(*) FROM lms_platform_sessions ps WHERE ps.user_id = CAST(hu.hemis_id AS UNSIGNED) ORDER BY NULL) AS session_count
     FROM hemis_users hu
     LEFT JOIN lms_permissions p ON p.hemis_id = hu.hemis_id
+    LEFT JOIN hemis_students_directory hsd ON hsd.hemis_id = CAST(hu.hemis_id AS UNSIGNED)
+    LEFT JOIN face_registrations fr ON fr.username = hsd.login
     WHERE 1=1 ${whereSql}
     ORDER BY hu.updated_at DESC LIMIT ? OFFSET ?
   `
@@ -280,6 +284,8 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
       lmsRole: isAutoAdmin ? "admin" : classified.role,
       isAutoAdmin,
       roleIsDefault: !isAutoAdmin && classified.isDefault,
+      groupName: r.group_name ?? null,
+      faceRegistered: !!r.face_registration_id,
       grantedBy: r.granted_by,
       grantedAt: r.granted_at,
       note: r.note,
@@ -1257,6 +1263,46 @@ router.post("/hemis-students/:hemisId/request-face-reregister", adminOnly, async
   )
   void logAudit(req, "face.request_reregister", "face-id", String(hemisId))
   res.json({ success: true, message: "So'rov yuborildi — talaba keyingi kirishda ko'radi" })
+})
+
+/* ── GET /api/admin/face-id/not-registered — Face ID'dan hali o'tmagan
+   masofaviy talabalar (guruhlar bo'yicha emas, BUTUN ro'yxat bo'yicha),
+   20 talik sahifalash bilan — dashboard'dagi "95%" statistikasi ortida
+   kimlar qolganini ko'rish uchun. ── */
+router.get("/face-id/not-registered", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const limit = Math.min(Math.max(Number(req.query.limit ?? 20), 1), 100)
+  const offset = Math.max(Number(req.query.offset ?? 0), 0)
+
+  const [[rows], [totalRow]] = await Promise.all([
+    pool.query<RowDataPacket[]>(
+      `SELECT d.hemis_id, d.full_name, d.group_name, d.student_id_number,
+         (SELECT status FROM face_requests WHERE username = d.login AND initiated_by = 'admin' AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1) AS admin_request_status
+       FROM hemis_students_directory d
+       LEFT JOIN face_registrations fr ON fr.username = d.login
+       WHERE d.is_active = 1 AND d.education_form_code = '16' AND fr.id IS NULL
+       ORDER BY d.full_name
+       LIMIT ? OFFSET ?`,
+      [limit, offset]
+    ),
+    pool.query<RowDataPacket[]>(
+      `SELECT COUNT(*) AS total
+       FROM hemis_students_directory d
+       LEFT JOIN face_registrations fr ON fr.username = d.login
+       WHERE d.is_active = 1 AND d.education_form_code = '16' AND fr.id IS NULL`
+    ),
+  ])
+
+  res.json({
+    success: true,
+    total: Number(totalRow[0]?.total ?? 0),
+    students: rows.map(r => ({
+      hemisId: r.hemis_id,
+      fullName: r.full_name,
+      groupName: r.group_name,
+      studentIdNumber: r.student_id_number,
+      adminRequestPending: r.admin_request_status === "approved" || r.admin_request_status === "pending",
+    })),
+  })
 })
 
 /* ── HEMIS to'liq talaba/xodim/guruh ro'yxati (login blokidan mustaqil,

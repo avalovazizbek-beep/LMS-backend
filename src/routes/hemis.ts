@@ -537,8 +537,9 @@ export async function fetchMasofaviyGroupsWithStudentCounts(filters: {
       `SELECT DISTINCT level_code AS code, level_name AS name
        FROM hemis_students_directory
        WHERE is_active = 1 AND education_form_code = ? AND level_code IS NOT NULL
+       ${filters.educationTypeName ? "AND education_type_name = ?" : ""}
        ORDER BY level_code`,
-      [MASOFAVIY_FORM_CODE]
+      filters.educationTypeName ? [MASOFAVIY_FORM_CODE, filters.educationTypeName] : [MASOFAVIY_FORM_CODE]
     ),
     pool.query<mysql.RowDataPacket[]>(
       `SELECT DISTINCT education_type_code AS code, education_type_name AS name
