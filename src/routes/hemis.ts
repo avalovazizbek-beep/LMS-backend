@@ -1294,6 +1294,11 @@ async function hemisOAuthUser(oauthBase: string, accessToken: string, role: OAut
  * orqali qidiriladi, `login` orqali EMAS — bu HEMIS o'rnatishida talaba
  * yozuvida `login` maydoni umuman bo'sh keladi (tekshirilgan).
  */
+// Alohida xato turi — /oauth/exchange'dagi catch shu orqali "mos emas
+// sozlama" degan umumiy (bu holatda noto'g'ri va chalg'ituvchi) qo'shimcha
+// matnsiz, o'ziga xos aniq va chiroyli xabar ko'rsatadi.
+class NotMasofaviyError extends Error {}
+
 async function isMasofaviyStudent(studentIdNumber?: string): Promise<boolean> {
   if (!studentIdNumber) return false
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
@@ -1312,7 +1317,7 @@ async function createOAuthSession(requestedRole: OAuthRole, code: string, redire
   if (role === "student") {
     const studentIdNumber = textValue(oauthUser.student_id_number, asRecord(oauthUser.student).student_id_number, oauthProfile.student_id_number)
     if (!(await isMasofaviyStudent(studentIdNumber))) {
-      throw new Error("Bu tizim faqat masofaviy ta'lim yo'nalishidagi talabalar uchun mo'ljallangan. Sizning ta'lim shaklingiz (kunduzgi/kechki/sirtqi) bu platformaga kirish huquqini bermaydi.")
+      throw new NotMasofaviyError("Bu platforma faqat Masofaviy ta'lim yo'nalishi talabalari uchun mo'ljallangan. Sizning ta'lim shaklingiz (Kunduzgi/Kechki/Sirtqi) bu tizimga kirish huquqini bermaydi.")
     }
 
     const studentApiToken = textValue(
@@ -3264,6 +3269,12 @@ router.post("/oauth/exchange/:role", async (req, res: Response) => {
     callbackUrl.searchParams.set("role", result.role)
     res.json({ redirect: callbackUrl.toString() })
   } catch (err) {
+    if (err instanceof NotMasofaviyError) {
+      callbackUrl.searchParams.set("error", "not_masofaviy")
+      callbackUrl.searchParams.set("message", err.message)
+      res.json({ redirect: callbackUrl.toString() })
+      return
+    }
     console.error("[HEMIS oauth exchange]", extractMessage(err), (err as AxiosError)?.response?.data)
     callbackUrl.searchParams.set("error", "oauth_failed")
     callbackUrl.searchParams.set("message", extractMessage(err, "HEMIS OAuth orqali kirishda xatolik"))
