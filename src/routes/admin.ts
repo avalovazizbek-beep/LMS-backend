@@ -20,7 +20,7 @@ import {
   type AnnouncementAudience,
 } from "../services/announcementStore"
 import { fetchInstituteGroupsWithStudentCounts } from "./hemis"
-import { withHemisCache, getHemisSyncStatus, getHemisSyncLog } from "../services/db"
+import { getHemisSyncStatus, getHemisSyncLog } from "../services/db"
 import { runFullHemisSync } from "../services/hemisSync"
 import {
   getManagedRolePermissions,
@@ -1173,20 +1173,18 @@ router.get("/login-trend", adminOnly, async (req: AuthRequest, res: Response): P
   res.json({ success: true, data: counts })
 })
 
-/* ── GET /api/admin/hemis-students — institut bo'yicha guruhlar + talaba soni
-   (HEMIS'dan, so'ragan adminning o'z HEMIS departmenti orqali cheklangan) ── */
+/* ── GET /api/admin/hemis-students — institut bo'yicha guruhlar + talaba soni.
+   Mahalliy sinxronlangan jadvallardan (LIVE HEMIS so'rovisiz) o'qiladi, shu
+   sabab bu yerda 6-soatlik hemis-cache endi KERAK EMAS — avval shu keshlash
+   qatlami LIVE HEMIS so'rovlarini rate-limitdan asrash uchun qo'shilgan edi;
+   endi yo'q, faqat keraksiz eskirish xavfi qoladi (masalan sinxronizatsiya
+   yangi tuzatishdan keyin ham eski bo'sh natija soatlab keshda qolib ketardi). ── */
 router.get("/hemis-students", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
-  const cacheUserId = String(req.user?.userId ?? req.user?.id ?? req.user?.username ?? "admin")
   try {
-    const r = await withHemisCache(
-      cacheUserId,
-      "hemis-students",
-      () => fetchInstituteGroupsWithStudentCounts(req.user),
-      6 * 60 * 60 * 1000 // 6 soat — guruh/talaba soni tez-tez o'zgarmaydi
-    )
-    res.json({ success: true, ...r.data, source: r.source })
+    const data = await fetchInstituteGroupsWithStudentCounts(req.user)
+    res.json({ success: true, ...data })
   } catch (err) {
-    res.status(502).json({ success: false, message: err instanceof Error ? err.message : "HEMIS'dan talabalar ro'yxatini olishda xato" })
+    res.status(502).json({ success: false, message: err instanceof Error ? err.message : "Talabalar ro'yxatini olishda xato" })
   }
 })
 
