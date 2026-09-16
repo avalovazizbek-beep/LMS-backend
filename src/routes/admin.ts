@@ -1233,11 +1233,13 @@ router.get("/hemis-students/:groupId/roster", adminOnly, async (req: AuthRequest
 })
 
 /* ── POST /api/admin/hemis-students/:hemisId/request-face-reregister —
-   admin talabaning Face ID'ini "eskirgan/noto'g'ri bo'lishi mumkin" deb
-   belgilaydi. face_requests'ga to'g'ridan-to'g'ri 'approved' holatida
-   yoziladi (talaba arizasisiz) — shu bilan talaba keyingi kirishda
-   ogohlantirish ko'radi va /face/register cheklovisiz qayta ro'yxatdan
-   o'ta oladi (mavjud "tasdiqlangan ariza" mexanizmi qayta ishlatiladi). ── */
+   Adashib boshqa odamning login-paroli bilan yuz skanerlatib qo'yilgan
+   holatlar uchun (bitta login'ga bog'langan Face ID boshqa hisobning ham
+   ro'yxatdan o'tishini bloklaydi — descriptor bir nechta hisobda bo'la
+   olmaydi tekshiruvi tufayli). Admin darhol shu talabaning mavjud Face ID
+   yozuvini o'chiradi (tasdiqlash/kutish bosqichisiz) — shu bilan haqiqiy
+   egasi ham, uning "yuzi" noto'g'ri bog'langan boshqa hisob ham darhol
+   qayta ro'yxatdan o'ta oladigan bo'ladi. ── */
 router.post("/hemis-students/:hemisId/request-face-reregister", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
   const hemisId = Number(req.params.hemisId)
   if (!hemisId) { res.status(400).json({ success: false, message: "hemisId noto'g'ri" }); return }
@@ -1253,20 +1255,44 @@ router.post("/hemis-students/:hemisId/request-face-reregister", adminOnly, async
   const studentIdNumber = studentRows[0]?.student_id_number
   if (!studentIdNumber) { res.status(404).json({ success: false, message: "Talaba yoki uning ID raqami topilmadi" }); return }
 
-  const [existing] = await pool.query<RowDataPacket[]>(
-    "SELECT id FROM face_requests WHERE username = ? AND initiated_by = 'admin' AND status IN ('pending','approved') LIMIT 1",
+  const [existingReg] = await pool.query<RowDataPacket[]>(
+    "SELECT id FROM face_registrations WHERE username = ? LIMIT 1",
     [studentIdNumber]
   )
-  if (existing.length) { res.json({ success: true, message: "Bu talabaga so'rov allaqachon yuborilgan" }); return }
+  const hadRegistration = existingReg.length > 0
 
-  const grantedBy = textVal(String(req.user?.fullName ?? ""), String(req.user?.username ?? "")) || "Admin"
-  await pool.query(
-    `INSERT INTO face_requests (id, username, reason, initiated_by, status, admin_note, created_at, reviewed_at)
-     VALUES (UUID(), ?, ?, 'admin', 'approved', ?, ?, ?)`,
-    [studentIdNumber, "Admin: Face ID eskirgan yoki noto'g'ri formatda bo'lishi mumkin", grantedBy, Date.now(), Date.now()]
-  )
-  void logAudit(req, "face.request_reregister", "face-id", String(hemisId))
-  res.json({ success: true, message: "So'rov yuborildi — talaba keyingi kirishda ko'radi" })
+  if (hadRegistration) {
+    // Mavjud (noto'g'ri bog'langan bo'lishi mumkin) Face ID yozuvi darhol
+    // o'chiriladi — kutish/tasdiqlash bosqichi shart emas, chunki talaba
+    // keyingi safar ro'yxatdan o'tishga uringanda `face_registrations`da
+    // yozuv topilmasa, cheklovsiz davom etadi.
+    await pool.query("DELETE FROM face_registrations WHERE username = ?", [studentIdNumber])
+  } else {
+    // Hali ro'yxatdan o'tmagan talaba uchun — dashboardida "Face ID'ni
+    // to'ldiring" eslatmasi chiqishi kerak, buning uchun tasdiqlangan
+    // so'rov yoziladi (mavjud mexanizm, /face/status shundan o'qiydi).
+    const [existingReq] = await pool.query<RowDataPacket[]>(
+      "SELECT id FROM face_requests WHERE username = ? AND initiated_by = 'admin' AND status IN ('pending','approved') LIMIT 1",
+      [studentIdNumber]
+    )
+    if (!existingReq.length) {
+      const grantedBy = textVal(String(req.user?.fullName ?? ""), String(req.user?.username ?? "")) || "Admin"
+      await pool.query(
+        `INSERT INTO face_requests (id, username, reason, initiated_by, status, admin_note, created_at, reviewed_at)
+         VALUES (UUID(), ?, ?, 'admin', 'approved', ?, ?, ?)`,
+        [studentIdNumber, "Admin: Face ID'ni ro'yxatdan o'tkazish so'raldi", grantedBy, Date.now(), Date.now()]
+      )
+    }
+  }
+
+  void logAudit(req, hadRegistration ? "face.reset_registration" : "face.request_reregister", "face-id", String(hemisId), { studentIdNumber })
+
+  res.json({
+    success: true,
+    message: hadRegistration
+      ? "Face ID ma'lumoti o'chirildi — talaba keyingi kirishda qayta ro'yxatdan o'ta oladi"
+      : "So'rov yuborildi — talaba keyingi kirishda ko'radi",
+  })
 })
 
 /* ── GET /api/admin/face-id/not-registered — Face ID'dan hali o'tmagan
