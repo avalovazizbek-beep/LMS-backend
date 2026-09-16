@@ -3179,6 +3179,16 @@ router.get("/oauth/:role", async (req, res: Response) => {
 
   const state = textValue(req.query.state) ?? ""
 
+  // VAQTINCHALIK DIAGNOSTIKA (2026-09-16) — "Authorization code has been
+  // revoked" xatosi qayta boshlanib, talabalar OAuth orqali kira olmayapti.
+  // Bu log shu GET manzilga BIR XIL kod bilan necha marta va kimdan
+  // (IP/User-Agent) so'rov kelayotganini ko'rsatadi — muammoning aynan
+  // qayerdan (dublikat so'rov yoki HEMIS'ning o'zidan) kelib chiqayotganini
+  // aniqlash uchun. Xatolik aniqlangach olib tashlanadi.
+  console.log(
+    `[OAUTH-DIAG] GET /oauth/${requestedRole} code=${code.slice(0, 12)}... ip=${req.ip} ua=${req.headers["user-agent"]} referer=${req.headers.referer ?? "yo'q"} time=${new Date().toISOString()}`
+  )
+
   // Render an interstitial page instead of exchanging the code directly on
   // this GET response. Corporate proxies / antivirus / link-scanners fetch
   // GET redirect URLs in the background to inspect them, which silently
@@ -3213,6 +3223,12 @@ router.post("/oauth/exchange/:role", async (req, res: Response) => {
   const redirectUri = configuredOAuthRedirectUri(requestedRole)
   const code = oauthCodeValue(req.body?.code)
   const callbackUrl = new URL(OAUTH_CALLBACK_PATH, FRONTEND_URL)
+
+  // VAQTINCHALIK DIAGNOSTIKA — yuqoridagi GET logi bilan solishtirish uchun:
+  // shu kod uchun exchange nechta marta chaqirilyapti va qaysi IP'dan.
+  console.log(
+    `[OAUTH-DIAG] POST /oauth/exchange/${requestedRole} code=${(code ?? "yo'q").slice(0, 12)}... ip=${req.ip} ua=${req.headers["user-agent"]} time=${new Date().toISOString()}`
+  )
 
   if (!code) {
     callbackUrl.searchParams.set("error", "invalid_request")
