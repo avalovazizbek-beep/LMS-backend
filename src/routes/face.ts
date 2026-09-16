@@ -55,22 +55,32 @@ router.get("/status", async (req: AuthRequest, res: Response) => {
     const [rows] = await pool.query<mysql.RowDataPacket[]>(
       "SELECT registered_at FROM face_registrations WHERE username = ? LIMIT 1", [un]
     )
-    if (!rows.length) { res.json({ success: true, registered: false }); return }
-
+    // Pending/approved so'rovlar registratsiya holatidan qat'i nazar
+    // tekshiriladi — admin hali umuman ro'yxatdan o'tmagan talabani ham
+    // "Face ID'ni to'ldiring" deb ogohlantirishi mumkin bo'lishi kerak.
     const [pendingRows] = await pool.query<mysql.RowDataPacket[]>(
       "SELECT id FROM face_requests WHERE username = ? AND status = 'pending' LIMIT 1", [un]
     )
     const [approvedRows] = await pool.query<mysql.RowDataPacket[]>(
-      "SELECT id FROM face_requests WHERE username = ? AND status = 'approved' LIMIT 1", [un]
+      "SELECT id, initiated_by FROM face_requests WHERE username = ? AND status = 'approved' LIMIT 1", [un]
     )
+    const hasPendingRequest = pendingRows.length > 0
+    const hasApprovedRequest = approvedRows.length > 0
+    const adminRequestedReregister = approvedRows[0]?.initiated_by === "admin"
+
+    if (!rows.length) {
+      res.json({ success: true, registered: false, hasPendingRequest, hasApprovedRequest, adminRequestedReregister })
+      return
+    }
 
     res.json({
-      success:            true,
-      registered:         true,
-      confirmed:          true,
-      registeredAt:       new Date(rows[0].registered_at).getTime(),
-      hasPendingRequest:  pendingRows.length > 0,
-      hasApprovedRequest: approvedRows.length > 0,
+      success:                   true,
+      registered:                true,
+      confirmed:                 true,
+      registeredAt:              new Date(rows[0].registered_at).getTime(),
+      hasPendingRequest,
+      hasApprovedRequest,
+      adminRequestedReregister,
     })
   } catch (err) {
     res.status(500).json({ success: false, message: "DB xatolik" })

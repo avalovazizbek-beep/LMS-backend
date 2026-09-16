@@ -1190,6 +1190,72 @@ router.get("/hemis-students", adminOnly, async (req: AuthRequest, res: Response)
   }
 })
 
+/* ── GET /api/admin/hemis-students/:groupId/roster — guruhdagi talabalar
+   ro'yxati, har birining Face ID holati bilan (mahalliy sinxronlangan
+   hemis_students_directory + face_registrations/face_requests'dan,
+   HEMIS'ga so'rovsiz) ──────────────────────────────────────────────── */
+router.get("/hemis-students/:groupId/roster", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const groupId = Number(req.params.groupId)
+  if (!groupId) { res.status(400).json({ success: false, message: "groupId noto'g'ri" }); return }
+
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT
+       d.hemis_id, d.full_name, d.student_id_number, d.login,
+       fr.registered_at AS face_registered_at,
+       (SELECT status FROM face_requests WHERE username = d.login AND initiated_by = 'admin' AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1) AS admin_request_status
+     FROM hemis_students_directory d
+     LEFT JOIN face_registrations fr ON fr.username = d.login
+     WHERE d.is_active = 1 AND d.group_id = ?
+     ORDER BY d.full_name`,
+    [groupId]
+  )
+
+  res.json({
+    success: true,
+    students: rows.map(r => ({
+      hemisId: r.hemis_id,
+      fullName: r.full_name,
+      studentIdNumber: r.student_id_number,
+      faceRegistered: !!r.face_registered_at,
+      faceRegisteredAt: r.face_registered_at,
+      adminRequestPending: r.admin_request_status === "approved" || r.admin_request_status === "pending",
+    })),
+  })
+})
+
+/* ── POST /api/admin/hemis-students/:hemisId/request-face-reregister —
+   admin talabaning Face ID'ini "eskirgan/noto'g'ri bo'lishi mumkin" deb
+   belgilaydi. face_requests'ga to'g'ridan-to'g'ri 'approved' holatida
+   yoziladi (talaba arizasisiz) — shu bilan talaba keyingi kirishda
+   ogohlantirish ko'radi va /face/register cheklovisiz qayta ro'yxatdan
+   o'ta oladi (mavjud "tasdiqlangan ariza" mexanizmi qayta ishlatiladi). ── */
+router.post("/hemis-students/:hemisId/request-face-reregister", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const hemisId = Number(req.params.hemisId)
+  if (!hemisId) { res.status(400).json({ success: false, message: "hemisId noto'g'ri" }); return }
+
+  const [studentRows] = await pool.query<RowDataPacket[]>(
+    "SELECT login, full_name FROM hemis_students_directory WHERE hemis_id = ? LIMIT 1",
+    [hemisId]
+  )
+  const login = studentRows[0]?.login
+  if (!login) { res.status(404).json({ success: false, message: "Talaba yoki uning HEMIS login'i topilmadi" }); return }
+
+  const [existing] = await pool.query<RowDataPacket[]>(
+    "SELECT id FROM face_requests WHERE username = ? AND initiated_by = 'admin' AND status IN ('pending','approved') LIMIT 1",
+    [login]
+  )
+  if (existing.length) { res.json({ success: true, message: "Bu talabaga so'rov allaqachon yuborilgan" }); return }
+
+  const grantedBy = textVal(String(req.user?.fullName ?? ""), String(req.user?.username ?? "")) || "Admin"
+  await pool.query(
+    `INSERT INTO face_requests (id, username, reason, initiated_by, status, admin_note, created_at, reviewed_at)
+     VALUES (UUID(), ?, ?, 'admin', 'approved', ?, ?, ?)`,
+    [login, "Admin: Face ID eskirgan yoki noto'g'ri formatda bo'lishi mumkin", grantedBy, Date.now(), Date.now()]
+  )
+  void logAudit(req, "face.request_reregister", "face-id", String(hemisId))
+  res.json({ success: true, message: "So'rov yuborildi — talaba keyingi kirishda ko'radi" })
+})
+
 /* ── HEMIS to'liq talaba/xodim/guruh ro'yxati (login blokidan mustaqil,
    admin-token orqali — services/hemisSync.ts) ──────────────────────── */
 router.post("/hemis-directory-sync", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {

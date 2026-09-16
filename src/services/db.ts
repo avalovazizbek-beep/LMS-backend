@@ -123,6 +123,13 @@ export async function initDatabase() {
       INDEX idx_face_req_status   (status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
+  // Admin talabalar ro'yxatidan ko'rib, "Face ID eskirgan/noto'g'ri bo'lishi
+  // mumkin" deb bevosita so'rov yuborishi mumkin — bu holda talaba hech
+  // qanday ariza yubormasdan, to'g'ridan-to'g'ri 'approved' holatida boshlanadi
+  // (pastdagi POST /admin/hemis-students/:hemisId/request-face-reregister).
+  // Ikkala oqim ham bir xil status ustunidan foydalanadi, faqat kelib
+  // chiqishi (kim boshlagani) frontendda qaysi xabar ko'rsatilishini aniqlaydi.
+  await execIgnoreDuplicate(`ALTER TABLE face_requests ADD COLUMN initiated_by ENUM('student','admin') NOT NULL DEFAULT 'student' AFTER reason`)
 
   // ── Meeting users ──
   await exec(`
