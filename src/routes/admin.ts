@@ -190,6 +190,7 @@ END`
 router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
   const search = typeof req.query.search === "string" ? req.query.search.trim() : ""
   const roleFilter = typeof req.query.lms_role === "string" ? req.query.lms_role : ""
+  const faceFilter = typeof req.query.face_id === "string" ? req.query.face_id : ""
   const limitVal = Math.min(Number(req.query.limit ?? 100), 500)
   const offsetVal = Number(req.query.offset ?? 0)
 
@@ -216,6 +217,16 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
   } else if (roleFilter) {
     whereParts.push(`${EFFECTIVE_ROLE_SQL} = ?`)
     whereParams.push(roleFilter)
+  }
+
+  // Face ID holati faqat talabalarga tegishli — o'qituvchi/admin qatorlarida
+  // fr.id har doim NULL bo'ladi (hsd join'i student_id_number orqali bo'lgani
+  // uchun), shuning uchun "O'tmagan" filtri ularni chalkashtirib yubormasligi
+  // uchun hu.role = 'student' shart qo'shiladi.
+  if (faceFilter === "registered") {
+    whereParts.push("hu.role = 'student' AND fr.id IS NOT NULL")
+  } else if (faceFilter === "not_registered") {
+    whereParts.push("hu.role = 'student' AND fr.id IS NULL")
   }
 
   const whereSql = whereParts.length ? `AND ${whereParts.join(" AND ")}` : ""
@@ -248,7 +259,12 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
   const [[rows], [countRow], [roleCountRow]] = await Promise.all([
     pool.query<RowDataPacket[]>(sql, [...whereParams, limitVal, offsetVal]),
     pool.query<RowDataPacket[]>(
-      `SELECT COUNT(*) AS total FROM hemis_users hu LEFT JOIN lms_permissions p ON p.hemis_id = hu.hemis_id WHERE 1=1 ${whereSql}`,
+      `SELECT COUNT(*) AS total
+       FROM hemis_users hu
+       LEFT JOIN lms_permissions p ON p.hemis_id = hu.hemis_id
+       LEFT JOIN hemis_students_directory hsd ON hsd.hemis_id = CAST(hu.hemis_id AS UNSIGNED)
+       LEFT JOIN face_registrations fr ON fr.username = hsd.student_id_number
+       WHERE 1=1 ${whereSql}`,
       whereParams
     ),
     pool.query<RowDataPacket[]>(
