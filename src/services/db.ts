@@ -903,6 +903,29 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "hemis_subjects_directory")
 
+  // ── O'quv rejalar (/v1/data/curriculum-list) — har bir guruh bitta
+  // curriculum'ga bog'langan (lms_groups.curriculum_id), va aynan shu
+  // yerda "ta'lim shakli" (Kunduzgi/Sirtqi/Kechki/Masofaviy) rasmiy
+  // ravishda ko'rsatiladi. Talabaning o'zida (hemis_students_directory)
+  // ham, guruh yozuvida ham bunday maydon yo'q — faqat shu yerda bor
+  // (production'da tekshirilgan: bitta HEMIS "Magistratura" bo'limi
+  // ichida ham Kunduzgi, ham Masofaviy o'quv rejalar aralash turadi,
+  // shuning uchun bo'lim/fakultet emas, aynan shu maydon ishonchli). ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS hemis_curricula_directory (
+      hemis_id             INT PRIMARY KEY,
+      name                 VARCHAR(255) NOT NULL,
+      education_form_code  VARCHAR(20) NULL,
+      education_form_name  VARCHAR(100) NULL,
+      education_type_code  VARCHAR(20) NULL,
+      education_type_name  VARCHAR(100) NULL,
+      synced_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_curricula_dir_form (education_form_code)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "hemis_curricula_directory")
+  await execIgnoreDuplicate(`ALTER TABLE lms_groups ADD COLUMN curriculum_id INT NULL AFTER course`)
+  await execIgnoreDuplicate(`ALTER TABLE lms_groups ADD INDEX idx_groups_curriculum (curriculum_id)`)
+
   // ── Semestrlar (/v1/data/semester-list — HEMIS'da har bir o'quv reja
   // (_curriculum) o'zining semestr kalendarini olib yuradi, shu sabab
   // curriculum_id ham saqlanadi) ──
@@ -1293,6 +1316,32 @@ export interface SubjectDirectoryRow {
   is_active: boolean
   subject_group?: string | null
   education_type?: string | null
+}
+
+export interface CurriculumDirectoryRow {
+  hemis_id: number
+  name: string
+  education_form_code?: string | null
+  education_form_name?: string | null
+  education_type_code?: string | null
+  education_type_name?: string | null
+}
+
+export async function upsertCurriculumDirectory(rows: CurriculumDirectoryRow[]) {
+  for (const r of rows) {
+    await pool.query(
+      `INSERT INTO hemis_curricula_directory (hemis_id, name, education_form_code, education_form_name, education_type_code, education_type_name)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         name                = VALUES(name),
+         education_form_code = VALUES(education_form_code),
+         education_form_name = VALUES(education_form_name),
+         education_type_code = VALUES(education_type_code),
+         education_type_name = VALUES(education_type_name),
+         synced_at           = CURRENT_TIMESTAMP`,
+      [r.hemis_id, r.name, r.education_form_code ?? null, r.education_form_name ?? null, r.education_type_code ?? null, r.education_type_name ?? null]
+    )
+  }
 }
 
 export interface SemesterDirectoryRow {

@@ -4,6 +4,7 @@ import {
   upsertEmployeeDirectory,
   upsertDepartmentDirectory,
   upsertSubjectDirectory,
+  upsertCurriculumDirectory,
   upsertSemesterDirectory,
   deactivateStaleStudents,
   deactivateStaleEmployees,
@@ -14,6 +15,7 @@ import {
   type EmployeeDirectoryRow,
   type DepartmentDirectoryRow,
   type SubjectDirectoryRow,
+  type CurriculumDirectoryRow,
   type SemesterDirectoryRow,
 } from "./db"
 import { upsertGroups, type SyncedGroup } from "./teachingStore"
@@ -226,11 +228,40 @@ export async function syncGroupDirectory(): Promise<number> {
   const items = await fetchAllPages("/v1/data/group-list")
   const groups: SyncedGroup[] = items.map((raw) => {
     const r = asRecord(raw)
-    return { id: numberValue(r.id) ?? 0, name: textValue(r.name) || `Guruh #${numberValue(r.id) ?? 0}` }
+    return {
+      id: numberValue(r.id) ?? 0,
+      name: textValue(r.name) || `Guruh #${numberValue(r.id) ?? 0}`,
+      curriculumId: numberValue(r._curriculum),
+    }
   }).filter((g) => g.id > 0)
 
   await upsertGroups(groups)
   return groups.length
+}
+
+/* ── O'quv rejalar (/v1/data/curriculum-list) — talabaning ta'lim shakli
+   (Kunduzgi/Sirtqi/Kechki/Masofaviy) shu yerda aniqlanadi, guruh yoki
+   department orqali emas (production'da tekshirildi: "Magistratura"
+   bo'limining o'zi ichida ham Kunduzgi, ham Masofaviy o'quv rejalar
+   aralash — bo'lim darajasida ajratib bo'lmaydi). ── */
+export async function syncCurriculumDirectory(): Promise<number> {
+  const items = await fetchAllPages("/v1/data/curriculum-list")
+  const rows: CurriculumDirectoryRow[] = items.map((raw) => {
+    const r = asRecord(raw)
+    const educationForm = asRecord(r.educationForm)
+    const educationType = asRecord(r.educationType)
+    return {
+      hemis_id: numberValue(r.id) ?? 0,
+      name: textValue(r.name) || `O'quv reja #${numberValue(r.id) ?? 0}`,
+      education_form_code: textValue(educationForm.code) ?? null,
+      education_form_name: textValue(educationForm.name) ?? null,
+      education_type_code: textValue(educationType.code) ?? null,
+      education_type_name: textValue(educationType.name) ?? null,
+    }
+  }).filter((r) => r.hemis_id > 0)
+
+  await upsertCurriculumDirectory(rows)
+  return rows.length
 }
 
 /* ── Fakultet/Kafedra (bitta resurs, structure_type orqali ajratiladi) ── */
@@ -352,6 +383,7 @@ export async function runFullHemisSync(): Promise<void> {
       const students    = await syncOneResource("talaba",          syncStudentDirectory,   errors)
       const employees   = await syncOneResource("xodim",            syncEmployeeDirectory,  errors)
       const groups      = await syncOneResource("guruh",            syncGroupDirectory,     errors)
+      const curricula   = await syncOneResource("o'quv reja",       syncCurriculumDirectory, errors)
       const departments = await syncOneResource("fakultet/kafedra", syncDepartmentDirectory, errors)
       const subjects    = await syncOneResource("fan",              syncSubjectDirectory,   errors)
       const semesters   = await syncOneResource("semestr",          syncSemesterDirectory,  errors)
@@ -359,11 +391,11 @@ export async function runFullHemisSync(): Promise<void> {
 
       if (errors.length) {
         await markHemisSyncFailed(logId, errors.join(" | "))
-        console.warn(`[hemisSync] QISMAN tugadi (${errors.length} ta resurs xato berdi) —`, counts, errors)
+        console.warn(`[hemisSync] QISMAN tugadi (${errors.length} ta resurs xato berdi) —`, { ...counts, curricula }, errors)
       } else {
         await markHemisSyncFinished(logId, counts)
         console.log(
-          `[hemisSync] tayyor — talaba: ${students}, xodim: ${employees}, guruh: ${groups}, ` +
+          `[hemisSync] tayyor — talaba: ${students}, xodim: ${employees}, guruh: ${groups}, o'quv reja: ${curricula}, ` +
           `fakultet/kafedra: ${departments}, fan: ${subjects}, semestr: ${semesters}`
         )
       }

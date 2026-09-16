@@ -131,6 +131,7 @@ export interface SyncedGroup {
   name: string
   direction?: string | null
   course?: number | null
+  curriculumId?: number | null
 }
 
 export interface TeacherScheduleInput {
@@ -147,13 +148,14 @@ export interface TeacherScheduleInput {
 export async function upsertGroups(groups: SyncedGroup[]) {
   for (const g of groups) {
     await pool.query(
-      `INSERT INTO lms_groups (id, name, direction, course)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO lms_groups (id, name, direction, course, curriculum_id)
+       VALUES (?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
-         name      = VALUES(name),
-         direction = COALESCE(VALUES(direction), direction),
-         course    = COALESCE(VALUES(course), course)`,
-      [g.id, g.name, g.direction ?? null, g.course ?? null]
+         name          = VALUES(name),
+         direction     = COALESCE(VALUES(direction), direction),
+         course        = COALESCE(VALUES(course), course),
+         curriculum_id = COALESCE(VALUES(curriculum_id), curriculum_id)`,
+      [g.id, g.name, g.direction ?? null, g.course ?? null, g.curriculumId ?? null]
     )
   }
 }
