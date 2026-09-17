@@ -44,7 +44,7 @@ router.get("/callback", async (req, res: Response): Promise<void> => {
   }
 
   try {
-    await completeAuthorization(decoded.teacherId, code)
+    await completeAuthorization(decoded.teacherId, code, decoded.codeVerifier)
     redirectToProfile(res, { zoom: "connected" })
   } catch (err) {
     console.warn("[zoom callback] xato:", err instanceof Error ? err.message : err)

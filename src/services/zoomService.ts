@@ -69,16 +69,33 @@ function decrypt(payload: string): string {
 interface ZoomOAuthState {
   teacherId: number
   nonce: string
+  codeVerifier: string
+}
+
+/** Zoom'ning yangi "General App" turi PKCE (RFC 7636) talab qiladi — bo'lmasa
+ *  /oauth/authorize "Invalid client_id" deb (chalg'ituvchi, lekin aslida PKCE
+ *  yo'qligi haqidagi) xato qaytaradi. code_verifier'ni serverda saqlamasdan,
+ *  imzolangan `state` JWT ichiga solib yuboramiz — callback shu yerdan o'qib,
+ *  token almashinuvida qaytaradi. */
+function generateCodeVerifier(): string {
+  return crypto.randomBytes(32).toString("base64url")
+}
+
+function codeChallengeFromVerifier(verifier: string): string {
+  return crypto.createHash("sha256").update(verifier).digest("base64url")
 }
 
 export function buildAuthorizationUrl(teacherId: number): string {
   const nonce = crypto.randomBytes(16).toString("hex")
-  const state = jwt.sign({ teacherId, nonce } satisfies ZoomOAuthState, ZOOM_STATE_SECRET, { expiresIn: "10m" })
+  const codeVerifier = generateCodeVerifier()
+  const state = jwt.sign({ teacherId, nonce, codeVerifier } satisfies ZoomOAuthState, ZOOM_STATE_SECRET, { expiresIn: "10m" })
   const params = new URLSearchParams({
     response_type: "code",
     client_id: ZOOM_CLIENT_ID,
     redirect_uri: ZOOM_REDIRECT_URI,
     state,
+    code_challenge: codeChallengeFromVerifier(codeVerifier),
+    code_challenge_method: "S256",
   })
   return `${ZOOM_OAUTH_BASE}/authorize?${params.toString()}`
 }
@@ -108,11 +125,12 @@ function zoomOAuthErrorMessage(err: unknown): string {
   return detail || (err instanceof Error ? err.message : "Zoom bilan bog'lanishda xatolik")
 }
 
-async function exchangeCodeForTokens(code: string): Promise<ZoomTokenResponse> {
+async function exchangeCodeForTokens(code: string, codeVerifier: string): Promise<ZoomTokenResponse> {
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
     redirect_uri: ZOOM_REDIRECT_URI,
+    code_verifier: codeVerifier,
   })
   const { data } = await axios.post<ZoomTokenResponse>(`${ZOOM_OAUTH_BASE}/token`, body.toString(), {
     headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: basicAuthHeader() },
@@ -232,8 +250,8 @@ function expiresAtToMysql(date: Date): string {
 
 /** Zoom OAuth callback'da chaqiriladi — kod token'larga almashtiriladi,
  *  Zoom foydalanuvchi ma'lumoti olinadi va shu teacher bilan bog'lanadi. */
-export async function completeAuthorization(teacherId: number, code: string): Promise<{ email: string }> {
-  const tokens = await exchangeCodeForTokens(code)
+export async function completeAuthorization(teacherId: number, code: string, codeVerifier: string): Promise<{ email: string }> {
+  const tokens = await exchangeCodeForTokens(code, codeVerifier)
   const zoomUser = await fetchZoomUser(tokens.access_token)
   await persistTokens(teacherId, tokens, { zoomUserId: zoomUser.id, zoomAccountId: zoomUser.account_id ?? null, zoomEmail: zoomUser.email })
   return { email: zoomUser.email }
