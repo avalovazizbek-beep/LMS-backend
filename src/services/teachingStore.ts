@@ -49,6 +49,7 @@ const PRIVATE_ROOT = path.join(STORAGE_ROOT, "private")
 const TEACHING_FILE_ROOT = path.join(PRIVATE_ROOT, "teaching")
 const SUBMISSION_FILE_ROOT = path.join(PRIVATE_ROOT, "submissions")
 const QUESTION_IMAGES_ROOT = path.join(STORAGE_ROOT, "question-images")
+const CHAT_FILE_ROOT = path.join(PRIVATE_ROOT, "chat")
 
 function ensureDir(dir: string) {
   fs.mkdirSync(dir, { recursive: true })
@@ -62,6 +63,11 @@ export function teachingUploadsDir() {
 export function submissionUploadsDir() {
   ensureDir(SUBMISSION_FILE_ROOT)
   return SUBMISSION_FILE_ROOT
+}
+
+export function chatUploadsDir() {
+  ensureDir(CHAT_FILE_ROOT)
+  return CHAT_FILE_ROOT
 }
 
 export function privateStorageRoot() {

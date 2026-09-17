@@ -367,6 +367,48 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
 
+  // ── Murojaatlar (talaba -> o'qituvchi/dekanat/admin, 1:1 suhbat) ──
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_conversations (
+      id                  INT AUTO_INCREMENT PRIMARY KEY,
+      student_user_id     INT NOT NULL,
+      student_name        VARCHAR(255) NOT NULL,
+      student_group_id    INT NULL,
+      student_group_name  VARCHAR(255) NULL,
+      student_phone       VARCHAR(50) NULL,
+      student_id_number   VARCHAR(100) NULL,
+      recipient_type      ENUM('teacher','dean','admin') NOT NULL,
+      recipient_user_id   INT NULL,
+      recipient_name      VARCHAR(255) NULL,
+      subject             VARCHAR(255) NOT NULL,
+      status              ENUM('open','closed') NOT NULL DEFAULT 'open',
+      closed_by_name      VARCHAR(255) NULL,
+      created_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      closed_at           TIMESTAMP NULL,
+      last_message_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_conv_student (student_user_id),
+      INDEX idx_conv_recipient (recipient_type, recipient_user_id),
+      INDEX idx_conv_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_conversation_messages (
+      id               INT AUTO_INCREMENT PRIMARY KEY,
+      conversation_id  INT NOT NULL,
+      sender_user_id   INT NOT NULL,
+      sender_name      VARCHAR(255) NOT NULL,
+      sender_role      ENUM('student','teacher','dean','admin') NOT NULL,
+      body             TEXT NULL,
+      attachment_path  VARCHAR(500) NULL,
+      attachment_name  VARCHAR(255) NULL,
+      attachment_mime  VARCHAR(100) NULL,
+      attachment_size  INT NULL,
+      created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_msg_conv (conversation_id, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
   // ── Baholar (qo'lda, o'qituvchi tomonidan qo'yiladi) ──
   await exec(`
     CREATE TABLE IF NOT EXISTS lms_grades (

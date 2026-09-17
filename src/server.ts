@@ -23,6 +23,7 @@ import adminRoutes from "./routes/admin"
 import announcementsRoutes from "./routes/announcements"
 import reeduRoutes from "./routes/reedu"
 import plagiarismRoutes from "./routes/plagiarism"
+import supportRoutes from "./routes/support"
 import {
   getAttendance,
   getMeeting,
@@ -95,6 +96,7 @@ app.use("/api/admin", adminRoutes)
 app.use("/api/announcements", announcementsRoutes)
 app.use("/api/reedu", reeduRoutes)
 app.use("/api/plagiarism", plagiarismRoutes)
+app.use("/api/support", supportRoutes)
 
 app.get("/health", (_req, res) => {
   res.json({
