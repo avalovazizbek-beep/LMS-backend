@@ -35,6 +35,8 @@ import {
   toMeetingResponse,
   type CreateMeetingInput,
 } from "../services/meetingStore"
+import { teacherUserId } from "../services/teachingStore"
+import { createAndSaveZoomMeeting, getMeetingZoomRow, toPublicZoomInfo } from "../services/zoomService"
 
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
 const MAX_UPLOAD_BYTES = Number(process.env.LOCAL_RESOURCE_MAX_BYTES || 2 * 1024 * 1024 * 1024)
@@ -133,10 +135,16 @@ router.get("/recordings/:id/file", async (req: AuthRequest, res: Response): Prom
 
 router.use(authMiddleware)
 
+async function withZoomInfo(meeting: ReturnType<typeof toMeetingResponse>) {
+  const zoomRow = await getMeetingZoomRow(meeting.id)
+  if (!zoomRow) return meeting
+  return { ...meeting, zoom: toPublicZoomInfo(zoomRow, meeting.permissions.canManageMeeting) }
+}
+
 async function groupedMeetings(req: AuthRequest) {
   const user = await resolveMeetingUser(req.user)
-  const meetings = (await listMeetingsForUser(user)).map((meeting) =>
-    toMeetingResponse(meeting, user)
+  const meetings = await Promise.all(
+    (await listMeetingsForUser(user)).map((meeting) => withZoomInfo(toMeetingResponse(meeting, user)))
   )
 
   return {
@@ -189,11 +197,56 @@ router.post("/", async (req: AuthRequest, res: Response): Promise<void> => {
     return
   }
 
+  const wantsZoom = req.body?.createZoomMeeting === true
   const meeting = await createMeeting(
     { ...req.body, subjectName: textValue(req.body.subjectName) || null },
     user
   )
-  res.status(201).json({ success: true, data: toMeetingResponse(meeting, user) })
+
+  const response: Record<string, unknown> = { ...toMeetingResponse(meeting, user) }
+
+  // Zoom meeting — LMS meeting allaqachon yaratilgan, shu sabab Zoom
+  // tomonda xato bo'lsa ham LMS meeting saqlanib qoladi ("meetingni butunlay
+  // jim qoldirmaslik" — response'da zoom.status='failed' qaytadi, teacher
+  // buni ko'rib qayta urinishi mumkin: POST /:id/zoom/retry).
+  if (wantsZoom) {
+    // teacher hemis identifikatori — Zoom hisobini shu id bo'yicha topamiz
+    // (resolveMeetingUser'ning o'zi ham xuddi shu qoidadan kelib chiqadi,
+    // lekin shu yerda to'g'ridan-to'g'ri asl JWT'dan olib qulayroq).
+    const zoomTeacherId = teacherUserId(req.user)
+    const { info } = await createAndSaveZoomMeeting(meeting.id, zoomTeacherId, {
+      topic: meeting.title,
+      agenda: meeting.description,
+      startTime: meeting.startTime,
+      endTime: meeting.endTime,
+    })
+    response.zoom = { ...info, startUrl: info.startUrl } // yaratuvchining o'ziga darhol ko'rsatiladi
+  }
+
+  res.status(201).json({ success: true, data: response })
+})
+
+/* ── POST /:id/zoom/retry — avval urinilmagan yoki muvaffaqiyatsiz bo'lgan
+   Zoom meeting'ni qayta yaratishga urinadi ("retry qilish imkoniyati"). ── */
+router.post("/:id/zoom/retry", async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = meetingId(req)
+  const user = await resolveMeetingUser(req.user)
+  const meeting = id === null ? null : await getMeeting(id)
+
+  if (!meeting) { res.status(404).json({ success: false, message: "Meeting topilmadi" }); return }
+  if (!canManageMeeting(user, meeting)) {
+    res.status(403).json({ success: false, message: "Ruxsat yo'q" })
+    return
+  }
+
+  const zoomTeacherId = teacherUserId(req.user)
+  const { ok, info } = await createAndSaveZoomMeeting(meeting.id, zoomTeacherId, {
+    topic: meeting.title,
+    agenda: meeting.description,
+    startTime: meeting.startTime,
+    endTime: meeting.endTime,
+  })
+  res.status(ok ? 200 : 502).json({ success: ok, data: info, message: ok ? "Zoom meeting yaratildi" : info.errorMessage })
 })
 
 router.get("/:id", async (req: AuthRequest, res: Response): Promise<void> => {
@@ -210,7 +263,7 @@ router.get("/:id", async (req: AuthRequest, res: Response): Promise<void> => {
     return
   }
 
-  res.json({ success: true, data: toMeetingResponse(meeting, user) })
+  res.json({ success: true, data: await withZoomInfo(toMeetingResponse(meeting, user)) })
 })
 
 router.post("/:id/start", async (req: AuthRequest, res: Response): Promise<void> => {
