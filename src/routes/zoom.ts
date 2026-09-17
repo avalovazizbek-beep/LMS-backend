@@ -79,7 +79,11 @@ router.get("/connect", async (req: AuthRequest, res: Response): Promise<void> =>
     res.status(503).json({ success: false, message: "Zoom integratsiyasi hali serverda sozlanmagan" })
     return
   }
-  res.json({ success: true, data: { url: buildAuthorizationUrl(teacherId) } })
+  const url = buildAuthorizationUrl(teacherId)
+  // Vaqtincha diagnostika — brauzer manzil satri qirqilib, code_challenge
+  // ko'rinmayotgani sabab, to'liq URL'ni serverning o'z logida ko'ramiz.
+  console.log(`[zoom connect] teacherId=${teacherId} url=${url}`)
+  res.json({ success: true, data: { url } })
 })
 
 /* ── POST /api/integrations/zoom/disconnect ───────────────────────────── */
