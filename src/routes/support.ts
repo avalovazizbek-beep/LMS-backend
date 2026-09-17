@@ -267,7 +267,6 @@ router.get("/conversations/:id", async (req: AuthRequest, res: Response): Promis
     [id]
   )
 
-  const viewerIsStudent = req.user?.role === "student"
   const canClose = await isRecipientOf(req, conv)
 
   res.json({
@@ -298,10 +297,12 @@ router.get("/conversations/:id", async (req: AuthRequest, res: Response): Promis
           ? { url: `/api/support/messages/${m.id}/file`, name: m.attachment_name, mime: m.attachment_mime, size: m.attachment_size }
           : null,
         createdAt: m.created_at,
-        // Talaba tomoni <-> xodim tomoni bo'yicha tekislash (aynan qaysi
-        // xodim yozgani emas — dean/admin pulida bir nechta kishi javob
-        // berishi mumkin, shu sabab "mening tomonim" rolga qarab aniqlanadi)
-        isMine: (m.sender_role === "student") === viewerIsStudent,
+        // Tomonlar QAT'IY: talaba har doim bir tomonda, murojaat qabul
+        // qiluvchi (o'qituvchi/dekanat/admin) har doim boshqa tomonda —
+        // kim tomosha qilayotganidan qat'i nazar (odatiy chat ilovasidagi
+        // "mening xabarim o'ngda" mantig'i emas, balki tarix sifatida
+        // barcha ko'ruvchilar uchun bir xil ko'rinishi kerak).
+        isStudent: m.sender_role === "student",
       })),
     },
   })
