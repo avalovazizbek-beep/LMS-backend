@@ -324,6 +324,7 @@ export interface TeacherContentRecord {
   title: string
   description: string | null
   kind: string | null
+  trainingType: string | null
   controlType: string | null
   resourceType: string | null
   meetingLink: string | null
@@ -392,6 +393,7 @@ async function mapContentRow(row: mysql.RowDataPacket): Promise<TeacherContentRe
     title: String(row.title),
     description: row.description ?? null,
     kind: row.kind ?? null,
+    trainingType: row.training_type ?? null,
     controlType: row.control_type ?? null,
     resourceType: row.resource_type ?? null,
     meetingLink: row.meeting_link ?? null,
@@ -440,6 +442,7 @@ export interface CreateContentInput {
   title: string
   description?: string | null
   kind?: string | null
+  trainingType?: string | null
   controlType?: string | null
   resourceType?: string | null
   meetingLink?: string | null
@@ -462,10 +465,10 @@ export async function createTeacherContent(input: CreateContentInput): Promise<T
   const uuid = randomUUID()
   await pool.query(
     `INSERT INTO lms_teacher_content
-      (uuid, type, teacher_user_id, group_id, subject_name, topic_key, title, description, kind, control_type, resource_type,
+      (uuid, type, teacher_user_id, group_id, subject_name, topic_key, title, description, kind, training_type, control_type, resource_type,
        file_name, original_name, mime_type, file_size, relative_path, public_url, meeting_link,
        available_from, deadline, max_score, attempts_count, question_display_count, language, is_adaptive, duration_minutes, training_load, completion_points, lesson_date, delivered)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       uuid,
       input.type,
@@ -476,6 +479,7 @@ export async function createTeacherContent(input: CreateContentInput): Promise<T
       input.title.trim(),
       input.description?.trim() || null,
       input.kind?.trim() || null,
+      input.trainingType?.trim() || null,
       input.controlType?.trim() || null,
       input.resourceType?.trim() || null,
       input.file?.name ?? null,
@@ -623,6 +627,7 @@ export interface UpdateContentInput {
   description?: string | null
   subjectName?: string
   kind?: string | null
+  trainingType?: string | null
   controlType?: string | null
   availableFrom?: string
   deadline?: string | null
@@ -657,6 +662,10 @@ export async function updateTeacherContent(id: number, patch: UpdateContentInput
   if (patch.kind !== undefined) {
     sets.push("kind = ?")
     params.push(patch.kind?.trim() || null)
+  }
+  if (patch.trainingType !== undefined) {
+    sets.push("training_type = ?")
+    params.push(patch.trainingType?.trim() || null)
   }
   if (patch.controlType !== undefined) {
     sets.push("control_type = ?")

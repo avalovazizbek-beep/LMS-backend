@@ -321,6 +321,8 @@ export async function initDatabase() {
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN resource_type VARCHAR(40) NULL AFTER kind`)
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN meeting_link VARCHAR(500) NULL AFTER public_url`)
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN control_type VARCHAR(60) NULL AFTER kind`)
+  // Mashg'ulot turi — Ma'ruza / Amaliyot / Mustaqil ish (video/audio/theory/qollanma/assignment kabi resurslar uchun)
+  await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN training_type VARCHAR(40) NULL AFTER kind`)
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN attempts_count INT NULL AFTER max_score`)
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN question_display_count INT NULL AFTER attempts_count`)
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN language VARCHAR(20) NULL AFTER question_display_count`)

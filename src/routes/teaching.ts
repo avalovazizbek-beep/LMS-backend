@@ -167,6 +167,7 @@ interface ContentMeta {
   title: string
   description: string
   kind: string
+  trainingType: string
   controlType: string
   resourceType: string
   meetingLink: string
@@ -197,6 +198,7 @@ function readContentMeta(source: Record<string, unknown>): ContentMeta {
     title: textValue(source.title),
     description: textValue(source.description),
     kind: textValue(source.kind),
+    trainingType: textValue(source.trainingType ?? source.training_type),
     controlType: textValue(source.controlType ?? source.control_type),
     resourceType: textValue(source.resourceType ?? source.resource_type),
     meetingLink: textValue(source.meetingLink ?? source.meeting_link),
@@ -1416,6 +1418,7 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
     title: meta.title,
     description: meta.description || null,
     kind: meta.kind || null,
+    trainingType: meta.trainingType || null,
     controlType: meta.controlType || null,
     resourceType: meta.resourceType || null,
     meetingLink: meta.meetingLink || null,
@@ -1526,6 +1529,7 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
   if ("description" in body) patch.description = textValue(body.description) || null
   if (typeof body.subjectName === "string" && body.subjectName.trim()) patch.subjectName = body.subjectName
   if ("kind" in body) patch.kind = textValue(body.kind) || null
+  if ("trainingType" in body) patch.trainingType = textValue(body.trainingType) || null
   if ("controlType" in body) patch.controlType = textValue(body.controlType) || null
   if ("attemptsCount" in body) patch.attemptsCount = numberValue(body.attemptsCount)
   if ("questionDisplayCount" in body) patch.questionDisplayCount = numberValue(body.questionDisplayCount)
