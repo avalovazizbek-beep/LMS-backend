@@ -1036,6 +1036,41 @@ router.post("/topics/:topicKey/close", async (req: AuthRequest, res: Response): 
   res.json({ success: true, message: "Mavzu yopildi" })
 })
 
+/* ── GET /content/topic-summary — talaba uchun: fan bo'yicha mashg'ulot
+   turlari (ma'ruza/amaliyot/mustaqil ish) va har birida nechta mavzu bor —
+   "3 bo'lim" tanlash ekrani shu ro'yxatga qarab quriladi. TrainingType
+   belgilanmagan (eski) mavzular ham alohida "umumiy" guruh sifatida
+   ko'rsatiladi — hech narsa yo'qolib qolmasligi uchun. ── */
+router.get("/content/topic-summary", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role === "employee") {
+    res.status(403).json({ success: false, message: "Faqat talaba uchun" })
+    return
+  }
+  const subjectName = textValue(req.query.subject)
+  if (!subjectName) {
+    res.status(400).json({ success: false, message: "subject majburiy" })
+    return
+  }
+  const groupId = studentGroupId(req.user)
+  if (groupId === null) {
+    res.json({ success: true, data: [] })
+    return
+  }
+  const items = await listTeacherContent({ groupId, subjectName })
+  const byType = new Map<string, Set<string>>()
+  for (const item of items) {
+    if (!item.topicKey) continue
+    const key = item.trainingType?.trim() || ""
+    if (!byType.has(key)) byType.set(key, new Set())
+    byType.get(key)!.add(item.topicKey)
+  }
+  const data = Array.from(byType.entries()).map(([trainingType, keys]) => ({
+    trainingType: trainingType || null,
+    topicCount: keys.size,
+  }))
+  res.json({ success: true, data })
+})
+
 /* ── GET /content/topics — talaba uchun mavzular (ketma-ket qulflash) ── */
 router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.user?.role === "employee") {
@@ -1053,7 +1088,8 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
     return
   }
   const sId = studentUserId(req.user)
-  const items = await listTeacherContent({ groupId, subjectName })
+  const trainingTypeFilter = textValue(req.query.trainingType)
+  const items = await listTeacherContent({ groupId, subjectName, trainingType: trainingTypeFilter || undefined })
 
   const topicMap = new Map<string, TeacherContentRecord[]>()
   const order: string[] = []
@@ -1072,6 +1108,7 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
     title: string
     locked: boolean
     completed: boolean
+    trainingType: string | null
     sections: {
       video: (TeacherContentRecord & { progress: ContentProgress | null; sectionLocked: boolean }) | null
       audio: (TeacherContentRecord & { progress: ContentProgress | null; sectionLocked: boolean }) | null
@@ -1164,6 +1201,7 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
       title,
       locked: !previousCompleted,
       completed,
+      trainingType: marker?.trainingType ?? null,
       sections: { video: videoSection, audio: audioSection, theory: theorySection, qollanma: qollanmaSection, test: testSection, assignment: assignmentSection, youtube: youtubeSection },
     })
 

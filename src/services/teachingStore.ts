@@ -15,6 +15,10 @@ export type ContentType =
   | "malumot"
 export type ContentStatus = "locked" | "open" | "closed"
 
+/** ContentFilter.trainingType uchun maxsus qiymat — "mashg'ulot turi
+    belgilanmagan" (eski, tegsiz) kontentni topish uchun (training_type IS NULL). */
+export const NO_TRAINING_TYPE = "__none__"
+
 const WEEK_DAYS = ["Yakshanba", "Dushanba", "Seshanba", "Chorshanba", "Payshanba", "Juma", "Shanba"]
 
 export function weekDayName(date: Date) {
@@ -547,6 +551,7 @@ export interface ContentFilter {
   subjectName?: string
   topicKey?: string
   isActive?: boolean
+  trainingType?: string
 }
 
 export async function listTeacherContent(filter: ContentFilter): Promise<TeacherContentRecord[]> {
@@ -575,6 +580,12 @@ export async function listTeacherContent(filter: ContentFilter): Promise<Teacher
   if (filter.isActive !== undefined) {
     where.push("is_active = ?")
     params.push(filter.isActive ? 1 : 0)
+  }
+  if (filter.trainingType === NO_TRAINING_TYPE) {
+    where.push("training_type IS NULL")
+  } else if (filter.trainingType?.trim()) {
+    where.push("training_type = ?")
+    params.push(filter.trainingType.trim())
   }
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
     `SELECT ${CONTENT_SELECT} FROM lms_teacher_content ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY available_from DESC`,
