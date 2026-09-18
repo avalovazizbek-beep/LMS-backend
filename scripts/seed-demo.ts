@@ -1,9 +1,11 @@
 /**
  * Demo (test) hisoblar yaratish — HEMIS orqali kirmasdan, LOGIN + PAROL bilan
- * haqiqiy login sahifasi orqali sinash uchun. Atayin minimal: faqat 2 ta
- * hisob (`demo_teacher`, `demo_student1_1`) va ular biriktirilgan bitta fan
- * ("Demo fan") — hech qanday mavzu/video/fayl/test/baho/davomat/meeting
- * seedlanmaydi.
+ * haqiqiy login sahifasi orqali sinash uchun. Atayin minimal: 3 ta hisob
+ * (`demo_teacher`, `demo_student1_1`, `demo_student2_1`) — o'qituvchi ikkala
+ * guruhga (DEMO-101, DEMO-102) biriktirilgan bitta fan ("Demo fan") bilan,
+ * har guruhda bittadan talaba — parallel guruhlarga birdan resurs yuklash
+ * funksiyasini sinash uchun. Hech qanday mavzu/video/fayl/test/baho/davomat/
+ * meeting seedlanmaydi.
  *
  * Ishga tushirish:
  *   npx ts-node scripts/seed-demo.ts
@@ -18,17 +20,17 @@ import { pool, initDatabase } from "../src/services/db"
 import { deleteTeacherContent, removeStoredFile } from "../src/services/teachingStore"
 
 const TEACHER_ID = 9501
-const GROUP_IDS = [9901]
-const GROUP_NAMES = ["DEMO-101"]
-// Faqat 1 ta talaba — demo_student1_1
-const STUDENTS_PER_GROUP = [1]
-// remove() uchun — bu skriptning oldingi versiyalari 9902 (DEMO-102)ni ham
-// yaratgan edi; shu ro'yxat har doim TO'LIQ tozalash uchun, GROUP_IDS'dan
-// mustaqil ravishda saqlanadi (GROUP_IDS kichraytirilsa ham eski qoldiqlar tozalanadi).
+// 2 ta guruh — bir nechta guruhga birdan resurs yuklash (parallel guruhlar)
+// funksiyasini sinash uchun demo o'qituvchi ikkala guruhga ham biriktiriladi.
+const GROUP_IDS = [9901, 9902]
+const GROUP_NAMES = ["DEMO-101", "DEMO-102"]
+// Har guruhda 1 tadan talaba — demo_student1_1 (DEMO-101), demo_student2_1 (DEMO-102)
+const STUDENTS_PER_GROUP = [1, 1]
+// remove() uchun — GROUP_IDS'dan mustaqil ravishda saqlanadi (GROUP_IDS
+// kichraytirilsa ham eski qoldiqlar tozalanadi).
 const ALL_KNOWN_GROUP_IDS = [9901, 9902]
 const DEMO_PASSWORD = "demo12345"
 const DEMO_SUBJECT = "Demo fan"
-const HERO_STUDENT_USERNAME = "demo_student1_1"
 
 async function remove() {
   await initDatabase()
@@ -167,7 +169,7 @@ async function seed() {
   console.log("\n=== DEMO HISOBLAR TAYYOR — login sahifasida shu login/parol bilan kiring ===\n")
   console.table(credentials)
   console.log(`\nHammasi uchun bitta parol: ${DEMO_PASSWORD}`)
-  console.log(`Hisoblar: ${teacherUsername}, ${HERO_STUDENT_USERNAME}`)
+  console.log(`Hisoblar: ${credentials.map(c => c.username).join(", ")}`)
   console.log("O'chirish uchun: npx ts-node scripts/seed-demo.ts --remove\n")
 
   await pool.end()
