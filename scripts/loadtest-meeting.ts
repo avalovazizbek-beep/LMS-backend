@@ -40,6 +40,18 @@
  *     server siqilib qolayotganini bildiradi.
  */
 
+// wrtc'ning rasmiy TypeScript turlari yo'q, va bu skript backend
+// tsconfig'ining "include": ["src/**/*"] doirasidan tashqarida (scripts/)
+// ishga tushirilgani uchun alohida .d.ts fayl ham ko'rinmaydi — shu sabab
+// deklaratsiya to'g'ridan-to'g'ri shu yerda, faylning o'zida beriladi.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+declare module "wrtc"
+// Backend tsconfig'ida "lib": ["ES2020"] — DOM turlari (shu jumladan
+// MediaStreamTrack) yo'q. Bu skript uchun ular kerak emas, shuning uchun
+// mediasoup-client'ga uzatiladigan "track"ni shu minimal shakl bilan
+// belgilaymiz (haqiqiy runtime'da wrtc real MediaStreamTrack qaytaradi).
+type FakeTrack = { addEventListener?: (event: string, cb: () => void) => void } & Record<string, unknown>
+
 import "dotenv/config"
 import wrtc from "wrtc"
 
@@ -101,7 +113,7 @@ function createDevice(): Device {
 }
 
 /* ── Soxta video/audio manba (haqiqiy kamera/mikrofon shart emas) ──────── */
-function createFakeVideoTrack(): MediaStreamTrack {
+function createFakeVideoTrack(): FakeTrack {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const source = new (wrtc as any).nonstandard.RTCVideoSource()
   const track = source.createTrack()
@@ -120,7 +132,7 @@ function createFakeVideoTrack(): MediaStreamTrack {
   return track
 }
 
-function createFakeAudioTrack(): MediaStreamTrack {
+function createFakeAudioTrack(): FakeTrack {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const source = new (wrtc as any).nonstandard.RTCAudioSource()
   const track = source.createTrack()
@@ -222,8 +234,10 @@ async function simulateParticipant(meeting: MeetingRecord, user: MeetingUser, sh
             .then(({ id }) => cb({ id }))
             .catch(eb)
         })
-        await sendTransport.produce({ track: createFakeAudioTrack(), appData: { source: "mic" } })
-        await sendTransport.produce({ track: createFakeVideoTrack(), appData: { source: "camera" } })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await sendTransport.produce({ track: createFakeAudioTrack() as any, appData: { source: "mic" } })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await sendTransport.produce({ track: createFakeVideoTrack() as any, appData: { source: "camera" } })
       }
 
       finish({ ok: true, joinMs: Date.now() - startedAt })
