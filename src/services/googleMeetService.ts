@@ -309,7 +309,13 @@ export async function createGoogleMeetForTeacher(
     const e = err as AxiosError<{ error?: { message?: string; status?: string } }>
     const status = e?.response?.status
     const code = status ? String(status) : (axios.isAxiosError(e) && e.code) || "unknown"
-    const message = e?.response?.data?.error?.message || googleApiErrorMessage(err)
+    const rawMessage = e?.response?.data?.error?.message || googleApiErrorMessage(err)
+    // Google Cloud Console'da "Data Access" bo'limiga meetings.space.created
+    // scope hali qo'shilmagan bo'lsa, eski (scope'siz) token bilan aynan shu
+    // xato qaytadi — teacherga tushunarli, harakat qiladigan xabar beramiz.
+    const message = /insufficient authentication scopes/i.test(rawMessage)
+      ? "Google ruxsatlari yetarli emas — Profildan Google akkauntni uzib, qayta ulang (admin: Data Access'ga scope qo'shilganini tekshiring)."
+      : rawMessage
     throw new GoogleMeetApiError(message, code)
   }
 }
