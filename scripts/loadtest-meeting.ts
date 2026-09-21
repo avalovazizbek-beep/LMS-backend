@@ -34,7 +34,7 @@
  *     (wrtc'dagidan OG'IRROQ, lekin ISHONCHLI). Shu sabab --perRoom'ni
  *     ehtiyotkorlik bilan, asta-sekin oshiring va `htop`/`free -h` orqali
  *     serverni kuzatib turing.
- *   - `--frontendUrl` — standart http://localhost:3000 (backend'ning
+ *   - `--frontendUrl` — standart https://lms.sies.uz (backend'ning
  *     .env'idagi FRONTEND_URL bilan ANIQ bir xil bo'lishi SHART, aks
  *     holda Socket.IO CORS ulanishni rad etadi).
  *   - FAQAT dars bo'lmagan vaqtda ishga tushiring.
@@ -74,7 +74,7 @@ const PRODUCERS_PER_ROOM = argNum("producers", 3) // o'qituvchidan tashqari qanc
 const RAMP_MS = argNum("rampMs", 250) // har bir ishtirokchi ulanishi orasidagi tanaffus
 const HOLD_SECONDS = argNum("holdSeconds", 90)
 const SOCKET_URL = argStr("socketUrl", "http://127.0.0.1:5000")
-const FRONTEND_URL = argStr("frontendUrl", "http://localhost:3000") // backend .env'idagi FRONTEND_URL bilan bir xil bo'lishi shart (CORS)
+const FRONTEND_URL = argStr("frontendUrl", "https://lms.sies.uz") // backend .env'idagi FRONTEND_URL bilan bir xil bo'lishi shart (CORS)
 const DEMO_GROUP_ID = argNum("groupId", 9901) // seed-demo.ts'dagi DEMO-101
 const JOIN_TIMEOUT_MS = argNum("joinTimeoutMs", 20000)
 
