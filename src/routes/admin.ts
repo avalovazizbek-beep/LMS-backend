@@ -1,10 +1,11 @@
 import fs from "fs"
 import path from "path"
+import jwt from "jsonwebtoken"
 import { Router, Response, NextFunction } from "express"
 import type { RowDataPacket } from "mysql2"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
-import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen } from "../services/teachingStore"
+import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen, getTeacherGroupIds } from "../services/teachingStore"
 import { listQuestions, isExamPassed } from "../services/examStore"
 import { grantRetake, revokeRetakeGrant } from "../services/retakeStore"
 import {
@@ -52,6 +53,7 @@ function textVal(...args: unknown[]): string {
 // orqali qo'lda admin huquqi beradi. Qiymat serverdagi .env faylida
 // FIXED_ADMIN_HEMIS_ID sifatida saqlanadi (kodga hardcode qilinmaydi).
 const FIXED_ADMIN_HEMIS_ID = String(process.env.FIXED_ADMIN_HEMIS_ID ?? "").trim()
+const JWT_SECRET = process.env.JWT_SECRET || "secret"
 
 function extractHemisRoleCodes(employeeProfile: unknown): string[] {
   const profile = asRecord(employeeProfile)
@@ -165,15 +167,76 @@ router.get("/check", async (req: AuthRequest, res: Response): Promise<void> => {
     dbRole = rows[0]?.lms_role ?? null
   }
 
-  const isAdmin = isAutoAdmin || dbRole === "admin"
+  // MUHIM: dean ham admin panelga kira olishi kerak (faqat cheklangan
+  // huquqlar bilan — requirePermission har bir modulda alohida tekshiradi).
+  // Bu yerda dean'ni chetlab o'tish uni admin/layout.tsx va Sidebar.tsx'dagi
+  // `isAdmin` tekshiruvidan o'tkazmay, butunlay /dashboard'ga qaytarib
+  // yuborardi — "Rol berish"dan keyin dean umuman panelni ko'rmasdi.
+  const isAdmin = isAutoAdmin || dbRole === "admin" || dbRole === "dean"
   res.json({
     success: true,
     isAdmin,
+    // Faqat FIXED_ADMIN_HEMIS_ID — "Rol berish" orqali admin huquqi olgan
+    // boshqa hech kim emas. Faqat shu odamgagina ko'rinadigan (masalan
+    // "Talaba sifatida ko'rish") imkoniyatlarni frontend shu bilan boshqaradi.
+    isSuperAdmin: isAutoAdmin,
     name: textVal(String(user.fullName ?? ""), String(user.username ?? "")),
     role: user.role,
     hemisRoles: profileRoles,
     lmsRole: isAutoAdmin ? "admin" : (dbRole ?? "none"),
   })
+})
+
+/* ── POST /api/admin/view-as-student — o'zining o'qituvchi sifatida
+   biriktirilgan guruhlaridan biriga "talaba ko'zi bilan" qarash uchun
+   (demo talaba hisobiga bog'langan token qaytaradi). Faqat FIXED_ADMIN
+   uchun — "Rol berish" orqali admin bo'lganlar ham bundan foydalana
+   olmaydi (haqiqiy talaba HEMIS tokeniga ega emasmiz, shu sababli faqat
+   demo hisobi bor guruhlar uchun ishlaydi). ── */
+router.post("/view-as-student", async (req: AuthRequest, res: Response): Promise<void> => {
+  const hemisId = getHemisId(req)
+  if (!FIXED_ADMIN_HEMIS_ID || hemisId !== FIXED_ADMIN_HEMIS_ID) {
+    res.status(403).json({ success: false, message: "Bu imkoniyat faqat asosiy administrator uchun" })
+    return
+  }
+
+  const groupIdRaw = Number(req.body?.groupId)
+  if (!Number.isFinite(groupIdRaw)) {
+    res.status(400).json({ success: false, message: "groupId majburiy" })
+    return
+  }
+  const groupId = groupIdRaw
+
+  const tId = teacherUserId(req.user)
+  const ownGroupIds = await getTeacherGroupIds(tId)
+  if (!ownGroupIds.includes(groupId)) {
+    res.status(403).json({ success: false, message: "Bu guruh sizga biriktirilmagan" })
+    return
+  }
+
+  const [rows] = await pool.query<RowDataPacket[]>(
+    "SELECT hemis_id, full_name, group_id FROM lms_demo_accounts WHERE group_id = ? AND role = 'student' LIMIT 1",
+    [groupId]
+  )
+  const demoStudent = rows[0]
+  if (!demoStudent) {
+    res.status(404).json({ success: false, message: "Bu guruh uchun demo talaba hisobi topilmadi" })
+    return
+  }
+
+  const studentHemisId = Number(demoStudent.hemis_id)
+  const token = jwt.sign(
+    {
+      id: studentHemisId, userId: studentHemisId, hemisToken: "demo-token", role: "student",
+      username: demoStudent.full_name, fullName: demoStudent.full_name,
+      groupId: Number(demoStudent.group_id),
+      studentAuthMode: "password",
+      impersonatedBy: hemisId,
+    },
+    JWT_SECRET, { expiresIn: "2d" }
+  )
+
+  res.json({ success: true, token, role: "student", studentName: String(demoStudent.full_name) })
 })
 
 // Aniq grant (lms_permissions) bo'lmasa HEMIS rolidan (talaba/xodim) kelib
