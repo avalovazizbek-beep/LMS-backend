@@ -96,6 +96,9 @@ async function simulateParticipant(browser: Browser, meeting: MeetingRecord, use
     page.on("console", (msg) => console.log(`  [browser:${user.fullName}]`, msg.text()))
     page.on("pageerror", (err) => console.log(`  [browser:${user.fullName}] PAGE ERROR:`, err instanceof Error ? err.message : String(err)))
     page.on("requestfailed", (req) => console.log(`  [browser:${user.fullName}] REQUEST FAILED:`, req.url(), req.failure()?.errorText))
+    page.on("response", (res) => {
+      if (res.status() >= 400) console.log(`  [browser:${user.fullName}] HTTP ${res.status()}:`, res.url())
+    })
   }
   // Frontend production build'da NEXT_PUBLIC_BASE_PATH=/lms-samisi ostida
   // joylashgan (public/ fayllar ham shu yo'l ostida xizmat qiladi) — lekin
