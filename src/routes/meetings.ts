@@ -37,6 +37,7 @@ import {
 } from "../services/meetingStore"
 import { teacherUserId } from "../services/teachingStore"
 import { createAndSaveZoomMeeting, getMeetingZoomRow, toPublicZoomInfo } from "../services/zoomService"
+import { createAndSaveGoogleMeetMeeting, getMeetingGoogleMeetRow, toPublicGoogleMeetInfo } from "../services/googleMeetService"
 
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
 const MAX_UPLOAD_BYTES = Number(process.env.LOCAL_RESOURCE_MAX_BYTES || 2 * 1024 * 1024 * 1024)
@@ -135,16 +136,21 @@ router.get("/recordings/:id/file", async (req: AuthRequest, res: Response): Prom
 
 router.use(authMiddleware)
 
-async function withZoomInfo(meeting: ReturnType<typeof toMeetingResponse>) {
-  const zoomRow = await getMeetingZoomRow(meeting.id)
-  if (!zoomRow) return meeting
-  return { ...meeting, zoom: toPublicZoomInfo(zoomRow, meeting.permissions.canManageMeeting) }
+async function withProviderInfo(meeting: ReturnType<typeof toMeetingResponse>) {
+  const [zoomRow, googleMeetRow] = await Promise.all([
+    getMeetingZoomRow(meeting.id),
+    getMeetingGoogleMeetRow(meeting.id),
+  ])
+  const result: Record<string, unknown> = { ...meeting }
+  if (zoomRow) result.zoom = toPublicZoomInfo(zoomRow, meeting.permissions.canManageMeeting)
+  if (googleMeetRow) result.googleMeet = toPublicGoogleMeetInfo(googleMeetRow)
+  return result
 }
 
 async function groupedMeetings(req: AuthRequest) {
   const user = await resolveMeetingUser(req.user)
   const meetings = await Promise.all(
-    (await listMeetingsForUser(user)).map((meeting) => withZoomInfo(toMeetingResponse(meeting, user)))
+    (await listMeetingsForUser(user)).map((meeting) => withProviderInfo(toMeetingResponse(meeting, user)))
   )
 
   return {
@@ -223,6 +229,19 @@ router.post("/", async (req: AuthRequest, res: Response): Promise<void> => {
     response.zoom = { ...info, startUrl: info.startUrl } // yaratuvchining o'ziga darhol ko'rsatiladi
   }
 
+  // Google Meet — Zoom bilan bir xil naqsh: LMS meeting allaqachon
+  // yaratilgan, Google tomonda xato bo'lsa ham LMS meeting saqlanib
+  // qoladi (response'da googleMeet.status='failed' qaytadi, teacher
+  // qayta urinishi mumkin: POST /:id/google-meet/retry).
+  const wantsGoogleMeet = req.body?.createGoogleMeetMeeting === true
+  if (wantsGoogleMeet) {
+    const googleTeacherId = teacherUserId(req.user)
+    const { info } = await createAndSaveGoogleMeetMeeting(meeting.id, googleTeacherId, {
+      topic: meeting.title,
+    })
+    response.googleMeet = info
+  }
+
   res.status(201).json({ success: true, data: response })
 })
 
@@ -249,6 +268,27 @@ router.post("/:id/zoom/retry", async (req: AuthRequest, res: Response): Promise<
   res.status(ok ? 200 : 502).json({ success: ok, data: info, message: ok ? "Zoom meeting yaratildi" : info.errorMessage })
 })
 
+/* ── POST /:id/google-meet/retry — avval urinilmagan yoki muvaffaqiyatsiz
+   bo'lgan Google Meet'ni qayta yaratishga urinadi (Zoom retry bilan bir
+   xil naqsh). ─────────────────────────────────────────────────────── */
+router.post("/:id/google-meet/retry", async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = meetingId(req)
+  const user = await resolveMeetingUser(req.user)
+  const meeting = id === null ? null : await getMeeting(id)
+
+  if (!meeting) { res.status(404).json({ success: false, message: "Meeting topilmadi" }); return }
+  if (!canManageMeeting(user, meeting)) {
+    res.status(403).json({ success: false, message: "Ruxsat yo'q" })
+    return
+  }
+
+  const googleTeacherId = teacherUserId(req.user)
+  const { ok, info } = await createAndSaveGoogleMeetMeeting(meeting.id, googleTeacherId, {
+    topic: meeting.title,
+  })
+  res.status(ok ? 200 : 502).json({ success: ok, data: info, message: ok ? "Google Meet yaratildi" : info.errorMessage })
+})
+
 router.get("/:id", async (req: AuthRequest, res: Response): Promise<void> => {
   const id = meetingId(req)
   const user = await resolveMeetingUser(req.user)
@@ -263,7 +303,7 @@ router.get("/:id", async (req: AuthRequest, res: Response): Promise<void> => {
     return
   }
 
-  res.json({ success: true, data: await withZoomInfo(toMeetingResponse(meeting, user)) })
+  res.json({ success: true, data: await withProviderInfo(toMeetingResponse(meeting, user)) })
 })
 
 router.post("/:id/start", async (req: AuthRequest, res: Response): Promise<void> => {

@@ -25,6 +25,7 @@ import reeduRoutes from "./routes/reedu"
 import plagiarismRoutes from "./routes/plagiarism"
 import supportRoutes from "./routes/support"
 import zoomRoutes from "./routes/zoom"
+import googleMeetRoutes from "./routes/googleMeet"
 import {
   getAttendance,
   getMeeting,
@@ -99,6 +100,7 @@ app.use("/api/reedu", reeduRoutes)
 app.use("/api/plagiarism", plagiarismRoutes)
 app.use("/api/support", supportRoutes)
 app.use("/api/integrations/zoom", zoomRoutes)
+app.use("/api/integrations/google", googleMeetRoutes)
 
 app.get("/health", (_req, res) => {
   res.json({

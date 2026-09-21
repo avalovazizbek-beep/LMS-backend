@@ -406,6 +406,40 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
 
+  await exec(`
+    CREATE TABLE IF NOT EXISTS google_meet_connections (
+      id                      INT AUTO_INCREMENT PRIMARY KEY,
+      teacher_id              INT NOT NULL,
+      google_user_id          VARCHAR(128) NOT NULL,
+      google_email            VARCHAR(255) NULL,
+      access_token_encrypted  TEXT NOT NULL,
+      refresh_token_encrypted TEXT NOT NULL,
+      token_expires_at        DATETIME NOT NULL,
+      scope                   VARCHAR(500) NULL,
+      status                  ENUM('active','revoked','expired') NOT NULL DEFAULT 'active',
+      created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_google_meet_teacher (teacher_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_meeting_google_meet (
+      id                       INT AUTO_INCREMENT PRIMARY KEY,
+      meeting_id               INT NOT NULL,
+      teacher_id               INT NOT NULL,
+      google_space_name        VARCHAR(255) NULL,
+      google_meeting_uri       TEXT NULL,
+      google_meeting_code      VARCHAR(50) NULL,
+      status                   ENUM('pending','created','failed') NOT NULL DEFAULT 'pending',
+      error_code               VARCHAR(100) NULL,
+      error_message            TEXT NULL,
+      created_at               TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at               TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_meeting_google_meet (meeting_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
   // ── Murojaatlar (talaba -> o'qituvchi/dekanat/admin, 1:1 suhbat) ──
   await exec(`
     CREATE TABLE IF NOT EXISTS lms_conversations (
