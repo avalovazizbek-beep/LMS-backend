@@ -243,6 +243,14 @@ function mapGroupRow(row: mysql.RowDataPacket): GroupRecord {
   }
 }
 
+/** LMS faqat Masofaviy ta'lim uchun — HEMIS'da bu holat yagona maydon bilan
+ *  emas, guruh NOMI naqshi bilan belgilanadi ("-M-" yoki "(M)": IK-M-124,
+ *  MI(M)-125 — masofaviy; IK-223, MI-225 — oddiy). Shu sabab kimningdir
+ *  boshqa (kunduzgi/sirtqi) yuklamasidagi guruhlar tanlovlarda chiqmasin. */
+function isMasofaviyGroupName(name: string): boolean {
+  return /-M-|\(M\)/i.test(name)
+}
+
 export async function getTeacherGroups(userId: number): Promise<GroupRecord[]> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
     `SELECT DISTINCT g.* FROM (
@@ -254,7 +262,7 @@ export async function getTeacherGroups(userId: number): Promise<GroupRecord[]> {
      ORDER BY g.name`,
     [userId, userId]
   )
-  return rows.map(mapGroupRow)
+  return rows.map(mapGroupRow).filter((g) => isMasofaviyGroupName(g.name))
 }
 
 export async function getGroupById(groupId: number): Promise<GroupRecord | null> {

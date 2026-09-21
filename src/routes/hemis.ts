@@ -289,6 +289,15 @@ async function fetchTutorGroups(user?: AuthRequest["user"]): Promise<SyncedGroup
   return fetchTutorGroupsFrom("/ver1/tutor/group/list", base, token)
 }
 
+/** LMS faqat Masofaviy ta'lim uchun — HEMIS'da bu holat yagona maydon bilan
+ *  emas, guruh NOMI naqshi bilan belgilanadi ("-M-" yoki "(M)": IK-M-124,
+ *  MI(M)-125 — masofaviy; IK-223, MI-225 — oddiy, hatto bir xil fakultetda
+ *  bo'lsa ham). Shu sabab o'qituvchining boshqa (kunduzgi/sirtqi/magistratura
+ *  kunduzgi) yuklamasidagi guruhlari bu yerda hech qachon chiqmasligi kerak. */
+function isMasofaviyGroupName(name: string): boolean {
+  return /-M-|\(M\)/i.test(name)
+}
+
 /**
  * O'qituvchining berilgan bitta o'quv yilida dars bergan guruhlarini HEMIS'dan
  * so'raydi (tutor API'dan farqli — u faqat joriy yuklamani beradi). Boshqa
@@ -350,7 +359,7 @@ export async function fetchTeacherGroupsForYear(user: AuthRequest["user"] | unde
   })
 
   return {
-    groups: Array.from(out.values()),
+    groups: Array.from(out.values()).filter((g) => isMasofaviyGroupName(g.name)),
     debug: {
       employeeId,
       educationYear,
@@ -424,7 +433,7 @@ export async function fetchTeacherGroupsFromSchedule(
       }
       out.set(gid, { id: gid, name: gname, subjects: subjectName ? [subjectName] : [] })
     })
-    return Array.from(out.values())
+    return Array.from(out.values()).filter((g) => isMasofaviyGroupName(g.name))
   } catch {
     return []
   }
