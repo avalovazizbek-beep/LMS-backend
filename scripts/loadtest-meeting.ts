@@ -115,16 +115,22 @@ async function simulateParticipant(browser: Browser, meeting: MeetingRecord, use
     }
 
     const deadline = Date.now() + JOIN_TIMEOUT_MS
+    let lastEvalError: string | null = null
     while (Date.now() < deadline) {
       // `globalThis` — brauzer ichida `window`ning o'zi, lekin bu fayl Node
       // (DOM'siz) muhit uchun tekshiriladi, shuning uchun `window` nomi
       // to'g'ridan-to'g'ri ishlatilmaydi.
-      const status = await page.evaluate(() => (globalThis as unknown as { __loadtestResult?: SimResult }).__loadtestResult).catch(() => undefined)
-      if (status?.ok) return status
-      if (status && status.ok === false) return status
+      try {
+        const status = await page.evaluate(() => (globalThis as unknown as { __loadtestResult?: SimResult }).__loadtestResult)
+        if (status?.ok) return status
+        if (status && status.ok === false) return status
+      } catch (err) {
+        lastEvalError = err instanceof Error ? err.message : String(err)
+        if (verbose) console.log(`  [browser:${user.fullName}] evaluate xato:`, lastEvalError)
+      }
       await new Promise((r) => setTimeout(r, 300))
     }
-    return { ok: false, error: "timeout — meeting:joined kelmadi" }
+    return { ok: false, error: lastEvalError ? `timeout (evaluate xato: ${lastEvalError})` : "timeout — meeting:joined kelmadi" }
   })()
 
   return { result, close: () => page.close().catch(() => undefined) }
