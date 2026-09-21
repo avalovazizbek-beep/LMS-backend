@@ -366,6 +366,37 @@ export async function fetchTeacherGroupsForYear(user: AuthRequest["user"] | unde
 }
 
 /**
+ * Ba'zi kafedralarda "ish yuklamasi" (`curriculum-subject-teacher-list`) yangi
+ * o'quv yiliga hali kiritilmagan bo'lishi mumkin, lekin haqiqiy dars jadvali
+ * (`schedule-list`) allaqachon to'liq va joriy bo'ladi (real hodisa: bir
+ * o'qituvchining ish yuklamasi bo'sh, jadvali esa to'g'ri chiqqan). Shu sabab
+ * `fetchTeacherGroupsForYear` fan topa olmasa, shu guruh uchun haqiqiy
+ * jadvaldan fan nomini qidiramiz — oxirgi, eng ishonchli zaxira.
+ */
+export async function fetchTeacherSubjectsFromSchedule(
+  user: AuthRequest["user"] | undefined,
+  educationYear: string,
+  groupId: number
+): Promise<string[]> {
+  const employeeId = employeeIdFromUser(user)
+  if (!employeeId || !educationYear) return []
+  try {
+    const items = await employeeDataAllItems("/v1/data/schedule-list", { _education_year: educationYear, limit: "200" }, user)
+    const names = new Set<string>()
+    items.forEach((item) => {
+      const record = asRecord(item)
+      const group = asRecord(record.group)
+      if (numberValue(group.id) !== groupId) return
+      const subjectName = textValue(asRecord(record.subject).name)
+      if (subjectName) names.add(subjectName)
+    })
+    return Array.from(names)
+  } catch {
+    return []
+  }
+}
+
+/**
  * O'qituvchiga HEMIS'da biriktirilgan guruhlar va dars jadvalini bir martalik
  * so'rov bilan olib, o'z bazamizga yozadi (login paytida + qo'lda "yangilash").
  * Bu yerdan boshqa hech qanday HEMIS resursi (fan resurslari va h.k.) tortib olinmaydi.

@@ -9,7 +9,7 @@ import { authMiddleware, requireRole, AuthRequest, AuthUser } from "../middlewar
 import { pool } from "../services/db"
 import { notifications } from "../db/data"
 import { parseNumber } from "../services/meetingStore"
-import { syncTeacherFromHemis, employeeTeachesGroup, fetchTeacherGroupsForYear } from "./hemis"
+import { syncTeacherFromHemis, employeeTeachesGroup, fetchTeacherGroupsForYear, fetchTeacherSubjectsFromSchedule } from "./hemis"
 import {
   type ContentType,
   type ContentFile,
@@ -943,6 +943,24 @@ router.get("/my-subjects", async (req: AuthRequest, res: Response): Promise<void
         const match = groups.find(g => g.id === groupId)
         if (match?.subjects.length) {
           data = match.subjects.map(s => ({ groupId, subjectName: s }))
+          break
+        }
+      } catch { /* shu yil ishlamasa, keyingisini sinaymiz */ }
+    }
+  }
+
+  // Ish yuklamasi (curriculum-subject-teacher-list) ham natija bermasa —
+  // ba'zi kafedralarda bu resurs yangi o'quv yiliga hali kiritilmagan bo'lsa
+  // ham, haqiqiy dars jadvali (schedule-list) allaqachon to'liq bo'lishi
+  // mumkin (real hodisa: bitta o'qituvchining ish yuklamasi bo'sh, jadvali
+  // esa to'g'ri chiqqan) — shu jadvaldan fan nomini qidiramiz.
+  if (data.length === 0 && groupId !== null) {
+    const currentYear = academicYearStart()
+    for (const year of [currentYear, currentYear - 1]) {
+      try {
+        const subjectNames = await fetchTeacherSubjectsFromSchedule(req.user, String(year), groupId)
+        if (subjectNames.length) {
+          data = subjectNames.map(s => ({ groupId, subjectName: s }))
           break
         }
       } catch { /* shu yil ishlamasa, keyingisini sinaymiz */ }
