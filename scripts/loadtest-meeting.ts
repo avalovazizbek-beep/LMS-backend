@@ -1,3 +1,4 @@
+/// <reference path="../src/types/wrtc.d.ts" />
 /**
  * Meeting yuklama testi (load test) — bizning mediasoup + Socket.IO
  * serverimiz necha kishi va necha xonani bir vaqtda ko'tara olishini
