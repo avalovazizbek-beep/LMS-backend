@@ -64,19 +64,21 @@ export async function saveAttendance(
   subjectName: string,
   lessonDate: string,
   records: AttendanceRecordInput[],
-  markedByUserId: number
+  markedByUserId: number,
+  trainingType?: string | null
 ) {
   for (const r of records) {
     await pool.query(
       `INSERT INTO lms_attendance
-        (group_id, subject_name, lesson_date, student_user_id, student_full_name, status, comment, marked_by_user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (group_id, subject_name, lesson_date, training_type, student_user_id, student_full_name, status, comment, marked_by_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
+         training_type      = VALUES(training_type),
          student_full_name = VALUES(student_full_name),
          status            = VALUES(status),
          comment           = VALUES(comment),
          marked_by_user_id = VALUES(marked_by_user_id)`,
-      [groupId, subjectName.trim(), lessonDate, r.studentUserId, r.fullName, r.status, r.comment?.trim() || null, markedByUserId]
+      [groupId, subjectName.trim(), lessonDate, trainingType?.trim() || null, r.studentUserId, r.fullName, r.status, r.comment?.trim() || null, markedByUserId]
     )
   }
 }
@@ -108,10 +110,25 @@ export async function getAttendanceForGroupDate(
   return map
 }
 
+/** Shu kun/guruh/fan uchun avval saqlangan mashg'ulot turi (bo'lsa) —
+ *  jurnal qayta ochilganda tanlovni eslab qolish uchun. */
+export async function getTrainingTypeForGroupDate(
+  groupId: number,
+  subjectName: string,
+  lessonDate: string
+): Promise<string | null> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT training_type FROM lms_attendance WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND training_type IS NOT NULL LIMIT 1",
+    [groupId, subjectName.trim(), lessonDate]
+  )
+  return rows[0]?.training_type ? String(rows[0].training_type) : null
+}
+
 /* ── O'qituvchi uchun tarix/hisobot ─────────────────────────────────── */
 export interface AttendanceHistoryEntry {
   lessonDate: string
   subjectName: string
+  trainingType: string | null
   records: {
     studentUserId: number
     studentFullName: string
@@ -150,7 +167,7 @@ export async function getGroupAttendanceHistory(
     const lessonDate = toDateOnly(row.lesson_date)
     const key = `${lessonDate}__${row.subject_name}`
     if (!map.has(key)) {
-      map.set(key, { lessonDate, subjectName: String(row.subject_name), records: [] })
+      map.set(key, { lessonDate, subjectName: String(row.subject_name), trainingType: row.training_type ? String(row.training_type) : null, records: [] })
     }
     map.get(key)!.records.push({
       studentUserId: Number(row.student_user_id),

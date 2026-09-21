@@ -83,6 +83,7 @@ import {
   getGroupRoster,
   saveAttendance,
   getAttendanceForGroupDate,
+  getTrainingTypeForGroupDate,
   getGroupAttendanceHistory,
   getStudentAttendance,
   getGroupSessions,
@@ -2370,9 +2371,10 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
     return
   }
 
-  const [hemisRoster, existing] = await Promise.all([
+  const [hemisRoster, existing, trainingType] = await Promise.all([
     getGroupRoster(groupId).catch(() => [] as import("../services/attendanceStore").RosterStudent[]),
     getAttendanceForGroupDate(groupId, subjectName, date),
+    getTrainingTypeForGroupDate(groupId, subjectName, date),
   ])
 
   // If HEMIS roster is empty, fall back to students from attendance history
@@ -2401,7 +2403,7 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
     }
   })
 
-  res.json({ success: true, data })
+  res.json({ success: true, data, trainingType })
 })
 
 /* ── POST /attendance — davomatni saqlash ──────────────────────────── */
@@ -2414,6 +2416,7 @@ router.post("/attendance", async (req: AuthRequest, res: Response): Promise<void
   const groupId = numberValue(body.groupId)
   const subjectName = textValue(body.subjectName)
   const date = textValue(body.date)
+  const trainingType = textValue(body.trainingType) || null
   const records = Array.isArray(body.records) ? body.records : null
 
   if (groupId === null || !subjectName || !isValidDateOnly(date) || !records) {
@@ -2445,7 +2448,7 @@ router.post("/attendance", async (req: AuthRequest, res: Response): Promise<void
     })
   }
 
-  await saveAttendance(groupId, subjectName, date, parsed, tId)
+  await saveAttendance(groupId, subjectName, date, parsed, tId, trainingType)
   res.json({ success: true, message: "Davomat saqlandi" })
 })
 

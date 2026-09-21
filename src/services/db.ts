@@ -368,6 +368,7 @@ export async function initDatabase() {
       INDEX idx_attendance_student (student_user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
+  await execIgnoreDuplicate(`ALTER TABLE lms_attendance ADD COLUMN training_type VARCHAR(60) NULL AFTER lesson_date`)
 
   // ── Zoom integratsiyasi — har bir o'qituvchi o'z Zoom hisobini ulaydi ──
   await exec(`
