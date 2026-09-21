@@ -40,12 +40,12 @@
  *     server siqilib qolayotganini bildiradi.
  */
 
-// wrtc'ning rasmiy TypeScript turlari yo'q, va bu skript backend
-// tsconfig'ining "include": ["src/**/*"] doirasidan tashqarida (scripts/)
-// ishga tushirilgani uchun alohida .d.ts fayl ham ko'rinmaydi — shu sabab
-// deklaratsiya to'g'ridan-to'g'ri shu yerda, faylning o'zida beriladi.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-declare module "wrtc"
+// wrtc'ning turlari src/types/wrtc.d.ts'da e'lon qilingan (bu faylning
+// o'zida emas — chunki bu fayl import/export ishlatadi, ya'ni TypeScript
+// buni "modul" deb hisoblaydi, va shunday faylda `declare module "wrtc"`
+// yozilsa, allaqachon mavjud (lekin turlari yo'q) modulni "kengaytirish"
+// deb talqin qilinib, xatolik beradi).
+//
 // Backend tsconfig'ida "lib": ["ES2020"] — DOM turlari (shu jumladan
 // MediaStreamTrack) yo'q. Bu skript uchun ular kerak emas, shuning uchun
 // mediasoup-client'ga uzatiladigan "track"ni shu minimal shakl bilan
