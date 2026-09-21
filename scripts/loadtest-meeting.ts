@@ -73,7 +73,12 @@ const PER_ROOM = argNum("perRoom", 20)
 const PRODUCERS_PER_ROOM = argNum("producers", 3) // o'qituvchidan tashqari qancha talaba video/audio yuboradi
 const RAMP_MS = argNum("rampMs", 250) // har bir ishtirokchi ulanishi orasidagi tanaffus
 const HOLD_SECONDS = argNum("holdSeconds", 90)
-const SOCKET_URL = argStr("socketUrl", "http://127.0.0.1:5000")
+// https://lms.sies.uz (nginx orqali, /socket.io/ location'i 127.0.0.1:5000'ga
+// yo'naltiradi) — http://127.0.0.1:5000'ni to'g'ridan-to'g'ri berish HTTPS
+// sahifadan (harness shu domenda ochiladi) "mixed content" sifatida
+// brauzer tomonidan bloklanishi mumkin, real foydalanuvchi ham aynan shu
+// (nginx orqali) yo'lni ishlatadi.
+const SOCKET_URL = argStr("socketUrl", "https://lms.sies.uz")
 const FRONTEND_URL = argStr("frontendUrl", "https://lms.sies.uz") // backend .env'idagi FRONTEND_URL bilan bir xil bo'lishi shart (CORS)
 const DEMO_GROUP_ID = argNum("groupId", 9901) // seed-demo.ts'dagi DEMO-101
 const JOIN_TIMEOUT_MS = argNum("joinTimeoutMs", 20000)
@@ -84,9 +89,14 @@ interface SimResult {
   joinMs?: number
 }
 
-async function simulateParticipant(browser: Browser, meeting: MeetingRecord, user: MeetingUser, shouldProduce: boolean): Promise<{ result: Promise<SimResult>; close: () => Promise<void> }> {
+async function simulateParticipant(browser: Browser, meeting: MeetingRecord, user: MeetingUser, shouldProduce: boolean, verbose = false): Promise<{ result: Promise<SimResult>; close: () => Promise<void> }> {
   const token = signJoinToken(meeting, user)
   const page: Page = await browser.newPage()
+  if (verbose) {
+    page.on("console", (msg) => console.log(`  [browser:${user.fullName}]`, msg.text()))
+    page.on("pageerror", (err) => console.log(`  [browser:${user.fullName}] PAGE ERROR:`, err.message))
+    page.on("requestfailed", (req) => console.log(`  [browser:${user.fullName}] REQUEST FAILED:`, req.url(), req.failure()?.errorText))
+  }
   // Frontend production build'da NEXT_PUBLIC_BASE_PATH=/lms-samisi ostida
   // joylashgan (public/ fayllar ham shu yo'l ostida xizmat qiladi) — lekin
   // bu FAQAT sahifa manzilining YO'LIGA (path) tegishli, CORS Origin
