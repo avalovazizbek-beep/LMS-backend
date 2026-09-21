@@ -87,7 +87,12 @@ interface SimResult {
 async function simulateParticipant(browser: Browser, meeting: MeetingRecord, user: MeetingUser, shouldProduce: boolean): Promise<{ result: Promise<SimResult>; close: () => Promise<void> }> {
   const token = signJoinToken(meeting, user)
   const page: Page = await browser.newPage()
-  const url = `${FRONTEND_URL}/loadtest-client.html?token=${encodeURIComponent(token)}&socketUrl=${encodeURIComponent(SOCKET_URL)}&produce=${shouldProduce ? "1" : "0"}`
+  // Frontend production build'da NEXT_PUBLIC_BASE_PATH=/lms-samisi ostida
+  // joylashgan (public/ fayllar ham shu yo'l ostida xizmat qiladi) — lekin
+  // bu FAQAT sahifa manzilining YO'LIGA (path) tegishli, CORS Origin
+  // header hali ham https://lms.sies.uz (path'siz), shuning uchun bu
+  // FRONTEND_URL'ning CORS uchun to'g'ri qolishiga ta'sir qilmaydi.
+  const url = `${FRONTEND_URL}/lms-samisi/loadtest-client.html?token=${encodeURIComponent(token)}&socketUrl=${encodeURIComponent(SOCKET_URL)}&produce=${shouldProduce ? "1" : "0"}`
 
   const result = (async (): Promise<SimResult> => {
     try {
