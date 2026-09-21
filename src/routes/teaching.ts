@@ -9,7 +9,7 @@ import { authMiddleware, requireRole, AuthRequest, AuthUser } from "../middlewar
 import { pool } from "../services/db"
 import { notifications } from "../db/data"
 import { parseNumber } from "../services/meetingStore"
-import { syncTeacherFromHemis, employeeTeachesGroup, fetchTeacherGroupsForYear, fetchTeacherSubjectsFromSchedule } from "./hemis"
+import { syncTeacherFromHemis, employeeTeachesGroup, fetchTeacherGroupsForYear, fetchTeacherSubjectsFromSchedule, fetchTeacherGroupsFromSchedule } from "./hemis"
 import {
   type ContentType,
   type ContentFile,
@@ -864,7 +864,14 @@ router.get("/groups-by-year", async (req: AuthRequest, res: Response): Promise<v
     res.status(400).json({ success: false, message: "O'quv yili ko'rsatilishi shart" }); return
   }
   try {
-    const { groups, debug } = await fetchTeacherGroupsForYear(req.user, year)
+    let { groups, debug } = await fetchTeacherGroupsForYear(req.user, year)
+    // Ish yuklamasi (curriculum-subject-teacher-list) shu yilga hali
+    // kiritilmagan bo'lsa ham, haqiqiy dars jadvali allaqachon to'liq
+    // bo'lishi mumkin — /my-subjects'dagi bilan bir xil zaxira.
+    if (!groups.length) {
+      const scheduleGroups = await fetchTeacherGroupsFromSchedule(req.user, year)
+      if (scheduleGroups.length) groups = scheduleGroups
+    }
     if (groups.length) {
       await upsertGroups(groups)
       await addTeacherGroups(teacherUserId(req.user), groups.map(g => g.id))

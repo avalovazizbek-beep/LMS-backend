@@ -373,15 +373,19 @@ export async function fetchTeacherGroupsForYear(user: AuthRequest["user"] | unde
  * `fetchTeacherGroupsForYear` fan topa olmasa, shu guruh uchun haqiqiy
  * jadvaldan fan nomini qidiramiz — oxirgi, eng ishonchli zaxira.
  */
+async function fetchScheduleItemsForYear(user: AuthRequest["user"] | undefined, educationYear: string) {
+  const employeeId = employeeIdFromUser(user)
+  if (!employeeId || !educationYear) return []
+  return employeeDataAllItems("/v1/data/schedule-list", { _education_year: educationYear, limit: "200" }, user)
+}
+
 export async function fetchTeacherSubjectsFromSchedule(
   user: AuthRequest["user"] | undefined,
   educationYear: string,
   groupId: number
 ): Promise<string[]> {
-  const employeeId = employeeIdFromUser(user)
-  if (!employeeId || !educationYear) return []
   try {
-    const items = await employeeDataAllItems("/v1/data/schedule-list", { _education_year: educationYear, limit: "200" }, user)
+    const items = await fetchScheduleItemsForYear(user, educationYear)
     const names = new Set<string>()
     items.forEach((item) => {
       const record = asRecord(item)
@@ -391,6 +395,36 @@ export async function fetchTeacherSubjectsFromSchedule(
       if (subjectName) names.add(subjectName)
     })
     return Array.from(names)
+  } catch {
+    return []
+  }
+}
+
+/** `fetchTeacherGroupsForYear`ning schedule-list'ga tayanuvchi varianti —
+ *  ish yuklamasi (curriculum-subject-teacher-list) shu yil uchun bo'sh
+ *  qaytganda, "Guruh" ro'yxatini haqiqiy dars jadvalidan tuzib beradi. */
+export async function fetchTeacherGroupsFromSchedule(
+  user: AuthRequest["user"] | undefined,
+  educationYear: string
+): Promise<TeacherGroupWithSubjects[]> {
+  try {
+    const items = await fetchScheduleItemsForYear(user, educationYear)
+    const out = new Map<number, TeacherGroupWithSubjects>()
+    items.forEach((item) => {
+      const record = asRecord(item)
+      const group = asRecord(record.group)
+      const gid = numberValue(group.id)
+      const gname = textValue(group.name)
+      if (gid === null || !gname) return
+      const subjectName = textValue(asRecord(record.subject).name)
+      const existing = out.get(gid)
+      if (existing) {
+        if (subjectName && !existing.subjects.includes(subjectName)) existing.subjects.push(subjectName)
+        return
+      }
+      out.set(gid, { id: gid, name: gname, subjects: subjectName ? [subjectName] : [] })
+    })
+    return Array.from(out.values())
   } catch {
     return []
   }
