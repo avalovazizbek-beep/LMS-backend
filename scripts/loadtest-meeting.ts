@@ -179,7 +179,7 @@ async function main() {
   const totalParticipants = meetings.length * PER_ROOM
 
   for (const meeting of meetings) {
-    const teacherSim = await simulateParticipant(browser, meeting, teacherUser, true)
+    const teacherSim = await simulateParticipant(browser, meeting, teacherUser, true, started < 2)
     closers.push(teacherSim.close)
     teacherSim.result.then((r) => results.push(r))
     started++
@@ -194,7 +194,7 @@ async function main() {
         groupId: DEMO_GROUP_ID,
         teacherGroupIds: [],
       }
-      const sim = await simulateParticipant(browser, meeting, student, isProducer)
+      const sim = await simulateParticipant(browser, meeting, student, isProducer, started < 2)
       closers.push(sim.close)
       sim.result.then((r) => results.push(r))
       started++
