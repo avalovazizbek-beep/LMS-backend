@@ -6,8 +6,13 @@ const mediaCodecs: mediasoup.types.RouterRtpCodecCapability[] = [
   { kind: "video", mimeType: "video/VP8", clockRate: 90000, parameters: { "x-google-start-bitrate": 1000 } },
 ]
 
+// Har bir ishtirokchi kamida 2 ta UDP port ishlatadi (yuborish + qabul qilish
+// transporti) — bu oraliq BUTUN SERVER bo'yicha barcha room'lar orasida
+// baham ko'riladi (har bir worker o'zining alohida diapazoniga ega emas).
+// Eski standart (40000-40999, 1000 port) ~500 kishigacha joy berardi —
+// ko'p xonali katta meetinglar uchun yetarli emas edi.
 const RTC_MIN_PORT = Number(process.env.MEDIASOUP_RTC_MIN_PORT || 40000)
-const RTC_MAX_PORT = Number(process.env.MEDIASOUP_RTC_MAX_PORT || 40999)
+const RTC_MAX_PORT = Number(process.env.MEDIASOUP_RTC_MAX_PORT || 49999)
 const LISTEN_IP = process.env.MEDIASOUP_LISTEN_IP || "0.0.0.0"
 const ANNOUNCED_IP = process.env.MEDIASOUP_ANNOUNCED_IP || null
 
