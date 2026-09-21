@@ -451,20 +451,42 @@ export interface GroupRosterStudent {
   studentIdNumber: string | null
 }
 
+/** HEMIS'ning "o'quv yili" kodi — sentyabrdan boshlab yangi yil hisoblanadi
+ *  (masalan 2026-yil sentyabrida "2026-2027 o'quv yili" = kod "2026"). */
+function academicYearStart() {
+  const now = new Date()
+  const year = now.getFullYear()
+  return now.getMonth() >= 8 ? year : year - 1
+}
+
 /**
  * "Kurs topshiriqlari" kabi tutor sinxronizatsiyasiga kirmaydigan guruhlar uchun -
  * o'qituvchi ushbu guruhda haqiqatan ham dars beradimi, HEMIS
  * /v1/data/curriculum-subject-teacher-list orqali tekshiradi.
+ *
+ * MUHIM: `_education_year` ko'rsatilmasa, HEMIS "joriy" o'quv yili o'rniga
+ * eski (kuzatilgan holatda 2022-yilgi) ma'lumotni jim qaytaradi — xuddi
+ * `fetchTeacherGroupsForYear` yuqoridagi izohida aytilgan muammo. Shu sabab
+ * bir nechta so'nggi yilni ketma-ket, aniq ko'rsatib sinaymiz (real hodisa:
+ * SHADIYEVA G.M. uchun yil ko'rsatilmasa 2022-yilgi eski guruhlar qaytgan,
+ * joriy 2025-2026 o'quv yilidagi guruhi esa faqat _education_year=2025
+ * bilan so'ralganda topilgan).
  */
 export async function employeeTeachesGroup(groupId: number, user?: AuthRequest["user"]): Promise<boolean> {
   const employeeId = employeeIdFromUser(user)
   if (!employeeId) return false
-  try {
-    const items = await employeeDataAllItems("/v1/data/curriculum-subject-teacher-list", { _employee: employeeId, limit: "200" }, user)
-    return items.some((item) => numberValue(asRecord(item)._group) === groupId)
-  } catch {
-    return false
+  const currentYear = academicYearStart()
+  for (const year of [currentYear, currentYear - 1, currentYear - 2]) {
+    try {
+      const items = await employeeDataAllItems(
+        "/v1/data/curriculum-subject-teacher-list",
+        { _employee: employeeId, _education_year: String(year), limit: "200" },
+        user
+      )
+      if (items.some((item) => numberValue(asRecord(item)._group) === groupId)) return true
+    } catch { /* shu yil ishlamasa, keyingisini sinaymiz */ }
   }
+  return false
 }
 
 export async function fetchGroupRoster(groupId: number): Promise<GroupRosterStudent[]> {
