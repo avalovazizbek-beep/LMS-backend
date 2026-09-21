@@ -944,13 +944,13 @@ router.get("/attendance", adminOnly, async (req: AuthRequest, res: Response): Pr
   const subject = typeof req.query.subject === "string" ? req.query.subject.trim() : ""
   const date    = typeof req.query.date === "string" ? req.query.date.trim() : ""
 
-  const where: string[] = []
+  const where: string[] = ["(g.name IS NULL OR g.name NOT LIKE 'DEMO-%')"]
   const params: unknown[] = []
   if (groupId) { where.push("a.group_id = ?"); params.push(groupId) }
   if (subject)  { where.push("LOWER(a.subject_name) = LOWER(?)"); params.push(subject) }
   if (date)     { where.push("a.lesson_date = ?"); params.push(date) }
 
-  const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : ""
+  const whereClause = `WHERE ${where.join(" AND ")}`
 
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT a.group_id, g.name AS group_name, a.subject_name, a.lesson_date,
