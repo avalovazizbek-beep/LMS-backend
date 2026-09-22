@@ -302,12 +302,16 @@ export function verifyJoinToken(token: string) {
 }
 
 /* ── Permissions ───────────────────────────────────────────────────── */
+// MUHIM: faqat meeting'ni YARATGAN o'qituvchi (yoki admin) uni ko'ra/
+// boshqara oladi — guruh mos kelishi kifoya emas. Ilgari shu guruhga
+// (boshqa fandan) dars beradigan HAR QANDAY o'qituvchi ham uni "egasi"
+// sifatida ko'rar edi (canManageMeeting true qaytarardi), ya'ni bir-biriga
+// aloqasi yo'q o'qituvchilarning meeting'lari bir-biriga ko'rinib qolardi.
 export function canManageMeeting(user: MeetingUser, meeting?: MeetingRecord) {
   if (user.role === "admin") return true
   if (user.role !== "teacher") return false
   if (!meeting) return true
-  if (meeting.createdByUserId === user.id) return true
-  return meeting.groupIds.some(gid => user.teacherGroupIds.includes(gid))
+  return meeting.createdByUserId === user.id
 }
 
 export function canViewMeeting(user: MeetingUser, meeting: MeetingRecord) {
