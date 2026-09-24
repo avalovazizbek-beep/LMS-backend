@@ -825,23 +825,46 @@ export async function mergeDuplicateTopicsInGroup(
   })))
   topics.sort((a, b) => b.items.length - a.items.length || a.marker.id - b.marker.id)
   const keep = topics[0]
-  const have = new Set(keep.items.map(contentSlot))
+  const bySlot = new Map<string, TeacherContentRecord>()
+  for (const item of keep.items) if (!bySlot.has(contentSlot(item))) bySlot.set(contentSlot(item), item)
+
   for (const dup of topics.slice(1)) {
     for (const item of dup.items) {
       const slot = contentSlot(item)
-      if (!have.has(slot)) {
+      const existing = bySlot.get(slot)
+      if (!existing) {
         await pool.query("UPDATE lms_teacher_content SET topic_key = ? WHERE id = ?", [keep.marker.topicKey, item.id])
-        have.add(slot)
+        bySlot.set(slot, item)
         result.movedItems++
-      } else {
-        await deleteTeacherContent(item.id)
-        result.removedItems++
+        continue
       }
+      // Ikkalasida ham shu qism bor — talabalar ko'proq ishlagani qoladi,
+      // ikkinchisidagi talaba natija/progresslari unga ko'chiriladi (talaba
+      // ikkalasida ham ishlagan bo'lsa — qolgandagisi saqlanadi).
+      const [winner, loser] = (await studentActivity(item.id)) > (await studentActivity(existing.id))
+        ? [item, existing] : [existing, item]
+      if (winner.id === item.id) {
+        await pool.query("UPDATE lms_teacher_content SET topic_key = ? WHERE id = ?", [keep.marker.topicKey, item.id])
+        bySlot.set(slot, item)
+      }
+      await pool.query("UPDATE IGNORE lms_submissions SET content_id = ? WHERE content_id = ?", [winner.id, loser.id])
+      await pool.query("UPDATE IGNORE lms_content_progress SET content_id = ? WHERE content_id = ?", [winner.id, loser.id])
+      await deleteTeacherContent(loser.id)
+      result.removedItems++
     }
     await deleteTeacherContent(dup.marker.id)
     result.removedTopics++
   }
   return result
+}
+
+async function studentActivity(contentId: number): Promise<number> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT (SELECT COUNT(*) FROM lms_submissions WHERE content_id = ?) +
+            (SELECT COUNT(*) FROM lms_content_progress WHERE content_id = ?) AS n`,
+    [contentId, contentId]
+  )
+  return Number(rows[0]?.n ?? 0)
 }
 
 /** Mavzu ichidagi "o'rin": video↔video, test↔test; uchrashuv havolalari URL bo'yicha */
