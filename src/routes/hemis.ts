@@ -3210,6 +3210,14 @@ router.post("/auto-login", async (req, res: Response) => {
     }
   } catch { /* demo tekshiruvi muvaffaqiyatsiz bo'lsa — real HEMIS urinishiga o'tamiz */ }
 
+  // "demo_" bilan boshlanadigan login hech qachon haqiqiy HEMIS hisobi emas —
+  // topilmasa HEMIS'ning parol endpointiga (IP bloklash manbai) behuda
+  // so'rov yubormasdan, aniq xabar qaytaramiz.
+  if (/^demo_/i.test(login)) {
+    res.status(401).json({ success: false, message: "Demo hisob topilmadi yoki parol noto'g'ri" })
+    return
+  }
+
   // ── Qaytgan talaba: keshlangan parol/HEMIS tokeni mos kelsa, HEMIS'ga
   // umuman tegmasdan kirish (800+ talaba bir vaqtda kirganda ham) ──
   const local = await tryLocalStudentLogin(login, password)
