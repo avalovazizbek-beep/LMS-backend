@@ -105,6 +105,7 @@ import {
 import { getActiveRetakeGrant, consumeRetakeGrant } from "../services/retakeStore"
 import { isAdminUser } from "./admin"
 import { isDemoUser } from "../services/demoHemis"
+import { logAudit } from "../services/auditLog"
 
 const router = Router()
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
@@ -1170,7 +1171,32 @@ router.delete("/topics/:topicKey", async (req: AuthRequest, res: Response): Prom
     return
   }
   const topicKey = textValue(req.params.topicKey)
-  const deleted = topicKey ? await deleteTopicContent(topicKey, teacherUserId(req.user)) : 0
+  const tId = teacherUserId(req.user)
+
+  // ?scope=group — BOSHQA o'qituvchining mavzusi: talabalarda ko'rinib turgan,
+  // lekin muallifi o'chirmagan mavzuni shu guruhda dars beradigan o'qituvchi
+  // o'chira oladi (tahrirlay olmaydi). Kim kimnikini o'chirgani audit logda.
+  if (topicKey && textValue(req.query.scope) === "group") {
+    const items = await listTeacherContent({ topicKey })
+    const own = await getTeacherGroupIds(tId)
+    if (!items.length || !items.every((i) => own.includes(i.groupId))) {
+      res.status(403).json({ success: false, message: "Bu mavzu siz dars beradigan guruhda emas" })
+      return
+    }
+    for (const item of items) await deleteTeacherContent(item.id)
+    const marker = items.find((i) => i.type === "mavzu" && i.kind === "topic")
+    void logAudit(req, "topic.deleteOthers", "teaching", topicKey, {
+      title: marker?.title ?? items[0].title,
+      groupId: items[0].groupId,
+      subjectName: items[0].subjectName,
+      owners: Array.from(new Set(items.map((i) => i.teacherUserId))),
+      deleted: items.length,
+    })
+    res.json({ success: true, message: "O'chirildi", data: { deleted: items.length } })
+    return
+  }
+
+  const deleted = topicKey ? await deleteTopicContent(topicKey, tId) : 0
   if (!deleted) {
     res.status(404).json({ success: false, message: "Mavzu topilmadi" })
     return
