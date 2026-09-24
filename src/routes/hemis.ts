@@ -24,6 +24,7 @@ import {
   toMysqlDateOnly,
   syncTeacherGroupsAndSchedule,
   replaceTeacherSubjects,
+  reassignTeacherContent,
   getTeacherGroupIds,
   submissionUploadsDir,
   sanitizeFilename,
@@ -1469,6 +1470,19 @@ async function createOAuthSession(requestedRole: OAuthRole, code: string, redire
     enrichedProfile.employee_id_number
   ) ?? undefined
 
+  // Oldingi login'larda xodim qidiruvi yiqilgan bo'lsa, o'shanda yaratilgan
+  // mavzular OAuth akkaunt ID'si ostida qolgan — ularni haqiqiy ID'ga qaytaramiz
+  // (aks holda domla ularni ko'rmaydi/o'chira olmaydi, talabada esa qoladi).
+  const fallbackId = numberValue(oauthProfile.id, oauthProfile.meta_id, oauthProfile.employee_id_number)
+  if (numericEmployeeId && fallbackId && fallbackId !== numericEmployeeId) {
+    try {
+      const moved = await reassignTeacherContent(fallbackId, numericEmployeeId)
+      if (moved) console.log(`[HEMIS employee oauth] ${moved} ta kontent ${fallbackId} → ${numericEmployeeId} ID'ga qaytarildi`)
+    } catch (err) {
+      console.warn("[HEMIS employee oauth] kontentni qaytarishda xato:", extractMessage(err))
+    }
+  }
+
   const token = jwt.sign(
     {
       // id va userId top-level da bo'lsa teacherUserId() to'g'ri hisoblaydi
@@ -1554,7 +1568,42 @@ function oauthUserLoginCandidates(user: Record<string, unknown>, profile: Record
   ].filter(Boolean) as string[]
 }
 
+/**
+ * Xodimning employee-list yozuvini lokal sinxron jadvaldan (hemisSync) oladi.
+ * MUHIM: shu yozuvning `id`si o'qituvchining barqaror teacher_user_id'si —
+ * avval faqat jonli HEMIS so'rovi ishlatilardi, u limitga (429) tushsa ID
+ * OAuth akkaunt ID'siga tushib qolar edi va o'sha sessiyada yaratilgan
+ * mavzular "boshqa domlaniki" bo'lib qolardi (domla ko'rmaydi/o'chira
+ * olmaydi, talaba esa ko'raveradi).
+ */
+async function employeeFromDirectory(profile: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  const lookups: Array<[string, string | undefined]> = [
+    ["employee_id_number", textValue(profile.employee_id_number, profile.university_id)],
+    ["login", textValue(profile.login)],
+  ]
+  for (const [column, value] of lookups) {
+    if (!value) continue
+    try {
+      const [rows] = await pool.query<mysql.RowDataPacket[]>(
+        `SELECT profile FROM hemis_employees_directory
+         WHERE ${column} = ? AND profile IS NOT NULL
+         ORDER BY is_active DESC, hemis_id LIMIT 1`,
+        [value]
+      )
+      if (!rows.length) continue
+      const raw = rows[0].profile
+      const record = asRecord(typeof raw === "string" ? JSON.parse(raw) : raw)
+      if (numberValue(record.id)) return record
+    } catch (err) {
+      console.warn("[HEMIS employee oauth] lokal katalogdan olishda xato:", extractMessage(err))
+    }
+  }
+  return null
+}
+
 async function enrichEmployeeProfile(profile: Record<string, unknown>) {
+  const local = await employeeFromDirectory(profile)
+  if (local) return { ...profile, ...local }
   if (!HEMIS_TOKEN) return profile
 
   const searchTerms = [
@@ -4059,6 +4108,73 @@ async function gradesFromAcademicRecords(studentId: string, semester?: string) {
   })
 }
 
+/**
+ * Guruhning o'quv REJASI (kimga biriktirilganidan qat'i nazar) — HEMIS'ning
+ * rasmiy API hujjatiga (backend/api.md) ko'ra /v1/data/curriculum-subject-list
+ * orqali _curriculum + _semester bilan olinadi, guruhning _curriculum ID'sini
+ * esa /v1/data/group-list?id=<guruh> beradi. Ball/holat bo'sh bo'ladi.
+ */
+async function curriculumPlanGrades(groupId: string, semester: string) {
+  const groupItems = await employeeDataAllItems("/v1/data/group-list", { id: groupId, limit: "1" }, undefined)
+  const curriculumId = textValue(asRecord(groupItems[0])._curriculum)
+  if (!curriculumId) return []
+  const planItems = (await employeeDataAllItems(
+    "/v1/data/curriculum-subject-list",
+    { _curriculum: curriculumId, _semester: semester, limit: "200" },
+    undefined
+  )).filter((item) => itemMatchesEmployeeFilters(item, { _semester: semester }))
+  // Xavfsizlik: bitta semestrda odatda 5-15 ta fan bo'ladi — agar filtr
+  // kutilganidek ishlamay, butun o'quv reja qaytib kelsa, buni ko'rsatmaymiz
+  // (avvalgi urinishda aynan shu xato yuz bergan edi).
+  if (planItems.length === 0 || planItems.length > 30) return []
+  return planItems.map((item) => {
+    const record = asRecord(item)
+    const subject = asRecord(record.subject)
+    const subjectType = asRecord(record.subjectType)
+    return {
+      id:                   textValue(subject.id) ?? semester,
+      subject_name:         textValue(subject.name) ?? "",
+      subject_code:         textValue(subject.code) ?? "",
+      subject_type:         textValue(subjectType.name) ?? "",
+      employee_name:        "",
+      semester_name:        semester,
+      total_acload:         numberValue(record.total_acload) ?? 0,
+      credit:               numberValue(record.credit) ?? 0,
+      total_point:          0,
+      grade:                null as number | null,
+      finish_credit_status: false,
+      retraining_status:    false,
+      _semester:            semester,
+      _education_year:      "",
+    }
+  })
+}
+
+/**
+ * O'quv rejadagi fanlar + akademik qaydnoma yozuvlari (baholar) birlashmasi.
+ * academic-record-list faqat YAKUNLANGAN fanlarni beradi — yangi boshlangan
+ * semestrda u bo'sh yoki qisman bo'ladi, shu sabab reja asos qilib olinadi,
+ * bahosi bor fanlar esa qaydnomadagi qator bilan almashtiriladi.
+ */
+interface GradeKeyFields { subject_code: string; subject_name: string; subject_type: string; credit: number; total_acload: number }
+
+function mergePlanWithRecords<P extends GradeKeyFields, R extends GradeKeyFields>(plan: P[], records: R[]): Array<P | R> {
+  const keyOf = (g: GradeKeyFields) => (g.subject_code || g.subject_name).trim().toLowerCase()
+  const recordByKey = new Map(records.map((r) => [keyOf(r), r]))
+  const merged = plan.map((p) => {
+    const r = recordByKey.get(keyOf(p))
+    if (!r) return p
+    recordByKey.delete(keyOf(p))
+    return {
+      ...r,
+      subject_type: r.subject_type || p.subject_type,
+      credit:       r.credit || p.credit,
+      total_acload: r.total_acload || p.total_acload,
+    }
+  })
+  return [...merged, ...recordByKey.values()]
+}
+
 /* ── GET /api/hemis/grades ───────────────────────────────────────── */
 // Student API: /v1/education/subject-list  (NOT /v1/data/academic-record-list which is Backend API)
 // Maps StudentSubjectMeta → HemisGrade format for frontend compatibility
@@ -4071,10 +4187,26 @@ router.get("/grades", async (req: AuthRequest, res: Response) => {
     const studentId = textValue(req.user?.id, req.user?.userId)
     if (!studentId) { res.json({ success: true, data: [] }); return }
     try {
-      const semester = req.query._semester || req.query.semester
-      const cacheKey = `grades:${semester ?? "all"}`
-      const r = await withHemisCache(reqUserId(req), cacheKey,
-        () => gradesFromAcademicRecords(studentId, semester ? String(semester) : undefined), TTL_1H)
+      const semesterParam = req.query._semester || req.query.semester
+      const semester = semesterParam ? String(semesterParam) : undefined
+      const groupId = textValue(req.user?.groupId)
+      const currentSemester = textValue(asRecord(asRecord(req.user?.studentProfile).semester).code)
+      // "v2" — reja qo'shilishidan oldin keshlangan bo'sh natijalar (1 soat)
+      // eskirishini kutmasdan darhol yangi mantiq ishlashi uchun
+      const cacheKey = `grades:v2:${semester ?? "all"}`
+      const r = await withHemisCache(reqUserId(req), cacheKey, async () => {
+        const records = await gradesFromAcademicRecords(studentId, semester)
+        // Qaydnoma faqat yakunlangan fanlarni beradi — joriy (yangi boshlangan)
+        // semestr uchun u bo'sh/qisman, o'quv reja esa talabaga ko'rinmay
+        // qolardi (login OAuth-only bo'lgach barcha talabalarda). Shu holatda
+        // rejani guruhning curriculum'idan olib, baholar bilan birlashtiramiz.
+        if (!semester || !groupId || (records.length > 0 && semester !== currentSemester)) return records
+        try {
+          return mergePlanWithRecords(await curriculumPlanGrades(groupId, semester), records)
+        } catch {
+          return records
+        }
+      }, TTL_1H)
       res.json({ success: true, data: r.data, source: r.source })
     } catch (err) {
       res.status(502).json({ success: false, message: extractMessage(err) })
@@ -4122,50 +4254,14 @@ router.get("/grades", async (req: AuthRequest, res: Response) => {
     // Talabaning o'z REST tokeni (/v1/education/subject-list) faqat
     // HEMIS'da rasmiy "biriktirilgan" (StudentSubject) yozuvi bor
     // semestrlarni qaytaradi — endi boshlangan/kelajakdagi semestr uchun
-    // bu yozuv hali yaratilmagan bo'lishi mumkin. HEMIS'ning rasmiy API
-    // hujjatiga (backend/api.md) ko'ra, o'quv REJANING o'zi (kimga
-    // biriktirilganidan qat'i nazar) /v1/data/curriculum-subject-list
-    // orqali _curriculum + _semester bilan olinadi — guruhning
-    // _curriculum ID'sini esa /v1/data/group-list?id=<guruh> beradi.
+    // bu yozuv hali yaratilmagan bo'lishi mumkin — shunda rejaning o'zini
+    // ko'rsatamiz (curriculumPlanGrades).
     if (mapped.length === 0 && semester) {
       const groupId = textValue(req.user?.groupId)
       if (groupId) {
         try {
-          const groupItems = await employeeDataAllItems("/v1/data/group-list", { id: groupId, limit: "1" }, undefined)
-          const curriculumId = textValue(asRecord(groupItems[0])._curriculum)
-          if (curriculumId) {
-            const planItems = await employeeDataAllItems(
-              "/v1/data/curriculum-subject-list",
-              { _curriculum: curriculumId, _semester: String(semester), limit: "200" },
-              undefined
-            )
-            // Xavfsizlik: bitta semestrda odatda 5-15 ta fan bo'ladi — agar
-            // filtr kutilganidek ishlamay, butun o'quv reja qaytib kelsa,
-            // buni ko'rsatmaymiz (avvalgi urinishda aynan shu xato yuz bergan edi).
-            if (planItems.length > 0 && planItems.length <= 30) {
-              mapped = planItems.map((item) => {
-                const record = asRecord(item)
-                const subject = asRecord(record.subject)
-                const subjectType = asRecord(record.subjectType)
-                return {
-                  id:                   textValue(subject.id) ?? String(semester),
-                  subject_name:         textValue(subject.name) ?? "",
-                  subject_code:         textValue(subject.code) ?? "",
-                  subject_type:         textValue(subjectType.name) ?? "",
-                  employee_name:        "",
-                  semester_name:        String(semester),
-                  total_acload:         numberValue(record.total_acload) ?? 0,
-                  credit:               numberValue(record.credit) ?? 0,
-                  total_point:          0,
-                  grade:                null,
-                  finish_credit_status: false,
-                  retraining_status:    false,
-                  _semester:            String(semester),
-                  _education_year:      "",
-                }
-              })
-            }
-          }
+          const plan = await curriculumPlanGrades(groupId, String(semester))
+          if (plan.length) mapped = plan
         } catch { /* rejadan ham olib bo'lmasa, bo'sh holat saqlanadi */ }
       }
     }

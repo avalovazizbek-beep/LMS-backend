@@ -53,6 +53,10 @@ import {
   isTopicReopened,
   findTopicMarker,
   setTopicReopen,
+  updateTopicItems,
+  deleteTopicContent,
+  topicTrainingType,
+  NO_TRAINING_TYPE,
   type ContentProgress,
   type SubmissionRecord,
 } from "../services/teachingStore"
@@ -1025,8 +1029,8 @@ router.get("/content/by-topic", async (req: AuthRequest, res: Response): Promise
   res.json({ success: true, data: items })
 })
 
-/* ── POST /topics/:topicKey/reopen — o'qituvchi o'zi qayta ochadi (faqat
-   mavzu deadline'i hali o'tmagan bo'lsa) ───────────────────────────────── */
+/* ── POST /topics/:topicKey/reopen — o'qituvchi o'zi qayta ochadi (muddat
+   o'tgan bo'lsa ham — avval faqat admin ocha olardi) ───────────────────── */
 router.post("/topics/:topicKey/reopen", async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.user?.role !== "employee") {
     res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
@@ -1036,10 +1040,6 @@ router.post("/topics/:topicKey/reopen", async (req: AuthRequest, res: Response):
   const marker = topicKey ? await findTopicMarker(topicKey) : null
   if (!marker || marker.teacherUserId !== teacherUserId(req.user)) {
     res.status(404).json({ success: false, message: "Mavzu topilmadi" })
-    return
-  }
-  if (marker.deadline && new Date(marker.deadline).getTime() < Date.now()) {
-    res.status(403).json({ success: false, message: "Mavzu muddati o'tgan — endi faqat admin qayta ochishi mumkin" })
     return
   }
   await setTopicReopen(topicKey, true, fullNameOf(req.user))
@@ -1060,6 +1060,76 @@ router.post("/topics/:topicKey/close", async (req: AuthRequest, res: Response): 
   }
   await setTopicReopen(topicKey, false, null)
   res.json({ success: true, message: "Mavzu yopildi" })
+})
+
+/* ── PATCH /topics/:topicKey — mavzu darajasidagi o'zgarish (nom, deadline,
+   mashg'ulot turi) barcha qismlarga birdan qo'llanadi. Muddat o'tgan
+   bo'lsa ham o'qituvchi o'zi uzaytira oladi. Marker'i yo'q (eski) mavzuga
+   tur berilsa, marker yaratiladi — o'qituvchi ro'yxatida ko'rinishi uchun. ── */
+router.patch("/topics/:topicKey", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  const tId = teacherUserId(req.user)
+  const topicKey = textValue(req.params.topicKey)
+  const items = topicKey ? await listTeacherContent({ topicKey, teacherUserId: tId }) : []
+  if (!items.length) {
+    res.status(404).json({ success: false, message: "Mavzu topilmadi" })
+    return
+  }
+
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
+  const title = textValue(body.title)
+  const patch: { deadline?: string | null; trainingType?: string | null } = {}
+  if ("deadline" in body) {
+    const deadline = textValue(body.deadline)
+    if (deadline && !isValidDate(deadline)) {
+      res.status(400).json({ success: false, message: "deadline noto'g'ri sana formatida" })
+      return
+    }
+    patch.deadline = deadline || null
+  }
+  if ("trainingType" in body) patch.trainingType = textValue(body.trainingType) || null
+
+  await updateTopicItems(topicKey, tId, patch)
+
+  const marker = items.find((i) => i.type === "mavzu" && i.kind === "topic")
+  if (marker && title) {
+    await updateTeacherContent(marker.id, { title })
+  } else if (!marker && (title || patch.trainingType)) {
+    const first = items[0]
+    await createTeacherContent({
+      type: "mavzu",
+      kind: "topic",
+      teacherUserId: tId,
+      groupId: first.groupId,
+      subjectName: first.subjectName,
+      topicKey,
+      title: title || first.title,
+      trainingType: patch.trainingType !== undefined ? patch.trainingType : topicTrainingType(items),
+      availableFrom: new Date().toISOString(),
+      deadline: patch.deadline !== undefined ? patch.deadline : first.deadline,
+    })
+  }
+
+  const updated = await listTeacherContent({ topicKey, teacherUserId: tId })
+  res.json({ success: true, data: updated })
+})
+
+/* ── DELETE /topics/:topicKey — mavzuni barcha qismlari bilan o'chirish ── */
+router.delete("/topics/:topicKey", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi o'chira oladi" })
+    return
+  }
+  const topicKey = textValue(req.params.topicKey)
+  const deleted = topicKey ? await deleteTopicContent(topicKey, teacherUserId(req.user)) : 0
+  if (!deleted) {
+    res.status(404).json({ success: false, message: "Mavzu topilmadi" })
+    return
+  }
+  res.json({ success: true, message: "O'chirildi", data: { deleted } })
 })
 
 /* ── GET /content/topic-summary — talaba uchun: fan bo'yicha mashg'ulot
@@ -1083,16 +1153,20 @@ router.get("/content/topic-summary", async (req: AuthRequest, res: Response): Pr
     return
   }
   const items = await listTeacherContent({ groupId, subjectName })
-  const byType = new Map<string, Set<string>>()
+  const topicItems = new Map<string, TeacherContentRecord[]>()
   for (const item of items) {
     if (!item.topicKey) continue
-    const key = item.trainingType?.trim() || ""
-    if (!byType.has(key)) byType.set(key, new Set())
-    byType.get(key)!.add(item.topicKey)
+    if (!topicItems.has(item.topicKey)) topicItems.set(item.topicKey, [])
+    topicItems.get(item.topicKey)!.push(item)
   }
-  const data = Array.from(byType.entries()).map(([trainingType, keys]) => ({
+  const byType = new Map<string, number>()
+  for (const group of topicItems.values()) {
+    const key = topicTrainingType(group) ?? ""
+    byType.set(key, (byType.get(key) ?? 0) + 1)
+  }
+  const data = Array.from(byType.entries()).map(([trainingType, topicCount]) => ({
     trainingType: trainingType || null,
-    topicCount: keys.size,
+    topicCount,
   }))
   res.json({ success: true, data })
 })
@@ -1115,18 +1189,20 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
   }
   const sId = studentUserId(req.user)
   const trainingTypeFilter = textValue(req.query.trainingType)
-  const items = await listTeacherContent({ groupId, subjectName, trainingType: trainingTypeFilter || undefined })
+  const items = await listTeacherContent({ groupId, subjectName })
 
   const topicMap = new Map<string, TeacherContentRecord[]>()
-  const order: string[] = []
   for (const item of items) {
     if (!item.topicKey) continue
-    if (!topicMap.has(item.topicKey)) {
-      topicMap.set(item.topicKey, [])
-      order.push(item.topicKey)
-    }
+    if (!topicMap.has(item.topicKey)) topicMap.set(item.topicKey, [])
     topicMap.get(item.topicKey)!.push(item)
   }
+  // Tur filtri mavzu darajasida (topicTrainingType) — qism darajasida emas
+  const order = Array.from(topicMap.keys()).filter((key) => {
+    if (!trainingTypeFilter) return true
+    const type = topicTrainingType(topicMap.get(key)!)
+    return trainingTypeFilter === NO_TRAINING_TYPE ? type === null : type === trainingTypeFilter
+  })
   order.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
 
   const topics: Array<{
@@ -1576,18 +1652,20 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
   const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
   const patch: UpdateContentInput = {}
 
-  // Mavzu deadline'i o'tgach test parametrlari (yoki mavzuning o'z deadline'i)
-  // endi o'zgartirilmaydi — talabalar allaqachon shu shartlar asosida test
-  // topshirgan bo'lishi mumkin, adolat uchun muzlatib qo'yiladi.
+  // Mavzu deadline'i o'tgach test parametrlari o'zgartirilmaydi — talabalar
+  // allaqachon shu shartlar asosida test topshirgan bo'lishi mumkin, adolat
+  // uchun muzlatib qo'yiladi. Mavzuning O'Z deadline'ini esa o'qituvchi muddat
+  // o'tgandan keyin ham uzaytira oladi (yangi muddat testga ham tarqaladi va
+  // parametrlar yana ochiladi).
   const isExamSettingsChange = existing.type === "exam" && (
     "attemptsCount" in body || "questionDisplayCount" in body || "maxScore" in body ||
     "durationMinutes" in body || "isAdaptive" in body
   )
-  const isTopicDeadlineChange = existing.type === "mavzu" && existing.kind === "topic" && "deadline" in body
-  if ((isExamSettingsChange || isTopicDeadlineChange) && existing.deadline && new Date(existing.deadline).getTime() < Date.now()) {
-    res.status(403).json({ success: false, message: "Mavzu muddati tugagan — bu parametrlar endi o'zgartirilmaydi" })
+  if (isExamSettingsChange && existing.deadline && new Date(existing.deadline).getTime() < Date.now()) {
+    res.status(403).json({ success: false, message: "Mavzu muddati tugagan — test parametrlarini o'zgartirish uchun avval mavzu muddatini uzaytiring" })
     return
   }
+  const isTopicMarker = existing.type === "mavzu" && existing.kind === "topic"
 
   if (typeof body.title === "string" && body.title.trim()) patch.title = body.title
   if ("description" in body) patch.description = textValue(body.description) || null
@@ -1624,6 +1702,13 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
   if ("isActive" in body) patch.isActive = boolValue(body.isActive)
 
   const updated = await updateTeacherContent(id!, patch)
+  // Marker'ning deadline/turi mavzuning barcha qismlari uchun amal qiladi
+  if (isTopicMarker && existing.topicKey && (patch.deadline !== undefined || patch.trainingType !== undefined)) {
+    await updateTopicItems(existing.topicKey, existing.teacherUserId, {
+      deadline: patch.deadline,
+      trainingType: patch.trainingType,
+    })
+  }
   res.json({ success: true, data: updated })
 })
 

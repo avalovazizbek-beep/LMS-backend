@@ -758,6 +758,75 @@ export async function deleteTeacherContent(id: number): Promise<boolean> {
   return true
 }
 
+/** Mavzuning BARCHA qismlariga (marker + video/test/topshiriq va h.k.) bir xil
+    deadline/mashg'ulot turini qo'llaydi. Talaba tomoni har bir qismning O'Z
+    deadline'iga qarab ochiq/yopiqligini hisoblaydi — faqat markerni
+    o'zgartirish muddatni haqiqatda uzaytirmas edi. */
+export async function updateTopicItems(
+  topicKey: string,
+  teacherUserId: number,
+  patch: { deadline?: string | null; trainingType?: string | null }
+): Promise<number> {
+  const sets: string[] = []
+  const params: unknown[] = []
+  if (patch.deadline !== undefined) {
+    sets.push("deadline = ?")
+    params.push(patch.deadline ? toMysqlDate(new Date(patch.deadline)) : null)
+  }
+  if (patch.trainingType !== undefined) {
+    sets.push("training_type = ?")
+    params.push(patch.trainingType?.trim() || null)
+  }
+  if (!sets.length) return 0
+  params.push(topicKey, teacherUserId)
+  const [result] = await pool.query<mysql.ResultSetHeader>(
+    `UPDATE lms_teacher_content SET ${sets.join(", ")} WHERE topic_key = ? AND teacher_user_id = ?`,
+    params
+  )
+  return result.affectedRows
+}
+
+/** Mavzuni butunlay o'chiradi — o'qituvchining shu topicKey'dagi barcha
+    qatorlari (marker ham, resurslar ham) serverda bir yo'la. Avval klient
+    har bir qismni alohida o'chirardi: bittasi muvaffaqiyatsiz bo'lsa marker'siz
+    "yetim" qismlar qolib, o'qituvchida ko'rinmas, talabada esa ko'rinar edi. */
+export async function deleteTopicContent(topicKey: string, teacherUserId: number): Promise<number> {
+  const items = await listTeacherContent({ topicKey, teacherUserId })
+  for (const item of items) await deleteTeacherContent(item.id)
+  return items.length
+}
+
+/** O'qituvchi kontentini noto'g'ri (vaqtinchalik) ID'dan haqiqiy ID'ga
+    ko'chiradi. OAuth login'da HEMIS xodim qidiruvi yiqilsa, ID OAuth akkaunt
+    ID'siga tushib qolar edi — o'sha sessiyadagi mavzular keyin domlada
+    ko'rinmay (o'chirib ham bo'lmay), talabada esa qolib ketardi.
+    `fromId` haqiqiy xodim ID'si bo'lsa (katalogda bor) — tegilmaydi, boshqa
+    domlaning kontentini tasodifan olib qo'ymaslik uchun. */
+export async function reassignTeacherContent(fromId: number, toId: number): Promise<number> {
+  if (!fromId || !toId || fromId === toId) return 0
+  const [dir] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT 1 FROM hemis_employees_directory WHERE hemis_id = ? LIMIT 1",
+    [fromId]
+  )
+  if (dir.length) return 0
+  const [result] = await pool.query<mysql.ResultSetHeader>(
+    "UPDATE lms_teacher_content SET teacher_user_id = ? WHERE teacher_user_id = ?",
+    [toId, fromId]
+  )
+  return result.affectedRows
+}
+
+/** Mavzuning mashg'ulot turi — marker (kind='topic') qatoridan, marker yo'q
+    bo'lsa turi belgilangan birinchi qismdan olinadi. Talaba ro'yxatlari shu
+    bo'yicha (qism darajasida emas) filtrlanadi: turi yozilmay qolgan bitta
+    qism (masalan almashtirilgan fayl) mavzuni ikkiga bo'lib, "Boshqa
+    materiallar"da alohida "arvoh" mavzu hosil qilmasligi uchun. */
+export function topicTrainingType(items: TeacherContentRecord[]): string | null {
+  const marker = items.find((i) => i.type === "mavzu" && i.kind === "topic")
+  if (marker) return marker.trainingType?.trim() || null
+  return items.find((i) => i.trainingType?.trim())?.trainingType?.trim() || null
+}
+
 /* ── Talaba topshirgan ishlar ──────────────────────────────────────── */
 export interface SubmissionRecord {
   id: number
