@@ -697,6 +697,8 @@ router.get("/teacher-stats/:teacherId/topics/:topicKey", adminOnly, async (req: 
         meetingLink: i.meetingLink ?? null,
         maxScore: i.maxScore,
         deadline: i.deadline,
+        // Savolsiz test talabaga ko'rsatilmaydi — admin buni ko'ra olsin
+        questionCount: i.questionCount,
       })),
   })
 })
