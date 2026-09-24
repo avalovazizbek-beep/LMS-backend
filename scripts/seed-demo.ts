@@ -1,11 +1,12 @@
 /**
  * Demo (test) hisoblar yaratish — HEMIS orqali kirmasdan, LOGIN + PAROL bilan
- * haqiqiy login sahifasi orqali sinash uchun. Atayin minimal: 3 ta hisob
- * (`demo_teacher`, `demo_student1_1`, `demo_student2_1`) — o'qituvchi ikkala
- * guruhga (DEMO-101, DEMO-102) biriktirilgan bitta fan ("Demo fan") bilan,
- * har guruhda bittadan talaba — parallel guruhlarga birdan resurs yuklash
- * funksiyasini sinash uchun. Hech qanday mavzu/video/fayl/test/baho/davomat/
- * meeting seedlanmaydi.
+ * haqiqiy login sahifasi orqali ("Demo bilan kirish") sinash uchun: 5 ta hisob
+ * (`demo_teacher`, `demo_student1_1` … `demo_student4_1`) — o'qituvchi 4 ta
+ * guruhga (DEMO-M-101 … DEMO-M-104) biriktirilgan bitta fan ("Demo fan") bilan,
+ * har guruhda bittadan talaba — bir nechta guruhni tanlab (masalan 4 tadan 3
+ * tasini) resurs yuklash/o'chirish hammasida birdan ishlashini sinash uchun.
+ * Hech qanday mavzu/video/fayl/test/baho/davomat/meeting seedlanmaydi.
+ * Qayta ishga tushirish xavfsiz (takroriy yozuv hosil qilmaydi).
  *
  * Ishga tushirish:
  *   npx ts-node scripts/seed-demo.ts
@@ -20,15 +21,17 @@ import { pool, initDatabase } from "../src/services/db"
 import { deleteTeacherContent, removeStoredFile } from "../src/services/teachingStore"
 
 const TEACHER_ID = 9501
-// 2 ta guruh — bir nechta guruhga birdan resurs yuklash (parallel guruhlar)
-// funksiyasini sinash uchun demo o'qituvchi ikkala guruhga ham biriktiriladi.
-const GROUP_IDS = [9901, 9902]
-const GROUP_NAMES = ["DEMO-101", "DEMO-102"]
-// Har guruhda 1 tadan talaba — demo_student1_1 (DEMO-101), demo_student2_1 (DEMO-102)
-const STUDENTS_PER_GROUP = [1, 1]
+// 4 ta guruh — bir nechta guruhga birdan resurs yuklash (parallel guruhlar)
+// funksiyasini sinash uchun demo o'qituvchi hammasiga biriktiriladi.
+const GROUP_IDS = [9901, 9902, 9903, 9904]
+// Nomida "-M-" bo'lishi SHART — getTeacherGroups faqat masofaviy guruhlarni
+// (nom naqshi bo'yicha) ko'rsatadi, "DEMO-101" o'qituvchida umuman chiqmas edi.
+const GROUP_NAMES = ["DEMO-M-101", "DEMO-M-102", "DEMO-M-103", "DEMO-M-104"]
+// Har guruhda 1 tadan talaba — demo_student1_1 (DEMO-M-101) … demo_student4_1 (DEMO-M-104)
+const STUDENTS_PER_GROUP = [1, 1, 1, 1]
 // remove() uchun — GROUP_IDS'dan mustaqil ravishda saqlanadi (GROUP_IDS
 // kichraytirilsa ham eski qoldiqlar tozalanadi).
-const ALL_KNOWN_GROUP_IDS = [9901, 9902]
+const ALL_KNOWN_GROUP_IDS = [9901, 9902, 9903, 9904]
 const DEMO_PASSWORD = "demo12345"
 const DEMO_SUBJECT = "Demo fan"
 
@@ -75,7 +78,7 @@ async function remove() {
   await pool.query(`DELETE FROM lms_grades WHERE group_id IN (${groupPlaceholders})`, ALL_KNOWN_GROUP_IDS)
   await pool.query(`DELETE FROM lms_period_grades WHERE group_id IN (${groupPlaceholders})`, ALL_KNOWN_GROUP_IDS)
   await pool.query(`DELETE FROM lms_attendance WHERE group_id IN (${groupPlaceholders})`, ALL_KNOWN_GROUP_IDS)
-  await pool.query("DELETE FROM face_registrations WHERE username = 'Demo Talaba 1-1'")
+  await pool.query("DELETE FROM face_registrations WHERE username LIKE 'Demo Talaba %'")
   // lms_meetings o'chirilishi lms_meeting_groups, lms_meeting_attendance va
   // lms_meeting_recordings'ni FK ON DELETE CASCADE orqali avtomatik tozalaydi
   // (fayllari 3-qadamda allaqachon o'chirildi)
@@ -88,6 +91,10 @@ async function remove() {
 
 async function seed() {
   await initDatabase()
+
+  // Qayta ishga tushirilganda sessiya/jadval qatorlari ko'payib ketmasligi uchun
+  await pool.query("DELETE FROM lms_platform_sessions WHERE user_id = ? OR user_id BETWEEN 9601 AND 9699", [TEACHER_ID])
+  await pool.query("DELETE FROM lms_teacher_schedule WHERE teacher_user_id = ?", [TEACHER_ID])
 
   // 1) Guruhlar
   for (let i = 0; i < GROUP_IDS.length; i++) {

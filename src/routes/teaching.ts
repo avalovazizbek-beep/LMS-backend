@@ -102,6 +102,7 @@ import {
 } from "../services/gradeStore"
 import { getActiveRetakeGrant, consumeRetakeGrant } from "../services/retakeStore"
 import { isAdminUser } from "./admin"
+import { isDemoUser } from "../services/demoHemis"
 
 const router = Router()
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
@@ -937,6 +938,15 @@ router.get("/my-subjects", async (req: AuthRequest, res: Response): Promise<void
     params
   )
   let data = rows.map(r => ({ groupId: Number(r.group_id), subjectName: String(r.subject_name) }))
+
+  // Demo hisob (scripts/seed-demo.ts) — HEMIS'da mavjud emas: HEMIS'ga 5 ta
+  // behuda so'rov (sekin, admin-token limitini sarflaydi) o'rniga to'g'ridan-
+  // to'g'ri qo'lda biriktirilgan fanlar (lms_teacher_subjects).
+  if (data.length === 0 && groupId !== null && isDemoUser(req.user)) {
+    const subjectNames = await getTeacherSubjects(tId)
+    res.json({ success: true, data: subjectNames.map(s => ({ groupId, subjectName: s })) })
+    return
+  }
 
   // Bu guruhda bazamizda hali kontent yo'q (yangi guruh yoki hali hech narsa
   // yuklanmagan) — "Fan" tanlovini bo'sh/o'chirilgan qoldirmaslik uchun
