@@ -498,6 +498,11 @@ router.get("/stats", adminOnly, async (_req: AuthRequest, res: Response): Promis
   })
 })
 
+/* Mavzuning "shaxsi" — fan + mashg'ulot turi + nom (marker'dan, marker yo'q
+   bo'lsa qismning o'zidan). O'qituvchi sahifasidagi birlashtirish bilan bir
+   xil qoida: bir mavzu bir nechta guruhda bo'lsa ham — bitta mavzu. */
+const TOPIC_IDENTITY_SQL = `CONCAT(tc.subject_name, '|', IFNULL(COALESCE(mk.training_type, tc.training_type), ''), '|', LOWER(TRIM(COALESCE(mk.title, tc.title))))`
+
 /* ── GET /api/admin/teacher-stats ──────────────────────────────────── */
 router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
   // ── Avtomatik moslashtirish (hemis_users ↔ lms_teacher_content) ──
@@ -553,29 +558,24 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
         CONCAT('O\\'qituvchi #', tc.teacher_user_id)
       ) AS full_name,
       COALESCE(MAX(hu.updated_at), MAX(ps.login_at))                                 AS last_seen,
-      COUNT(DISTINCT CASE WHEN NOT (tc.type='mavzu' AND tc.kind='topic') THEN tc.topic_key ELSE NULL END) AS mavzular,
-      COUNT(DISTINCT CASE WHEN tc.kind='video_lesson' THEN tc.topic_key ELSE NULL END) AS videolar,
-      COUNT(DISTINCT CASE WHEN tc.kind='audio'        THEN tc.topic_key ELSE NULL END) AS audiolar,
-      COUNT(DISTINCT CASE WHEN tc.kind='theory'       THEN tc.topic_key ELSE NULL END) AS taqdimotlar,
-      COUNT(DISTINCT CASE WHEN tc.kind='qollanma'     THEN tc.topic_key ELSE NULL END) AS qollanmalar,
-      COUNT(DISTINCT CASE WHEN tc.type='exam'         THEN tc.topic_key ELSE NULL END) AS testlar,
-      COUNT(DISTINCT CASE WHEN tc.type='assignment'   THEN tc.topic_key ELSE NULL END) AS amaliy,
+      -- Hamma ustun bitta qoida bilan: noyob MAVZU (fan + tur + nom) bo'yicha.
+      -- Bir mavzu 4 guruhda bo'lsa — 1 mavzu, videosi bo'lsa — 1 video (4 emas).
+      COUNT(DISTINCT CASE WHEN tc.topic_key IS NOT NULL AND NOT (tc.type='mavzu' AND tc.kind='topic') THEN ${TOPIC_IDENTITY_SQL} END) AS mavzular,
+      COUNT(DISTINCT CASE WHEN tc.kind='video_lesson' THEN ${TOPIC_IDENTITY_SQL} END) AS videolar,
+      COUNT(DISTINCT CASE WHEN tc.kind='audio'        THEN ${TOPIC_IDENTITY_SQL} END) AS audiolar,
+      COUNT(DISTINCT CASE WHEN tc.kind='theory'       THEN ${TOPIC_IDENTITY_SQL} END) AS taqdimotlar,
+      COUNT(DISTINCT CASE WHEN tc.kind='qollanma'     THEN ${TOPIC_IDENTITY_SQL} END) AS qollanmalar,
+      COUNT(DISTINCT CASE WHEN tc.type='exam' AND tc.topic_key IS NOT NULL THEN ${TOPIC_IDENTITY_SQL} END) AS testlar,
+      COUNT(DISTINCT CASE WHEN tc.type='assignment' AND tc.topic_key IS NOT NULL THEN ${TOPIC_IDENTITY_SQL} END) AS amaliy,
       COUNT(DISTINCT tc.group_id)                                                      AS guruhlar,
       COUNT(DISTINCT COALESCE(cp.student_user_id, ma.user_id))                         AS students_completed,
       COUNT(DISTINCT sub.student_user_id)                                              AS students_submitted,
-      COUNT(DISTINCT m.id)                                                             AS meeting_count,
-      MAX(ut.unique_topics)                                                            AS unique_topics
+      COUNT(DISTINCT m.id)                                                             AS meeting_count
     FROM lms_teacher_content tc
-    -- Noyob mavzular (fan + tur + nom) — bir mavzu 4 guruhda bo'lsa 4 emas, 1
-    LEFT JOIN (
-      SELECT mk.teacher_user_id,
-             COUNT(DISTINCT CONCAT(mk.subject_name, '|', IFNULL(mk.training_type, ''), '|', LOWER(TRIM(mk.title)))) AS unique_topics
-      FROM lms_teacher_content mk
-      WHERE mk.type = 'mavzu' AND mk.kind = 'topic' AND mk.is_active = 1
-        AND EXISTS (SELECT 1 FROM lms_teacher_content x
-                    WHERE x.topic_key = mk.topic_key AND NOT (x.type = 'mavzu' AND x.kind = 'topic'))
-      GROUP BY mk.teacher_user_id
-    ) ut ON ut.teacher_user_id = tc.teacher_user_id
+    -- Qism qaysi mavzuga tegishli (nom/tur marker'dan) — TOPIC_IDENTITY_SQL uchun
+    LEFT JOIN lms_teacher_content mk
+      ON mk.topic_key = tc.topic_key AND mk.type = 'mavzu' AND mk.kind = 'topic'
+     AND mk.teacher_user_id = tc.teacher_user_id
     LEFT JOIN hemis_users hu
       ON hu.teacher_user_id = tc.teacher_user_id
       OR CAST(hu.hemis_id AS UNSIGNED) = tc.teacher_user_id
@@ -601,8 +601,7 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
     hemisId: String(r.teacher_id),
     fullName: r.full_name ?? `O'qituvchi #${r.teacher_id}`,
     lastSeen: r.last_seen,
-    // Marker'siz eski mavzular bo'lsa noyob hisob 0 chiqishi mumkin — shunda eski hisob
-    mavzular: Number(r.unique_topics ?? 0) || Number(r.mavzular ?? 0),
+    mavzular: Number(r.mavzular ?? 0),
     videolar: Number(r.videolar ?? 0),
     audiolar: Number(r.audiolar ?? 0),
     taqdimotlar: Number(r.taqdimotlar ?? 0),
