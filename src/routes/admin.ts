@@ -563,8 +563,19 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
       COUNT(DISTINCT tc.group_id)                                                      AS guruhlar,
       COUNT(DISTINCT COALESCE(cp.student_user_id, ma.user_id))                         AS students_completed,
       COUNT(DISTINCT sub.student_user_id)                                              AS students_submitted,
-      COUNT(DISTINCT m.id)                                                             AS meeting_count
+      COUNT(DISTINCT m.id)                                                             AS meeting_count,
+      MAX(ut.unique_topics)                                                            AS unique_topics
     FROM lms_teacher_content tc
+    -- Noyob mavzular (fan + tur + nom) — bir mavzu 4 guruhda bo'lsa 4 emas, 1
+    LEFT JOIN (
+      SELECT mk.teacher_user_id,
+             COUNT(DISTINCT CONCAT(mk.subject_name, '|', IFNULL(mk.training_type, ''), '|', LOWER(TRIM(mk.title)))) AS unique_topics
+      FROM lms_teacher_content mk
+      WHERE mk.type = 'mavzu' AND mk.kind = 'topic' AND mk.is_active = 1
+        AND EXISTS (SELECT 1 FROM lms_teacher_content x
+                    WHERE x.topic_key = mk.topic_key AND NOT (x.type = 'mavzu' AND x.kind = 'topic'))
+      GROUP BY mk.teacher_user_id
+    ) ut ON ut.teacher_user_id = tc.teacher_user_id
     LEFT JOIN hemis_users hu
       ON hu.teacher_user_id = tc.teacher_user_id
       OR CAST(hu.hemis_id AS UNSIGNED) = tc.teacher_user_id
@@ -590,7 +601,8 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
     hemisId: String(r.teacher_id),
     fullName: r.full_name ?? `O'qituvchi #${r.teacher_id}`,
     lastSeen: r.last_seen,
-    mavzular: Number(r.mavzular ?? 0),
+    // Marker'siz eski mavzular bo'lsa noyob hisob 0 chiqishi mumkin — shunda eski hisob
+    mavzular: Number(r.unique_topics ?? 0) || Number(r.mavzular ?? 0),
     videolar: Number(r.videolar ?? 0),
     audiolar: Number(r.audiolar ?? 0),
     taqdimotlar: Number(r.taqdimotlar ?? 0),
@@ -619,6 +631,7 @@ router.get("/teacher-stats/:teacherId/topics", adminOnly, async (req: AuthReques
     SELECT
       tc.topic_key,
       COALESCE(MAX(CASE WHEN tc.kind='topic' THEN tc.title END), MIN(tc.title)) AS title,
+      COALESCE(MAX(CASE WHEN tc.kind='topic' THEN tc.training_type END), MAX(tc.training_type)) AS training_type,
       MAX(tc.subject_name) AS subject_name,
       MAX(tc.group_id) AS group_id,
       MAX(g.name) AS group_name,
@@ -645,6 +658,7 @@ router.get("/teacher-stats/:teacherId/topics", adminOnly, async (req: AuthReques
     data: rows.map(r => ({
       topicKey: String(r.topic_key),
       title: String(r.title ?? r.topic_key),
+      trainingType: r.training_type ? String(r.training_type) : null,
       subjectName: r.subject_name ? String(r.subject_name) : null,
       groupId: r.group_id != null ? Number(r.group_id) : null,
       groupName: r.group_name ? String(r.group_name) : null,
