@@ -109,6 +109,7 @@ import { getActiveRetakeGrant, consumeRetakeGrant } from "../services/retakeStor
 import { isAdminUser } from "./admin"
 import { isDemoUser } from "../services/demoHemis"
 import { logAudit } from "../services/auditLog"
+import { syncTopicToGroups } from "../services/topicSync"
 
 const router = Router()
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
@@ -1265,49 +1266,15 @@ router.post("/topics/:topicKey/sync", async (req: AuthRequest, res: Response): P
   }
   const tId = teacherUserId(req.user)
   const topicKey = textValue(req.params.topicKey)
-  const source = topicKey ? await listTeacherContent({ topicKey, teacherUserId: tId }) : []
-  const marker = source.find((i) => i.type === "mavzu" && i.kind === "topic")
-  if (!marker) {
-    res.status(404).json({ success: false, message: "Mavzu topilmadi" })
-    return
-  }
   const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
   const requested = Array.isArray(body.groupIds) ? body.groupIds.map(numberValue).filter((n): n is number => n !== null) : []
   const own = await getTeacherGroupIds(tId)
-  const targets = requested.filter((g) => g !== marker.groupId && own.includes(g))
-  const title = marker.title.trim().toLowerCase()
-  const type = marker.trainingType?.trim() || null
-
-  let topicsCreated = 0
-  let itemsCopied = 0
-  for (const groupId of targets) {
-    const groupItems = await listTeacherContent({ teacherUserId: tId, groupId, subjectName: marker.subjectName })
-    let target = groupItems.find((i) =>
-      i.type === "mavzu" && i.kind === "topic" && i.title.trim().toLowerCase() === title && (i.trainingType?.trim() || null) === type)
-    if (!target) {
-      target = await duplicateTeacherContent(marker, { groupId, topicKey: `${marker.subjectName}__${groupId}__${Date.now()}` })
-      topicsCreated++
-    }
-    const targetItems = groupItems.filter((i) => i.topicKey === target!.topicKey)
-    const have = new Set(targetItems.map(contentSlot))
-    const hasGraded = targetItems.some((i) => i.type === "exam" || i.type === "assignment")
-    for (const item of source) {
-      if (item.id === marker.id || have.has(contentSlot(item))) continue
-      if ((item.type === "exam" || item.type === "assignment") && hasGraded) continue
-      const copy = await duplicateTeacherContent(item, { groupId, topicKey: target.topicKey! })
-      if (item.type === "exam") {
-        const questions = await listQuestions(item.id)
-        if (questions.length) await replaceQuestions(copy.id, questions)
-      }
-      // Online dars — yangi guruh talabalari ham darsga kira olsin
-      if (item.kind === "meeting" && /^\d+$/.test(item.meetingLink ?? "")) {
-        await pool.query("INSERT IGNORE INTO lms_meeting_groups (meeting_id, group_id) VALUES (?, ?)", [Number(item.meetingLink), groupId])
-      }
-      have.add(contentSlot(item))
-      itemsCopied++
-    }
+  const result = topicKey ? await syncTopicToGroups(tId, topicKey, requested.filter((g) => own.includes(g))) : null
+  if (!result) {
+    res.status(404).json({ success: false, message: "Mavzu topilmadi" })
+    return
   }
-  res.json({ success: true, data: { topicsCreated, itemsCopied } })
+  res.json({ success: true, data: result })
 })
 
 /* ── GET /content/topic-summary — talaba uchun: fan bo'yicha mashg'ulot
