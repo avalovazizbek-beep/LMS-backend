@@ -57,6 +57,8 @@ import {
   deleteTopicContent,
   duplicateTeacherContent,
   contentSlot,
+  findTopicMarkers,
+  mergeDuplicateTopicsInGroup,
   topicTrainingType,
   NO_TRAINING_TYPE,
   type ContentProgress,
@@ -81,6 +83,7 @@ import {
   finalizeAdaptiveExam,
   recordExamViolation,
   getExamViolationsSummary,
+  isExamPassed,
   type ViolationType,
 } from "../services/examStore"
 import {
@@ -1196,12 +1199,59 @@ router.delete("/topics/:topicKey", async (req: AuthRequest, res: Response): Prom
     return
   }
 
+  // ?everywhere=1 — o'qituvchining shu fan/tur/nomdagi mavzusi BARCHA
+  // guruhlaridan (tanlanmaganlaridan ham) o'chadi: "o'chirdim" = hech qayerda
+  // (talabada, adminda, o'zida) qolmaydi.
+  if (topicKey && boolValue(req.query.everywhere)) {
+    const own = await listTeacherContent({ topicKey, teacherUserId: tId })
+    const marker = own.find((i) => i.type === "mavzu" && i.kind === "topic")
+    const markers = marker
+      ? await findTopicMarkers(tId, undefined, marker.subjectName, marker.trainingType, marker.title)
+      : []
+    const keys = Array.from(new Set([topicKey, ...markers.map((m) => m.topicKey!)]))
+    let deletedAll = 0
+    for (const key of keys) deletedAll += await deleteTopicContent(key, tId)
+    if (!deletedAll) {
+      res.status(404).json({ success: false, message: "Mavzu topilmadi" })
+      return
+    }
+    res.json({ success: true, message: "O'chirildi", data: { deleted: deletedAll, groups: new Set(markers.map((m) => m.groupId)).size || 1 } })
+    return
+  }
+
   const deleted = topicKey ? await deleteTopicContent(topicKey, tId) : 0
   if (!deleted) {
     res.status(404).json({ success: false, message: "Mavzu topilmadi" })
     return
   }
   res.json({ success: true, message: "O'chirildi", data: { deleted } })
+})
+
+/* ── POST /topics/:topicKey/merge-duplicates — shu fan/tur/nomdagi mavzu bir
+   guruhda bir necha marta bo'lsa (o'qituvchining barcha guruhlarida), har
+   guruhda bittaga birlashtiradi (mergeDuplicateTopicsInGroup). ── */
+router.post("/topics/:topicKey/merge-duplicates", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  const tId = teacherUserId(req.user)
+  const topicKey = textValue(req.params.topicKey)
+  const own = topicKey ? await listTeacherContent({ topicKey, teacherUserId: tId }) : []
+  const marker = own.find((i) => i.type === "mavzu" && i.kind === "topic")
+  if (!marker) {
+    res.status(404).json({ success: false, message: "Mavzu topilmadi" })
+    return
+  }
+  const markers = await findTopicMarkers(tId, undefined, marker.subjectName, marker.trainingType, marker.title)
+  const total = { removedTopics: 0, movedItems: 0, removedItems: 0 }
+  for (const groupId of new Set(markers.map((m) => m.groupId))) {
+    const r = await mergeDuplicateTopicsInGroup(tId, groupId, marker.subjectName, marker.trainingType, marker.title)
+    total.removedTopics += r.removedTopics
+    total.movedItems += r.movedItems
+    total.removedItems += r.removedItems
+  }
+  res.json({ success: true, data: total })
 })
 
 /* ── POST /topics/:topicKey/sync { groupIds } — mavzuni (fayllari, test
@@ -1355,11 +1405,17 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
   for (const topicKey of order) {
     const group = topicMap.get(topicKey)!
     const marker = group.find((i) => i.type === "mavzu" && i.kind === "topic")
-    const video = group.find((i) => i.type === "mavzu" && i.kind === "video_lesson") ?? null
-    const audio = group.find((i) => i.type === "mavzu" && i.kind === "audio") ?? null
-    const theory = group.find((i) => i.type === "mavzu" && i.kind === "theory") ?? null
-    const qollanma = group.find((i) => i.type === "mavzu" && i.kind === "qollanma") ?? null
-    const test = group.find((i) => i.type === "exam") ?? null
+    // Faqat talaba haqiqatan bajara oladigan qismlar hisobga olinadi: fayli
+    // yo'q video/audio/taqdimot/qo'llanma va savoli yo'q test talabaga
+    // ko'rinmaydi — ular keyingi mavzuni "ko'rinmas to'siq" bo'lib yopib
+    // qo'ymasligi kerak (yuklanmagan narsa talab qilinmaydi).
+    const hasFile = (i: TeacherContentRecord) => !!i.file || i.files.length > 0
+    const media = (kind: string) => group.find((i) => i.type === "mavzu" && i.kind === kind && hasFile(i)) ?? null
+    const video = media("video_lesson")
+    const audio = media("audio")
+    const theory = media("theory")
+    const qollanma = media("qollanma")
+    const test = group.find((i) => i.type === "exam" && i.questionCount > 0) ?? null
     const assignment = group.find((i) => i.type === "assignment") ?? null
     const youtube = group.find((i) => i.type === "mavzu" && i.kind === "youtube") ?? null
 
@@ -1375,13 +1431,12 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
     let maxScore = 0
     if (test) {
       testSubmission = await getSubmissionForStudent(test.id, sId)
-      const qCount = await countQuestions(test.id)
-      maxScore = qCount > 0 ? 100 : 0
-      if (maxScore === 0) {
-        testCompleted = testSubmission !== null
-      } else {
-        testCompleted = !!(testSubmission && testSubmission.grade != null && testSubmission.grade >= maxScore * EXAM_PASS_RATIO)
-      }
+      // Ball domla qo'ygan maksimalga moslab saqlanadi (maks 20 → 0..20), o'tish
+      // chegarasi ham shu maksimalning 60% i. Avval doim 100 ning 60% i kutilardi —
+      // maks balli 60 dan kichik testdan 100% to'g'ri javob bilan ham o'tib bo'lmasdi.
+      maxScore = test.maxScore && test.maxScore > 0 ? test.maxScore : 100
+      testCompleted = !!testSubmission && testSubmission.grade != null &&
+        isExamPassed(normalizeGrade(testSubmission.grade, test.maxScore), maxScore)
     }
 
     let assignmentSubmission: SubmissionRecord | null = null
@@ -1705,6 +1760,18 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
   }
 
   const isRealMaterial = meta.type === "mavzu" && !!meta.kind && meta.kind !== "topic"
+
+  // Shu guruhda shu fan/tur/nomdagi mavzu allaqachon bo'lsa — yangisini
+  // yaratmay, mavjudini qaytaramiz. Avval ikki marta bosish, bir nechta
+  // guruhga yuklash va h.k. bir guruhda takror mavzular hosil qilardi —
+  // talaba ikkalasini ko'rar, o'qituvchi esa bittasini ko'rardi.
+  if (meta.type === "mavzu" && meta.kind === "topic") {
+    const [existing] = await findTopicMarkers(tId, meta.groupId, meta.subjectName, meta.trainingType || null, meta.title)
+    if (existing) {
+      res.json({ success: true, data: existing, existed: true })
+      return
+    }
+  }
 
   if (isJson) {
     const record = await createTeacherContent({ ...baseInput, file: null })

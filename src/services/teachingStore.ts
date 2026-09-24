@@ -753,6 +753,9 @@ export async function deleteTeacherContent(id: number): Promise<boolean> {
   if (!content) return false
   await pool.query("DELETE FROM lms_teacher_content WHERE id = ?", [id])
   await pool.query("DELETE FROM lms_teacher_content_files WHERE content_id = ?", [id])
+  // Topshiriqlar, savollar, progress va h.k. FK CASCADE bilan o'chadi; test
+  // sessiyalari jadvalida FK yo'q — bazada hech narsa qolib ketmasin.
+  await pool.query("DELETE FROM lms_exam_sessions WHERE content_id = ?", [id])
   removeStoredFile(content.file?.relativePath)
   content.files.forEach((file) => removeStoredFile(file.relativePath))
   return true
@@ -791,6 +794,54 @@ export async function duplicateTeacherContent(
     if (copy) await addContentFile(created.id, copy)
   }
   return created
+}
+
+const normTitle = (s: string) => s.trim().toLowerCase()
+const normType = (s: string | null | undefined) => s?.trim() || null
+
+/** O'qituvchining shu fan + tur + nomdagi mavzu markerlari (groupId berilmasa —
+    barcha guruhlarida). Bir guruhda bittadan ortiq bo'lsa — bu takror. */
+export async function findTopicMarkers(
+  teacherUserId: number, groupId: number | undefined, subjectName: string, trainingType: string | null, title: string
+): Promise<TeacherContentRecord[]> {
+  const items = await listTeacherContent({ teacherUserId, groupId, subjectName, type: "mavzu" })
+  return items.filter((i) =>
+    i.kind === "topic" && normTitle(i.title) === normTitle(title) && normType(i.trainingType) === normType(trainingType))
+}
+
+/** Bir guruhdagi takror mavzularni bittaga birlashtiradi: eng to'liq mavzu
+    qoladi, qolganlaridagi yetishmayotgan qismlar unga KO'CHIRILADI (id saqlanadi
+    — talaba progressi/natijasi yo'qolmaydi), ortiqcha takror qismlar va
+    bo'shagan markerlar o'chiriladi. */
+export async function mergeDuplicateTopicsInGroup(
+  teacherUserId: number, groupId: number, subjectName: string, trainingType: string | null, title: string
+): Promise<{ removedTopics: number; movedItems: number; removedItems: number }> {
+  const result = { removedTopics: 0, movedItems: 0, removedItems: 0 }
+  const markers = await findTopicMarkers(teacherUserId, groupId, subjectName, trainingType, title)
+  if (markers.length < 2) return result
+  const topics = await Promise.all(markers.map(async (marker) => ({
+    marker,
+    items: (await listTeacherContent({ topicKey: marker.topicKey!, teacherUserId })).filter((i) => i.id !== marker.id),
+  })))
+  topics.sort((a, b) => b.items.length - a.items.length || a.marker.id - b.marker.id)
+  const keep = topics[0]
+  const have = new Set(keep.items.map(contentSlot))
+  for (const dup of topics.slice(1)) {
+    for (const item of dup.items) {
+      const slot = contentSlot(item)
+      if (!have.has(slot)) {
+        await pool.query("UPDATE lms_teacher_content SET topic_key = ? WHERE id = ?", [keep.marker.topicKey, item.id])
+        have.add(slot)
+        result.movedItems++
+      } else {
+        await deleteTeacherContent(item.id)
+        result.removedItems++
+      }
+    }
+    await deleteTeacherContent(dup.marker.id)
+    result.removedTopics++
+  }
+  return result
 }
 
 /** Mavzu ichidagi "o'rin": video↔video, test↔test; uchrashuv havolalari URL bo'yicha */
