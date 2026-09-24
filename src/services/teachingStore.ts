@@ -758,6 +758,47 @@ export async function deleteTeacherContent(id: number): Promise<boolean> {
   return true
 }
 
+/** Saqlangan faylning mustaqil nusxasi — har bir kontent qatori o'z faylini
+    o'chiradi (deleteTeacherContent), shu sabab guruhlar bitta faylni bo'lisha
+    olmaydi. Asinxron nusxa: katta videoda ham server bloklanmaydi. */
+async function copyStoredFile(file: ContentFile): Promise<ContentFile | null> {
+  const source = path.join(PRIVATE_ROOT, file.relativePath.replace(/^\/+/, ""))
+  if (!fs.existsSync(source)) return null
+  const name = sanitizeFilename(file.originalName)
+  await fs.promises.copyFile(source, path.join(teachingUploadsDir(), name))
+  return { ...file, name, relativePath: `/teaching/${name}`, url: "" }
+}
+
+/** Kontent qatorini (fayllari bilan) boshqa guruh/mavzuga nusxalaydi */
+export async function duplicateTeacherContent(
+  item: TeacherContentRecord,
+  target: { groupId: number; topicKey: string }
+): Promise<TeacherContentRecord> {
+  const file = item.file ? await copyStoredFile(item.file) : null
+  const created = await createTeacherContent({
+    type: item.type, teacherUserId: item.teacherUserId, groupId: target.groupId,
+    subjectName: item.subjectName, topicKey: target.topicKey, title: item.title,
+    description: item.description, kind: item.kind, trainingType: item.trainingType,
+    controlType: item.controlType, resourceType: item.resourceType, meetingLink: item.meetingLink,
+    availableFrom: item.availableFrom, deadline: item.deadline, maxScore: item.maxScore,
+    attemptsCount: item.attemptsCount, questionDisplayCount: item.questionDisplayCount,
+    language: item.language, isAdaptive: item.isAdaptive, completionPoints: item.completionPoints,
+    durationMinutes: item.durationMinutes, trainingLoad: item.trainingLoad,
+    lessonDate: item.lessonDate, delivered: item.delivered, file,
+  })
+  for (const extra of item.files) {
+    const copy = await copyStoredFile(extra)
+    if (copy) await addContentFile(created.id, copy)
+  }
+  return created
+}
+
+/** Mavzu ichidagi "o'rin": video↔video, test↔test; uchrashuv havolalari URL bo'yicha */
+export function contentSlot(item: TeacherContentRecord): string {
+  if (item.type === "exam" || item.type === "assignment") return item.type
+  return `${item.type}:${item.kind ?? ""}:${item.kind === "uchrashuv" ? item.meetingLink ?? "" : ""}`
+}
+
 /** Mavzuning BARCHA qismlariga (marker + video/test/topshiriq va h.k.) bir xil
     deadline/mashg'ulot turini qo'llaydi. Talaba tomoni har bir qismning O'Z
     deadline'iga qarab ochiq/yopiqligini hisoblaydi — faqat markerni

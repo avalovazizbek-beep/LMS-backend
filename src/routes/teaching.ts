@@ -55,6 +55,8 @@ import {
   setTopicReopen,
   updateTopicItems,
   deleteTopicContent,
+  duplicateTeacherContent,
+  contentSlot,
   topicTrainingType,
   NO_TRAINING_TYPE,
   type ContentProgress,
@@ -1039,6 +1041,40 @@ router.get("/content/by-topic", async (req: AuthRequest, res: Response): Promise
   res.json({ success: true, data: items })
 })
 
+/* ── GET /group-content?groups=1,2&subject=X — o'qituvchi uchun tanlangan
+   guruhlardagi SHU fanning barcha kontenti (boshqa o'qituvchilarniki ham) —
+   talabalar ko'radigan hamma narsa o'qituvchiga ham ko'rinsin. Faqat
+   o'qituvchining o'z guruhlari; `me` — o'zinikini ajratish uchun. ── */
+router.get("/group-content", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  const tId = teacherUserId(req.user)
+  const subjectName = textValue(req.query.subject)
+  const requested = textValue(req.query.groups).split(",").map(numberValue).filter((n): n is number => n !== null)
+  if (!subjectName || !requested.length) {
+    res.json({ success: true, data: [], owners: {}, me: tId })
+    return
+  }
+  const own = await getTeacherGroupIds(tId)
+  const groups = requested.filter((g) => own.includes(g))
+  const items = (await Promise.all(groups.map((groupId) => listTeacherContent({ groupId, subjectName })))).flat()
+
+  const otherIds = Array.from(new Set(items.map((i) => i.teacherUserId).filter((id) => id !== tId)))
+  const owners: Record<number, string> = {}
+  if (otherIds.length) {
+    const [users] = await pool.query<import("mysql2").RowDataPacket[]>(
+      "SELECT teacher_user_id AS id, full_name FROM hemis_users WHERE teacher_user_id IN (?)", [otherIds]
+    )
+    const [dir] = await pool.query<import("mysql2").RowDataPacket[]>(
+      "SELECT hemis_id AS id, full_name FROM hemis_employees_directory WHERE hemis_id IN (?)", [otherIds]
+    )
+    for (const row of [...users, ...dir]) if (row.full_name) owners[Number(row.id)] = String(row.full_name)
+  }
+  res.json({ success: true, data: items, owners, me: tId })
+})
+
 /* ── POST /topics/:topicKey/reopen — o'qituvchi o'zi qayta ochadi (muddat
    o'tgan bo'lsa ham — avval faqat admin ocha olardi) ───────────────────── */
 router.post("/topics/:topicKey/reopen", async (req: AuthRequest, res: Response): Promise<void> => {
@@ -1140,6 +1176,62 @@ router.delete("/topics/:topicKey", async (req: AuthRequest, res: Response): Prom
     return
   }
   res.json({ success: true, message: "O'chirildi", data: { deleted } })
+})
+
+/* ── POST /topics/:topicKey/sync { groupIds } — mavzuni (fayllari, test
+   savollari bilan) tanlangan boshqa guruhlarga moslaydi: guruhda shu nomli va
+   turdagi mavzu bo'lmasa yaratadi, bor bo'lsa faqat yetishmayotgan qismlarini
+   qo'shadi. Mavjud test/topshiriqqa tegilmaydi (talaba natijalari saqlanadi). ── */
+router.post("/topics/:topicKey/sync", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  const tId = teacherUserId(req.user)
+  const topicKey = textValue(req.params.topicKey)
+  const source = topicKey ? await listTeacherContent({ topicKey, teacherUserId: tId }) : []
+  const marker = source.find((i) => i.type === "mavzu" && i.kind === "topic")
+  if (!marker) {
+    res.status(404).json({ success: false, message: "Mavzu topilmadi" })
+    return
+  }
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
+  const requested = Array.isArray(body.groupIds) ? body.groupIds.map(numberValue).filter((n): n is number => n !== null) : []
+  const own = await getTeacherGroupIds(tId)
+  const targets = requested.filter((g) => g !== marker.groupId && own.includes(g))
+  const title = marker.title.trim().toLowerCase()
+  const type = marker.trainingType?.trim() || null
+
+  let topicsCreated = 0
+  let itemsCopied = 0
+  for (const groupId of targets) {
+    const groupItems = await listTeacherContent({ teacherUserId: tId, groupId, subjectName: marker.subjectName })
+    let target = groupItems.find((i) =>
+      i.type === "mavzu" && i.kind === "topic" && i.title.trim().toLowerCase() === title && (i.trainingType?.trim() || null) === type)
+    if (!target) {
+      target = await duplicateTeacherContent(marker, { groupId, topicKey: `${marker.subjectName}__${groupId}__${Date.now()}` })
+      topicsCreated++
+    }
+    const targetItems = groupItems.filter((i) => i.topicKey === target!.topicKey)
+    const have = new Set(targetItems.map(contentSlot))
+    const hasGraded = targetItems.some((i) => i.type === "exam" || i.type === "assignment")
+    for (const item of source) {
+      if (item.id === marker.id || have.has(contentSlot(item))) continue
+      if ((item.type === "exam" || item.type === "assignment") && hasGraded) continue
+      const copy = await duplicateTeacherContent(item, { groupId, topicKey: target.topicKey! })
+      if (item.type === "exam") {
+        const questions = await listQuestions(item.id)
+        if (questions.length) await replaceQuestions(copy.id, questions)
+      }
+      // Online dars — yangi guruh talabalari ham darsga kira olsin
+      if (item.kind === "meeting" && /^\d+$/.test(item.meetingLink ?? "")) {
+        await pool.query("INSERT IGNORE INTO lms_meeting_groups (meeting_id, group_id) VALUES (?, ?)", [Number(item.meetingLink), groupId])
+      }
+      have.add(contentSlot(item))
+      itemsCopied++
+    }
+  }
+  res.json({ success: true, data: { topicsCreated, itemsCopied } })
 })
 
 /* ── GET /content/topic-summary — talaba uchun: fan bo'yicha mashg'ulot
