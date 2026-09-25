@@ -16,7 +16,7 @@ import { pool } from "./db"
      ZOOM_STATE_SECRET       — OAuth "state" parametrini imzolash uchun (bo'lmasa JWT_SECRET ishlatiladi)
      ZOOM_TOKEN_ENCRYPTION_KEY — 32 baytlik kalit, base64 shaklida
                                (masalan: `openssl rand -base64 32` bilan yaratiladi)
-     FRONTEND_URL, FRONTEND_BASE_PATH — callback tugagach foydalanuvchi
+     FRONTEND_URL            — callback tugagach foydalanuvchi
                                qaytariladigan sahifa (mavjud HEMIS OAuth bilan bir xil) ── */
 const ZOOM_OAUTH_BASE = "https://zoom.us/oauth"
 const ZOOM_API_BASE = "https://api.zoom.us/v2"

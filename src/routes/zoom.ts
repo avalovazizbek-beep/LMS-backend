@@ -13,8 +13,7 @@ import {
 const router = Router()
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000"
-const FRONTEND_BASE_PATH = (process.env.FRONTEND_BASE_PATH || "").replace(/\/+$/, "")
-const PROFILE_PATH = `${FRONTEND_BASE_PATH}/tizim/profil`
+const PROFILE_PATH = "/tizim/profil"
 
 function redirectToProfile(res: Response, query: Record<string, string>) {
   const url = new URL(PROFILE_PATH, FRONTEND_URL)

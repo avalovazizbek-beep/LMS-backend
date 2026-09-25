@@ -45,9 +45,7 @@ const HEMIS_EMPLOYEE_LOGIN_BASES = Array.from(new Set([
   "https://student.sies.uz/rest",
 ])).filter(Boolean)
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000"
-// Netlify's /lms-samisi basePath; empty for self-hosted deployments (see my-app/next.config.mjs NEXT_PUBLIC_BASE_PATH)
-const FRONTEND_BASE_PATH = (process.env.FRONTEND_BASE_PATH || "").replace(/\/+$/, "")
-const OAUTH_CALLBACK_PATH = `${FRONTEND_BASE_PATH}/login/oauth/callback`
+const OAUTH_CALLBACK_PATH = "/login/oauth/callback"
 const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 5000}`
 const HEMIS_OAUTH_CLIENT_ID =
   (process.env.HEMIS_OAUTH_CLIENT_ID ||
