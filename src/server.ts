@@ -25,6 +25,7 @@ import reeduRoutes from "./routes/reedu"
 import plagiarismRoutes from "./routes/plagiarism"
 import supportRoutes from "./routes/support"
 import zoomRoutes, { zoomWebhookHandler } from "./routes/zoom"
+import { startNotificationScheduler } from "./services/notificationScheduler"
 import googleMeetRoutes from "./routes/googleMeet"
 import {
   getAttendance,
@@ -513,6 +514,8 @@ async function start() {
   try {
     await initDatabase()
     console.log("✓ MySQL tayyor")
+    // Dars va topshiriq muddati eslatmalari (har daqiqada)
+    startNotificationScheduler()
 
     // HEMIS to'liq talaba/xodim/guruh ro'yxati — login blokidan mustaqil
     // admin-token orqali fon rejimida sinxronlanadi (services/hemisSync.ts).

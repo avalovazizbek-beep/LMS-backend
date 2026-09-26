@@ -6,7 +6,7 @@ import jwt from "jsonwebtoken"
 import express, { Router, Response } from "express"
 import { authMiddleware, requireRole, AuthRequest, AuthUser } from "../middleware/auth"
 import { pool } from "../services/db"
-import { createNotification, notifySafe, type NotificationType } from "../services/notificationStore"
+import { createNotification, notifySafe, bumpGroupedSafe, type NotificationType } from "../services/notificationStore"
 import { parseNumber } from "../services/meetingStore"
 import { syncTeacherFromHemis, employeeTeachesGroup, fetchTeacherGroupsForYear, fetchTeacherSubjectsFromSchedule, fetchTeacherGroupsFromSchedule } from "./hemis"
 import {
@@ -1635,6 +1635,21 @@ async function notifyUser(
   } catch { /* best-effort — asosiy oqimga ta'sir qilmaydi */ }
 }
 
+/** Talaba ish yuborganda o'qituvchiga — har bir ish uchun alohida emas, shu
+ *  topshiriq bo'yicha bitta yig'ma xabar: "{title}: N ta ish baholashni kutmoqda". */
+function notifyGradePending(teacherId: number, contentId: number, title: string) {
+  bumpGroupedSafe({
+    role: "employee",
+    userId: teacherId,
+    type: "reminder",
+    groupKey: `grade-pending:${contentId}`,
+    link: "/oqituvchi-kabineti/baholash-page",
+    i18nKey: "gradePending",
+    params: { title },
+    text: (n) => ({ title: "Baholash kutilmoqda", body: `${title}: ${n} ta ish baholashni kutmoqda` }),
+  })
+}
+
 /** Guruhdagi (platformadan foydalangan) talabalarga yangi material haqida xabar beradi. */
 async function notifyGroupStudents(groupId: number, title: string, body: string, i18n?: { key: string; params?: Record<string, string | number> }) {
   try {
@@ -1950,7 +1965,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
       file: null,
     })
     res.status(201).json({ success: true, data: submission })
-    void notifyUser("employee", content.teacherUserId, "reminder", "Yangi topshiriq keldi", `${fullNameOf(req.user)} — ${content.title}`, { key: "newSubmission", params: { student: fullNameOf(req.user), title: content.title } })
+    notifyGradePending(content.teacherUserId, content.id, content.title)
     return
   }
 
@@ -2019,7 +2034,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
       file,
     })
     res.status(201).json({ success: true, data: submission })
-    void notifyUser("employee", content.teacherUserId, "reminder", "Yangi topshiriq keldi", `${fullNameOf(req.user)} — ${content.title}`, { key: "newSubmission", params: { student: fullNameOf(req.user), title: content.title } })
+    notifyGradePending(content.teacherUserId, content.id, content.title)
   })
 
   req.pipe(stream)

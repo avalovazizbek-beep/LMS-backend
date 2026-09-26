@@ -3,6 +3,7 @@ import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { teacherUserId, studentUserId } from "../services/teachingStore"
 import { getAnnouncement, listActiveForUser, listActiveForAudience, dismissForUser, saveReply, type AnnouncementRecord } from "../services/announcementStore"
 import { isAdminUser } from "./admin"
+import { bumpGroupedSafe } from "../services/notificationStore"
 import { streamPrivateFile } from "./teaching"
 
 const router = Router()
@@ -82,6 +83,19 @@ router.post("/:id/reply", async (req: AuthRequest, res: Response): Promise<void>
   const fullName = String(req.user?.fullName || req.user?.username || "").trim() || null
   await saveReply(id, role, currentUserId(req), fullName, text)
   res.json({ success: true })
+
+  // E'lon muallifiga (admin) — bitta yig'ma xabar: "{title}: N ta javob"
+  const annTitle = announcement.title || announcement.message?.slice(0, 60) || `#${announcement.id}`
+  bumpGroupedSafe({
+    role: "employee",
+    userId: announcement.createdByUserId,
+    type: "system",
+    groupKey: `announcement-replies:${announcement.id}`,
+    link: "/admin/elonlar",
+    i18nKey: "announcementReplies",
+    params: { title: annTitle },
+    text: (n) => ({ title: "E'longa javoblar keldi", body: `${annTitle}: ${n} ta javob` }),
+  })
 })
 
 /* ── GET /api/announcements/:id/file — biriktirilgan faylni oqish (video/rasm/fayl) ── */

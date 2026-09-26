@@ -3,6 +3,8 @@ import { v4 as uuid } from "uuid"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
 import { isAdminUser } from "./admin"
+import { studentUserId, teacherUserId } from "../services/teachingStore"
+import { adminOwnersFor, bumpGroupedSafe, notifySafe } from "../services/notificationStore"
 import type mysql from "mysql2/promise"
 
 const router = Router()
@@ -197,11 +199,27 @@ router.post("/re-register-request", async (req: AuthRequest, res: Response) => {
     }
 
     const { reason } = req.body as { reason?: string }
+    const ownerRole = req.user?.role === "student" ? "student" : "employee"
+    const ownerId = ownerRole === "student" ? studentUserId(req.user) : teacherUserId(req.user)
     await pool.query(
-      "INSERT INTO face_requests (id, username, reason, status, admin_note, created_at) VALUES (?, ?, ?, 'pending', '', ?)",
-      [uuid(), un, reason?.trim() || "Ko'rsatilmagan", Date.now()]
+      "INSERT INTO face_requests (id, username, reason, status, admin_note, created_at, user_id, user_role) VALUES (?, ?, ?, 'pending', '', ?, ?, ?)",
+      [uuid(), un, reason?.trim() || "Ko'rsatilmagan", Date.now(), ownerId, ownerRole]
     )
     res.json({ success: true, message: "Ariza muvaffaqiyatli yuborildi" })
+
+    // Face ID bo'limiga ruxsati bor adminlarga — bitta yig'ma xabar
+    adminOwnersFor("faceid").then((owners) => {
+      for (const owner of owners) {
+        bumpGroupedSafe({
+          ...owner,
+          type: "system",
+          groupKey: "face-requests",
+          link: "/admin/face-id",
+          i18nKey: "faceRequests",
+          text: (n) => ({ title: "Yangi Face ID arizalari", body: `${n} ta ariza ko'rib chiqilishini kutmoqda` }),
+        })
+      }
+    }).catch(() => { /* best-effort */ })
   } catch (err) {
     res.status(500).json({ success: false, message: "DB xatolik" })
   }
@@ -233,7 +251,7 @@ router.put("/requests/:id", async (req: AuthRequest, res: Response) => {
 
   try {
     const [rows] = await pool.query<mysql.RowDataPacket[]>(
-      "SELECT username FROM face_requests WHERE id = ? LIMIT 1", [id]
+      "SELECT username, user_id, user_role FROM face_requests WHERE id = ? LIMIT 1", [id]
     )
     if (!rows.length) { res.status(404).json({ success: false, message: "Ariza topilmadi" }); return }
 
@@ -251,6 +269,24 @@ router.put("/requests/:id", async (req: AuthRequest, res: Response) => {
     }
 
     res.json({ success: true, message: action === "approve" ? "Ariza tasdiqlandi" : "Ariza rad etildi" })
+
+    // Ariza egasiga natija. Eski arizalarda egasi saqlanmagan — talaba ID
+    // raqami (username) bo'yicha katalogdan topiladi.
+    let ownerId = Number(rows[0].user_id) || 0
+    let ownerRole = String(rows[0].user_role || "student")
+    if (!ownerId) {
+      const [dir] = await pool.query<mysql.RowDataPacket[]>(
+        "SELECT hemis_id FROM hemis_students_directory WHERE student_id_number = ? LIMIT 1", [username]
+      )
+      ownerId = Number(dir[0]?.hemis_id) || 0
+      ownerRole = "student"
+    }
+    if (ownerId) {
+      const note = adminNote?.trim() || ""
+      notifySafe(action === "approve"
+        ? { role: ownerRole, userId: ownerId, type: "system", title: "Face ID arizangiz tasdiqlandi", body: "Endi yuzingizni qayta ro'yxatdan o'tkazing", link: "/face-id/register", i18nKey: "faceApproved" }
+        : { role: ownerRole, userId: ownerId, type: "system", title: "Face ID arizangiz rad etildi", body: note, link: "/face-id/requests", i18nKey: "faceRejected", i18nParams: { note } })
+    }
   } catch (err) {
     res.status(500).json({ success: false, message: "DB xatolik" })
   }

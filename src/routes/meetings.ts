@@ -36,6 +36,7 @@ import {
   type CreateMeetingInput,
 } from "../services/meetingStore"
 import { teacherUserId } from "../services/teachingStore"
+import { notifyMeetingCreated } from "../services/notificationScheduler"
 import { createAndSaveZoomMeeting, getMeetingZoomRow, toPublicZoomInfo } from "../services/zoomService"
 import { createAndSaveGoogleMeetMeeting, getMeetingGoogleMeetRow, toPublicGoogleMeetInfo } from "../services/googleMeetService"
 
@@ -208,6 +209,9 @@ router.post("/", async (req: AuthRequest, res: Response): Promise<void> => {
     { ...req.body, subjectName: textValue(req.body.subjectName) || null },
     user
   )
+  // Guruh talabalariga "yangi dars rejalashtirildi" (javobni kutdirmaydi)
+  notifyMeetingCreated(meeting, meeting.groupIds).catch((err) =>
+    console.warn("[meetings] bildirishnoma yuborilmadi:", err instanceof Error ? err.message : err))
 
   const response: Record<string, unknown> = { ...toMeetingResponse(meeting, user) }
 

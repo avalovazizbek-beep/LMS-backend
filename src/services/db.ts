@@ -999,6 +999,17 @@ export async function initDatabase() {
       INDEX idx_notifications_owner (user_role, user_id, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
+  // dedupe_key — bir xil eslatma (masalan "dars 15 daqiqadan keyin") ikki
+  // marta yuborilmasin; group_key — o'qilmagan bir turdagi xabarlar bittaga
+  // yig'iladi ("5 ta ish baholashni kutmoqda").
+  await execIgnoreDuplicate(`ALTER TABLE lms_notifications ADD COLUMN dedupe_key VARCHAR(191) NULL AFTER i18n_params`)
+  await execIgnoreDuplicate(`ALTER TABLE lms_notifications ADD COLUMN group_key VARCHAR(191) NULL AFTER dedupe_key`)
+  await execIgnoreDuplicate(`ALTER TABLE lms_notifications ADD UNIQUE KEY uq_notifications_dedupe (user_role, user_id, dedupe_key)`)
+  await execIgnoreDuplicate(`ALTER TABLE lms_notifications ADD INDEX idx_notifications_group (user_role, user_id, group_key, is_read)`)
+
+  // Face ID arizasi kimniki — javob (tasdiq/rad) bildirishnomasini talabaga yetkazish uchun
+  await execIgnoreDuplicate(`ALTER TABLE face_requests ADD COLUMN user_id INT NULL`)
+  await execIgnoreDuplicate(`ALTER TABLE face_requests ADD COLUMN user_role VARCHAR(20) NULL`)
 
   // ── Demo/test hisoblar — login+parol bilan HEMIS'siz kirish (faqat sinov uchun) ──
   await exec(`

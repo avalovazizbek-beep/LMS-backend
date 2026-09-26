@@ -22,6 +22,7 @@ import {
   type AnnouncementAudience,
 } from "../services/announcementStore"
 import { fetchMasofaviyGroupsWithStudentCounts } from "./hemis"
+import { notifySafe } from "../services/notificationStore"
 import { getHemisSyncStatus, getHemisSyncLog } from "../services/db"
 import { runFullHemisSync } from "../services/hemisSync"
 import {
@@ -1453,6 +1454,15 @@ router.post("/hemis-students/:hemisId/request-face-reregister", adminOnly, async
   }
 
   void logAudit(req, hadRegistration ? "face.reset_registration" : "face.request_reregister", "face-id", String(hemisId), { studentIdNumber })
+  notifySafe({
+    role: "student",
+    userId: hemisId,
+    type: "system",
+    title: "Face ID'ni qayta ro'yxatdan o'tkazing",
+    body: "Administrator yuzingizni qayta ro'yxatdan o'tkazishni so'radi",
+    link: "/face-id/register",
+    i18nKey: "faceReregisterRequested",
+  })
 
   res.json({
     success: true,
