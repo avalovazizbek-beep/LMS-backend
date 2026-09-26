@@ -13,6 +13,7 @@ import {
 } from "../services/teachingStore"
 import { streamPrivateFile } from "./teaching"
 import { getUserAdminRole } from "./admin"
+import { notifySafe, type NotificationOwner } from "../services/notificationStore"
 
 const router = Router()
 router.use(authMiddleware)
@@ -90,7 +91,9 @@ async function canAccessConversation(req: AuthRequest, conv: ConversationRow): P
     return studentUserId(req.user) === conv.student_user_id
   }
   if (conv.recipient_type === "teacher") {
-    return teacherUserId(req.user) === conv.recipient_user_id
+    // Faqat xodim sessiyasi — boshqa turdagi hisobning raqamli ID'si tasodifan
+    // o'qituvchi ID'siga teng bo'lib qolsa ham suhbatni ko'rmasligi uchun
+    return req.user?.role === "employee" && teacherUserId(req.user) === conv.recipient_user_id
   }
   const adminRole = await getUserAdminRole(req)
   if (conv.recipient_type === "dean") return adminRole === "dean"
@@ -102,6 +105,71 @@ async function canAccessConversation(req: AuthRequest, conv: ConversationRow): P
 async function isRecipientOf(req: AuthRequest, conv: ConversationRow): Promise<boolean> {
   if (req.user?.role === "student") return false
   return canAccessConversation(req, conv)
+}
+
+/* ── Bildirishnomalar ─────────────────────────────────────────────────
+   Murojaat qabul qiluvchilari: o'qituvchi — aniq bitta xodim; dekanat/admin
+   — shu roldagi barcha xodimlar (lms_permissions + o'zgarmas admin). */
+async function staffRecipients(conv: Pick<ConversationRow, "recipient_type" | "recipient_user_id">): Promise<NotificationOwner[]> {
+  if (conv.recipient_type === "teacher") {
+    return conv.recipient_user_id ? [{ role: "employee", userId: conv.recipient_user_id }] : []
+  }
+  const owners = new Map<string, NotificationOwner>()
+  const [rows] = await pool.query<RowDataPacket[]>(
+    "SELECT hemis_id, hemis_role FROM lms_permissions WHERE lms_role = ?",
+    [conv.recipient_type]
+  )
+  for (const r of rows) {
+    const userId = Number(r.hemis_id)
+    if (!Number.isFinite(userId) || userId <= 0) continue
+    const role = r.hemis_role === "student" ? "student" : "employee"
+    owners.set(`${role}:${userId}`, { role, userId })
+  }
+  const fixedAdmin = Number(String(process.env.FIXED_ADMIN_HEMIS_ID ?? "").trim())
+  if (conv.recipient_type === "admin" && Number.isFinite(fixedAdmin) && fixedAdmin > 0) {
+    owners.set(`employee:${fixedAdmin}`, { role: "employee", userId: fixedAdmin })
+  }
+  return [...owners.values()]
+}
+
+function staffLink(conv: Pick<ConversationRow, "recipient_type">, id: number) {
+  return conv.recipient_type === "teacher" ? `/oqituvchi-kabineti/murojaatlar?c=${id}` : `/admin/murojaatlar?c=${id}`
+}
+
+/** Talaba yozsa — qabul qiluvchi xodim(lar)ga, xodim yozsa — talabaga. */
+async function notifyConversationActivity(
+  conv: ConversationRow,
+  fromStudent: boolean,
+  senderName: string,
+) {
+  try {
+    if (fromStudent) {
+      for (const owner of await staffRecipients(conv)) {
+        notifySafe({
+          ...owner,
+          type: "support",
+          title: "Murojaatga yangi xabar",
+          body: `${conv.student_name}: ${conv.subject}`,
+          link: staffLink(conv, conv.id),
+          i18nKey: "supportMessage",
+          i18nParams: { name: conv.student_name, subject: conv.subject },
+        })
+      }
+    } else {
+      notifySafe({
+        role: "student",
+        userId: conv.student_user_id,
+        type: "support",
+        title: "Murojaatingizga javob keldi",
+        body: `${senderName}: ${conv.subject}`,
+        link: `/murojaatlar?c=${conv.id}`,
+        i18nKey: "supportReply",
+        i18nParams: { name: senderName, subject: conv.subject },
+      })
+    }
+  } catch (err) {
+    console.warn("[support] bildirishnoma yuborilmadi:", (err as { message?: string })?.message ?? err)
+  }
 }
 
 async function loadConversation(id: number): Promise<ConversationRow | null> {
@@ -202,6 +270,23 @@ router.post("/conversations", async (req: AuthRequest, res: Response): Promise<v
   )
 
   res.json({ success: true, data: { id: conversationId } })
+
+  // Qabul qiluvchi(lar)ga "yangi murojaat" bildirishnomasi
+  try {
+    for (const owner of await staffRecipients({ recipient_type: recipientType, recipient_user_id: recipientUserId })) {
+      notifySafe({
+        ...owner,
+        type: "support",
+        title: "Yangi murojaat",
+        body: `${info.fullName}: ${subject}`,
+        link: staffLink({ recipient_type: recipientType }, conversationId),
+        i18nKey: "supportNew",
+        i18nParams: { name: info.fullName, subject },
+      })
+    }
+  } catch (err) {
+    console.warn("[support] bildirishnoma yuborilmadi:", (err as { message?: string })?.message ?? err)
+  }
 })
 
 /* ── GET /api/support/conversations — mening murojaatlarim ro'yxati ──── */
@@ -215,13 +300,16 @@ router.get("/conversations", async (req: AuthRequest, res: Response): Promise<vo
     params = [studentUserId(req.user)]
     viewerRoleFn = () => "student"
   } else {
-    const tid = teacherUserId(req.user)
-    const conditions = ["(recipient_type = 'teacher' AND recipient_user_id = ?)"]
-    params = [tid]
+    const conditions: string[] = []
+    params = []
+    if (req.user?.role === "employee") {
+      conditions.push("(recipient_type = 'teacher' AND recipient_user_id = ?)")
+      params.push(teacherUserId(req.user))
+    }
     const adminRole = await getUserAdminRole(req)
     if (adminRole === "dean") conditions.push("recipient_type = 'dean'")
     if (adminRole === "admin") conditions.push("recipient_type = 'admin'")
-    where = conditions.join(" OR ")
+    where = conditions.length ? conditions.join(" OR ") : "1 = 0"
     viewerRoleFn = (recipientType) => recipientType
   }
 
@@ -332,6 +420,7 @@ router.post("/conversations/:id/messages", async (req: AuthRequest, res: Respons
   await pool.query("UPDATE lms_conversations SET last_message_at = NOW() WHERE id = ?", [id])
 
   res.json({ success: true, message: "Yuborildi" })
+  void notifyConversationActivity(conv, senderRole === "student", senderName)
 })
 
 /* ── Fayl biriktirib yuborish — xom oqim (multipart emas), teaching.ts
@@ -419,6 +508,7 @@ router.post("/conversations/:id/attachment", async (req: AuthRequest, res: Respo
   await pool.query("UPDATE lms_conversations SET last_message_at = NOW() WHERE id = ?", [id])
 
   res.json({ success: true, message: "Fayl yuborildi" })
+  void notifyConversationActivity(conv, senderRole === "student", senderName)
 })
 
 /* ── GET /api/support/messages/:messageId/file — biriktirilgan faylni olish ── */
@@ -474,6 +564,16 @@ router.post("/conversations/:id/close", async (req: AuthRequest, res: Response):
   )
 
   res.json({ success: true, message: "Suhbat yakunlandi" })
+  notifySafe({
+    role: "student",
+    userId: conv.student_user_id,
+    type: "support",
+    title: "Murojaat yakunlandi",
+    body: conv.subject,
+    link: `/murojaatlar?c=${conv.id}`,
+    i18nKey: "supportClosed",
+    i18nParams: { subject: conv.subject, name: closerName },
+  })
 })
 
 export default router

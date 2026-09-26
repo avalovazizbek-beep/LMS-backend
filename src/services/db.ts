@@ -933,6 +933,62 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
 
+  // Talaba va xodim ID'lari turli HEMIS jadvallaridan — raqam bir xil
+  // bo'lishi mumkin (talaba 123 ≠ xodim 123). Yopish yozuvi rol bilan
+  // saqlanadi, aks holda talaba yopgan e'lon shu raqamli xodimga ham
+  // ko'rinmay qolardi. Eski yozuvlarda user_role = '' (ikkala rolga ham
+  // tegishli deb hisoblanadi).
+  await execIgnoreDuplicate(`ALTER TABLE lms_announcement_dismissals ADD COLUMN user_role VARCHAR(20) NOT NULL DEFAULT '' AFTER announcement_id`)
+  await execIgnoreDuplicate(`ALTER TABLE lms_announcement_dismissals ADD UNIQUE KEY uq_announcement_dismissal_role (announcement_id, user_role, user_id)`)
+  {
+    const [oldKey] = await pool.query<mysql.RowDataPacket[]>(
+      `SELECT 1 FROM information_schema.statistics
+       WHERE table_schema = DATABASE() AND table_name = 'lms_announcement_dismissals' AND index_name = 'uq_announcement_dismissal'
+       LIMIT 1`
+    )
+    if (oldKey.length) await exec(`ALTER TABLE lms_announcement_dismissals DROP INDEX uq_announcement_dismissal`)
+  }
+
+  // "Javob talab qilinsin" — xodimlarga e'lon: javob yozmaguncha yopilmaydi
+  await execIgnoreDuplicate(`ALTER TABLE lms_announcements ADD COLUMN require_reply TINYINT(1) NOT NULL DEFAULT 0 AFTER audience`)
+
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_announcement_replies (
+      id              INT AUTO_INCREMENT PRIMARY KEY,
+      announcement_id INT NOT NULL,
+      user_role       VARCHAR(20) NOT NULL,
+      user_id         INT NOT NULL,
+      full_name       VARCHAR(255) NULL,
+      body            TEXT NOT NULL,
+      created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_announcement_reply (announcement_id, user_role, user_id),
+      INDEX idx_reply_announcement (announcement_id, created_at),
+      CONSTRAINT fk_reply_announcement FOREIGN KEY (announcement_id)
+        REFERENCES lms_announcements(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
+  // ── Bildirishnomalar (Xabarnomalar) — egasi (rol + ID) bo'yicha ──
+  // Avval server xotirasida (massivda) turardi: qayta ishga tushganda
+  // yo'qolardi, rol hisobga olinmasdi va hammaga ko'rinadigan demo yozuvlar
+  // bor edi.
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_notifications (
+      id          INT AUTO_INCREMENT PRIMARY KEY,
+      user_role   VARCHAR(20) NOT NULL,
+      user_id     INT NOT NULL,
+      type        VARCHAR(20) NOT NULL DEFAULT 'system',
+      title       VARCHAR(255) NOT NULL,
+      body        TEXT NULL,
+      link        VARCHAR(500) NULL,
+      i18n_key    VARCHAR(100) NULL,
+      i18n_params JSON NULL,
+      is_read     TINYINT(1) NOT NULL DEFAULT 0,
+      created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_notifications_owner (user_role, user_id, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
   // ── Demo/test hisoblar — login+parol bilan HEMIS'siz kirish (faqat sinov uchun) ──
   await exec(`
     CREATE TABLE IF NOT EXISTS lms_demo_accounts (

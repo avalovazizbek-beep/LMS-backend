@@ -18,6 +18,7 @@ import {
   announcementUploadsDir,
   sanitizeAnnouncementFilename,
   mediaKindFromMime,
+  listReplies as listAnnouncementReplies,
   type AnnouncementAudience,
 } from "../services/announcementStore"
 import { fetchMasofaviyGroupsWithStudentCounts } from "./hemis"
@@ -100,15 +101,23 @@ export async function getUserAdminRole(req: AuthRequest): Promise<"admin" | "dea
   const hemisId = getHemisId(req)
   if (!hemisId) return null
 
-  // Yagona o'zgarmas admin
-  if (FIXED_ADMIN_HEMIS_ID && hemisId === FIXED_ADMIN_HEMIS_ID) return "admin"
+  // Talaba va xodim ID'lari turli HEMIS jadvallaridan — raqam bir xil
+  // bo'lishi mumkin. Admin/dekan huquqi xodimga berilgan bo'lsa, xuddi shu
+  // raqamli ID'li talaba uni olib qolmasligi kerak.
+  const isStudent = user.role === "student"
+
+  // Yagona o'zgarmas admin (xodim)
+  if (FIXED_ADMIN_HEMIS_ID && hemisId === FIXED_ADMIN_HEMIS_ID && !isStudent) return "admin"
 
   // DB-granted admin/dean
   const [rows] = await pool.query<RowDataPacket[]>(
-    "SELECT lms_role FROM lms_permissions WHERE hemis_id = ?",
+    "SELECT lms_role, hemis_role FROM lms_permissions WHERE hemis_id = ?",
     [hemisId]
   )
   const role = rows[0]?.lms_role
+  const grantedRole = String(rows[0]?.hemis_role ?? "")
+  // Huquq boshqa turdagi hisobga (masalan xodimga) berilgan bo'lsa — talabaga o'tmaydi
+  if (isStudent && grantedRole && grantedRole !== "student") return null
   return role === "admin" || role === "dean" ? role : null
 }
 
@@ -1806,10 +1815,12 @@ router.post("/announcements", requirePermission("announcements", "create"), asyn
     title: title || undefined,
     message: message || undefined,
     audience,
+    // Javob faqat xodimlardan so'raladi
+    requireReply: audience === "employee" && body.requireReply === true,
     createdByUserId: announcementCreatorId(req),
     createdByName: announcementCreatorName(req),
   })
-  void logAudit(req, "announcement.create", "announcements", String(record.id), { audience })
+  void logAudit(req, "announcement.create", "announcements", String(record.id), { audience, requireReply: record.requireReply })
   res.status(201).json({ success: true, data: record })
 })
 
@@ -1832,6 +1843,7 @@ router.post("/announcements/upload", requirePermission("announcements", "create"
 
   const title = textVal(String(req.query.title ?? ""), String(req.headers["x-announcement-title"] ?? ""))
   const message = textVal(String(req.query.message ?? ""), String(req.headers["x-announcement-message"] ?? ""))
+  const requireReply = audience === "employee" && String(req.query.requireReply ?? "") === "1"
   const mimeType = safeMimeType(originalName)
 
   const storedName = sanitizeAnnouncementFilename(originalName)
@@ -1865,6 +1877,7 @@ router.post("/announcements/upload", requirePermission("announcements", "create"
         title: title || undefined,
         message: message || undefined,
         audience,
+        requireReply,
         createdByUserId: announcementCreatorId(req),
         createdByName: announcementCreatorName(req),
         file: {
@@ -1891,7 +1904,7 @@ router.put("/announcements/:id", requirePermission("announcements", "edit"), asy
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) { res.status(400).json({ success: false, message: "Noto'g'ri ID" }); return }
   const body = req.body || {}
-  const patch: { title?: string | null; message?: string | null; audience?: AnnouncementAudience } = {}
+  const patch: { title?: string | null; message?: string | null; audience?: AnnouncementAudience; requireReply?: boolean } = {}
   if (typeof body.title === "string") patch.title = body.title || null
   if (typeof body.message === "string") patch.message = body.message || null
   const audience = validAudience(body.audience)
@@ -1899,11 +1912,21 @@ router.put("/announcements/:id", requirePermission("announcements", "edit"), asy
     if (!audience) { res.status(400).json({ success: false, message: "audience noto'g'ri" }); return }
     patch.audience = audience
   }
+  if (typeof body.requireReply === "boolean") patch.requireReply = body.requireReply
+  // Javob talabi faqat xodimlarga e'londa ma'noli
+  if (patch.audience && patch.audience !== "employee") patch.requireReply = false
 
   const record = await updateAnnouncement(id, patch)
   if (!record) { res.status(404).json({ success: false, message: "E'lon topilmadi" }); return }
   void logAudit(req, "announcement.update", "announcements", String(id), patch)
   res.json({ success: true, data: record })
+})
+
+/* ── GET /api/admin/announcements/:id/replies — e'longa yozilgan javoblar ── */
+router.get("/announcements/:id/replies", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) { res.status(400).json({ success: false, message: "Noto'g'ri ID" }); return }
+  res.json({ success: true, data: await listAnnouncementReplies(id) })
 })
 
 router.patch("/announcements/:id/toggle", requirePermission("announcements", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {

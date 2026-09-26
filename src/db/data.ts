@@ -177,14 +177,8 @@ export const meetings: Meeting[] = [
   { id: uuid(), title: "Guruh yig'ilishi — Dekanat",      subject: "Umumiy",     host: "Dekan Yusupov K.",  date: "2024-04-05", time: "15:00", duration: "30 daqiqa", participants: 35, link: "#", status: "done"     },
 ]
 
-export const notifications: Notification[] = [
-  { id: uuid(), type: "system",   title: "Tizim yangilandi",        body: "LMS tizimiga yangi funksiyalar qo'shildi.",                              time: "2 daqiqa oldin",  read: false, userId: "all" },
-  { id: uuid(), type: "teacher",  title: "Prof. Karimov xabari",    body: "Matematika fanidan uy vazifasi: 5.1-5.3 mashqlarni bajaring.",           time: "1 soat oldin",    read: false, userId: "all" },
-  { id: uuid(), type: "schedule", title: "Dars jadvali o'zgardi",   body: "Chorshanba kuni Fizika darsi 09:00 dan 11:00 ga o'tkazildi.",            time: "3 soat oldin",    read: false, userId: "all" },
-  { id: uuid(), type: "reminder", title: "Imtihon eslatmasi",       body: "Matematika yakuniy imtihoni 20-may kuni. 3 kun qoldi!",                 time: "5 soat oldin",    read: true,  userId: "all" },
-  { id: uuid(), type: "teacher",  title: "Dos. Tosheva xabari",     body: "Ingliz tili fanidan mustaqil ish topshirildi.",                          time: "1 kun oldin",     read: true,  userId: "all" },
-  { id: uuid(), type: "system",   title: "To'lov eslatmasi",        body: "3-semestr to'lovi muddati yaqinlashmoqda. 30-aprelgacha to'lang.",       time: "1 kun oldin",     read: true,  userId: "all" },
-]
+// Bildirishnomalar endi lms_notifications jadvalida (services/notificationStore.ts).
+// Bu yerda turgan demo yozuvlar (userId: "all") hammaga ko'rinardi — olib tashlandi.
 
 export const boardPosts: BoardPost[] = [
   { id: uuid(), title: "Imtihon jadvali e'lon qilindi",  body: "May oyida bo'ladigan yakuniy imtihonlar jadvali e'lon qilindi.",              tag: "Muhim",  date: "2024-04-10", pinned: true,  author: "O'quv bo'limi" },

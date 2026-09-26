@@ -1460,24 +1460,31 @@ async function createOAuthSession(requestedRole: OAuthRole, code: string, redire
     return { token, role: "student" as const }
   }
 
-  const enrichedProfile = await enrichEmployeeProfile(oauthProfile)
+  const { profile: enrichedProfile, verified } = await enrichEmployeeProfile(oauthProfile)
   // Xodimning raqamli HEMIS ID'si (yoki undefined — JWT'dan olib qoldiramiz)
-  const numericEmployeeId = numberValue(
+  let numericEmployeeId = numberValue(
     enrichedProfile.id,
     enrichedProfile.meta_id,
     enrichedProfile.employee_id_number
   ) ?? undefined
+  if (!verified && numericEmployeeId) {
+    numericEmployeeId = await collisionSafeFallbackId(numericEmployeeId)
+  }
 
   // Oldingi login'larda xodim qidiruvi yiqilgan bo'lsa, o'shanda yaratilgan
   // mavzular OAuth akkaunt ID'si ostida qolgan — ularni haqiqiy ID'ga qaytaramiz
   // (aks holda domla ularni ko'rmaydi/o'chira olmaydi, talabada esa qoladi).
   const fallbackId = numberValue(oauthProfile.id, oauthProfile.meta_id, oauthProfile.employee_id_number)
-  if (numericEmployeeId && fallbackId && fallbackId !== numericEmployeeId) {
-    try {
-      const moved = await reassignTeacherContent(fallbackId, numericEmployeeId)
-      if (moved) console.log(`[HEMIS employee oauth] ${moved} ta kontent ${fallbackId} → ${numericEmployeeId} ID'ga qaytarildi`)
-    } catch (err) {
-      console.warn("[HEMIS employee oauth] kontentni qaytarishda xato:", extractMessage(err))
+  if (verified && numericEmployeeId && fallbackId && fallbackId !== numericEmployeeId) {
+    // Ham eski (musbat), ham to'qnashuvdan saqlangan (manfiy) zaxira ID ostida
+    // qolgan kontent haqiqiy ID'ga qaytariladi
+    for (const fromId of [fallbackId, -Math.abs(fallbackId)]) {
+      try {
+        const moved = await reassignTeacherContent(fromId, numericEmployeeId)
+        if (moved) console.log(`[HEMIS employee oauth] ${moved} ta kontent ${fromId} → ${numericEmployeeId} ID'ga qaytarildi`)
+      } catch (err) {
+        console.warn("[HEMIS employee oauth] kontentni qaytarishda xato:", extractMessage(err))
+      }
     }
   }
 
@@ -1599,10 +1606,27 @@ async function employeeFromDirectory(profile: Record<string, unknown>): Promise<
   return null
 }
 
-async function enrichEmployeeProfile(profile: Record<string, unknown>) {
+function normalizePersonName(value: unknown): string {
+  return String(value ?? "").toLowerCase().replace(/[ʻʼ‘’`']/g, "'").replace(/\s+/g, " ").trim()
+}
+
+/**
+ * Xodimning HEMIS employee-list yozuvini topadi. `verified` — yozuv aynan
+ * shu odamniki ekani (katalog yoki aniq moslik) tasdiqlangan.
+ *
+ * MUHIM: avval jonli qidiruvda aniq moslik bo'lmasa ham birinchi natija
+ * (`items[0]`) olinardi — familiyadosh boshqa xodimning yozuvi (ID'si,
+ * ismi) shu sessiyaga yopishib, u boshqa domlaga yuborilgan murojaat va
+ * kontentni ko'rib qolardi. Endi faqat aniq moslik qabul qilinadi.
+ */
+async function enrichEmployeeProfile(profile: Record<string, unknown>): Promise<{ profile: Record<string, unknown>; verified: boolean }> {
   const local = await employeeFromDirectory(profile)
-  if (local) return { ...profile, ...local }
-  if (!HEMIS_TOKEN) return profile
+  if (local) return { profile: { ...profile, ...local }, verified: true }
+  if (!HEMIS_TOKEN) return { profile, verified: false }
+
+  const wantedId = textValue(profile.employee_id_number, profile.university_id)
+  const wantedLogin = textValue(profile.login)
+  const wantedName = normalizePersonName(textValue(profile.full_name, profile.name))
 
   const searchTerms = [
     textValue(profile.employee_id_number, profile.university_id, profile.id),
@@ -1620,21 +1644,45 @@ async function enrichEmployeeProfile(profile: Record<string, unknown>) {
       }, false)
       const items = unwrapHemisData(data)
       if (Array.isArray(items) && items.length) {
-        const exact = items.find((item) => {
-          const record = asRecord(item)
-          const employeeId = textValue(record.employee_id_number, record.university_id, record.id)
-          const login = textValue(record.login)
-          const name = textValue(record.full_name, record.name)
-          return employeeId === search || login === search || name === search
-        })
-        return { ...profile, ...asRecord(exact || items[0]) }
+        const records = items.map(asRecord)
+        const byId = wantedId
+          ? records.find((r) => textValue(r.employee_id_number, r.university_id) === wantedId)
+          : undefined
+        const byLogin = !byId && wantedLogin
+          ? records.find((r) => textValue(r.login) === wantedLogin)
+          : undefined
+        // Ism bo'yicha — faqat bitta aniq mos yozuv bo'lsa (familiyadoshlar orasidan tanlamaymiz)
+        const byName = !byId && !byLogin && wantedName
+          ? records.filter((r) => normalizePersonName(textValue(r.full_name, r.name)) === wantedName)
+          : []
+        const match = byId || byLogin || (byName.length === 1 ? byName[0] : undefined)
+        if (match) return { profile: { ...profile, ...match }, verified: true }
       }
     } catch (err) {
       console.warn("[HEMIS employee oauth] employee-list enrich xato:", extractMessage(err))
     }
   }
 
-  return profile
+  return { profile, verified: false }
+}
+
+/**
+ * Xodim HEMIS katalogida tasdiqlanmagan bo'lsa, OAuth akkaunt ID'si
+ * ishlatiladi. U boshqa ID fazosidan — boshqa bir xodimning katalog ID'siga
+ * raqam jihatdan teng bo'lib qolishi mumkin (shunda bu sessiya o'sha
+ * xodimning murojaat va kontentini ko'rardi). To'qnashsa — manfiy ID
+ * beriladi: haqiqiy HEMIS ID'lari musbat, demak hech kim bilan to'qnashmaydi.
+ */
+async function collisionSafeFallbackId(fallbackId: number): Promise<number> {
+  try {
+    const [rows] = await pool.query<mysql.RowDataPacket[]>(
+      "SELECT 1 FROM hemis_employees_directory WHERE hemis_id = ? LIMIT 1",
+      [fallbackId]
+    )
+    return rows.length ? -Math.abs(fallbackId) : fallbackId
+  } catch {
+    return -Math.abs(fallbackId)
+  }
 }
 
 const employeeResourcePaths: Record<string, string[]> = {

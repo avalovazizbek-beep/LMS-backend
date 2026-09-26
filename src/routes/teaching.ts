@@ -2,12 +2,11 @@ import fs from "fs"
 import os from "os"
 import path from "path"
 import { execFile } from "child_process"
-import { randomUUID } from "crypto"
 import jwt from "jsonwebtoken"
 import express, { Router, Response } from "express"
 import { authMiddleware, requireRole, AuthRequest, AuthUser } from "../middleware/auth"
 import { pool } from "../services/db"
-import { notifications } from "../db/data"
+import { createNotification, notifySafe, type NotificationType } from "../services/notificationStore"
 import { parseNumber } from "../services/meetingStore"
 import { syncTeacherFromHemis, employeeTeachesGroup, fetchTeacherGroupsForYear, fetchTeacherSubjectsFromSchedule, fetchTeacherGroupsFromSchedule } from "./hemis"
 import {
@@ -1614,39 +1613,37 @@ router.get("/content/:id", async (req: AuthRequest, res: Response): Promise<void
   res.json({ success: true, data: presentForStudent(content) })
 })
 
-/* ── Avtomatik bildirishnoma: platforma ("Xabarnomalar") + best-effort
-   Telegram nusxasi (umumiy bot-guruhga — shaxsiy chat_id hali yo'q). ── */
-async function notifyUser(userId: number, type: "system" | "teacher" | "schedule" | "reminder", title: string, body: string) {
-  notifications.push({
-    id: randomUUID(),
-    type,
-    title,
-    body,
-    time: new Date().toLocaleString("uz-UZ"),
-    read: false,
-    userId: String(userId),
-  })
-  const botToken = process.env.TELEGRAM_BOT_TOKEN
-  const chatId = process.env.TELEGRAM_CHAT_ID
-  if (!botToken || !chatId) return
+/* ── Avtomatik bildirishnoma — faqat platforma ichida ("Xabarnomalar"),
+   aniq egasiga (rol + ID). Avval shu matnlar umumiy Telegram bot-guruhiga
+   ham yuborilardi — bitta talabaning bahosi guruhdagi hammaga ko'rinib
+   qolardi, shuning uchun bu nusxa olib tashlandi (shaxsiy chat_id yo'q). ── */
+async function notifyUser(
+  role: "student" | "employee",
+  userId: number,
+  type: NotificationType,
+  title: string,
+  body: string,
+  i18n?: { key: string; params?: Record<string, string | number>; link?: string }
+) {
   try {
-    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: `🔔 <b>${title}</b>\n${body}`, parse_mode: "HTML" }),
+    await createNotification({
+      role, userId, type, title, body,
+      link: i18n?.link ?? null,
+      i18nKey: i18n?.key ?? null,
+      i18nParams: i18n?.params ?? null,
     })
   } catch { /* best-effort — asosiy oqimga ta'sir qilmaydi */ }
 }
 
 /** Guruhdagi (platformadan foydalangan) talabalarga yangi material haqida xabar beradi. */
-async function notifyGroupStudents(groupId: number, title: string, body: string) {
+async function notifyGroupStudents(groupId: number, title: string, body: string, i18n?: { key: string; params?: Record<string, string | number> }) {
   try {
     const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
       "SELECT DISTINCT user_id FROM lms_platform_sessions WHERE group_id = ? AND role = 'student'",
       [groupId]
     )
     for (const row of rows) {
-      await notifyUser(Number(row.user_id), "teacher", title, body)
+      await notifyUser("student", Number(row.user_id), "teacher", title, body, i18n)
     }
   } catch { /* best-effort */ }
 }
@@ -1744,7 +1741,7 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
     const record = await createTeacherContent({ ...baseInput, file: null })
     res.status(201).json({ success: true, data: record })
     if (isRealMaterial) {
-      void notifyGroupStudents(meta.groupId, "Yangi material qo'shildi", `${meta.subjectName} fanidan yangi material: ${meta.title}`)
+      void notifyGroupStudents(meta.groupId, "Yangi material qo'shildi", `${meta.subjectName} fanidan yangi material: ${meta.title}`, { key: "newMaterial", params: { subject: meta.subjectName, title: meta.title } })
     }
     return
   }
@@ -1755,7 +1752,7 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
   const record = await createTeacherContent({ ...baseInput, file })
   res.status(201).json({ success: true, data: record })
   if (isRealMaterial) {
-    void notifyGroupStudents(meta.groupId, "Yangi material qo'shildi", `${meta.subjectName} fanidan yangi material: ${meta.title}`)
+    void notifyGroupStudents(meta.groupId, "Yangi material qo'shildi", `${meta.subjectName} fanidan yangi material: ${meta.title}`, { key: "newMaterial", params: { subject: meta.subjectName, title: meta.title } })
   }
 })
 
@@ -1953,7 +1950,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
       file: null,
     })
     res.status(201).json({ success: true, data: submission })
-    void notifyUser(content.teacherUserId, "reminder", "Yangi topshiriq keldi", `${fullNameOf(req.user)} — ${content.title}`)
+    void notifyUser("employee", content.teacherUserId, "reminder", "Yangi topshiriq keldi", `${fullNameOf(req.user)} — ${content.title}`, { key: "newSubmission", params: { student: fullNameOf(req.user), title: content.title } })
     return
   }
 
@@ -2022,7 +2019,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
       file,
     })
     res.status(201).json({ success: true, data: submission })
-    void notifyUser(content.teacherUserId, "reminder", "Yangi topshiriq keldi", `${fullNameOf(req.user)} — ${content.title}`)
+    void notifyUser("employee", content.teacherUserId, "reminder", "Yangi topshiriq keldi", `${fullNameOf(req.user)} — ${content.title}`, { key: "newSubmission", params: { student: fullNameOf(req.user), title: content.title } })
   })
 
   req.pipe(stream)
@@ -2090,7 +2087,8 @@ router.put("/submissions/:id/grade", async (req: AuthRequest, res: Response): Pr
 
   const updated = await gradeSubmission(submission.id, teacherUserId(req.user), grade, textValue(body.feedback) || null)
   res.json({ success: true, data: updated })
-  void notifyUser(submission.studentUserId, "teacher", "Baho qo'yildi", `${content.title}: ${grade}${content.maxScore ? ` / ${content.maxScore}` : ""} ball`)
+  const gradeText = `${grade}${content.maxScore ? ` / ${content.maxScore}` : ""}`
+  void notifyUser("student", submission.studentUserId, "teacher", "Baho qo'yildi", `${content.title}: ${gradeText} ball`, { key: "graded", params: { title: content.title, grade: gradeText } })
 })
 
 /* ── Savol rasmlari ─────────────────────────────────────────────────── */
@@ -3166,14 +3164,14 @@ router.post("/notify-student", async (req: AuthRequest, res: Response): Promise<
   let platformNotified = false
   if (studentUserId !== null) {
     const subjectLine = stats?.subject ? ` (${textValue(stats.subject)})` : ""
-    notifications.push({
-      id: randomUUID(),
+    notifySafe({
+      role: "student",
+      userId: studentUserId,
       type: "teacher",
       title: `O'qituvchidan xabar${subjectLine}`,
       body: message,
-      time: new Date().toLocaleString("uz-UZ"),
-      read: false,
-      userId: String(studentUserId),
+      i18nKey: stats?.subject ? "teacherMessageSubject" : "teacherMessage",
+      i18nParams: stats?.subject ? { subject: textValue(stats.subject) } : null,
     })
     platformNotified = true
   }

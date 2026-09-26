@@ -1,33 +1,42 @@
 import { Router, Response } from "express"
-import { notifications } from "../db/data"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
+import {
+  deleteNotification,
+  listNotifications,
+  markAllRead,
+  markRead,
+  notificationOwnerOf,
+} from "../services/notificationStore"
 
 const router = Router()
 router.use(authMiddleware)
 
-router.get("/", (req: AuthRequest, res: Response) => {
-  const userId = String(req.user!.id)
-  const data = notifications.filter((n) => n.userId === "all" || n.userId === userId)
+// Har bir so'rov faqat o'z egasining (rol + ID) bildirishnomalarini ko'radi
+// va o'zgartiradi — boshqa foydalanuvchinikini o'qish/o'chirish mumkin emas.
+
+router.get("/", async (req: AuthRequest, res: Response) => {
+  const data = await listNotifications(notificationOwnerOf(req))
   res.json({ success: true, data, unread: data.filter((n) => !n.read).length })
 })
 
-router.patch("/:id/read", (req: AuthRequest, res: Response): void => {
-  const idx = notifications.findIndex((n) => n.id === req.params.id)
-  if (idx === -1) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
-  notifications[idx].read = true
-  res.json({ success: true, data: notifications[idx] })
-})
-
-router.patch("/read-all", (req: AuthRequest, res: Response) => {
-  const userId = String(req.user!.id)
-  notifications.forEach((n) => { if (n.userId === "all" || n.userId === userId) n.read = true })
+router.patch("/read-all", async (req: AuthRequest, res: Response) => {
+  await markAllRead(notificationOwnerOf(req))
   res.json({ success: true, message: "Barchasi o'qildi deb belgilandi" })
 })
 
-router.delete("/:id", (req: AuthRequest, res: Response): void => {
-  const idx = notifications.findIndex((n) => n.id === req.params.id)
-  if (idx === -1) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
-  notifications.splice(idx, 1)
+router.patch("/:id/read", async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) { res.status(400).json({ success: false, message: "Noto'g'ri ID" }); return }
+  const ok = await markRead(notificationOwnerOf(req), id)
+  if (!ok) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
+  res.json({ success: true })
+})
+
+router.delete("/:id", async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) { res.status(400).json({ success: false, message: "Noto'g'ri ID" }); return }
+  const ok = await deleteNotification(notificationOwnerOf(req), id)
+  if (!ok) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
   res.json({ success: true, message: "O'chirildi" })
 })
 
