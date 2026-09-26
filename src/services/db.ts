@@ -407,6 +407,15 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
 
+  // Avval "Zoomni uzish" faqat status='revoked' qo'yardi — shifrlangan
+  // tokenlar va Zoom email bazada qolardi. Endi uzishda o'chiriladi;
+  // eski qoldiqlarni bir marta tozalaymiz (keyingi ishga tushishlarda bo'sh).
+  await execSafe(`
+    UPDATE lms_meeting_zoom SET zoom_start_url_encrypted = NULL
+    WHERE teacher_id IN (SELECT teacher_id FROM zoom_connections WHERE status = 'revoked')
+  `, "zoom revoked cleanup (start_url)")
+  await execSafe(`DELETE FROM zoom_connections WHERE status = 'revoked'`, "zoom revoked cleanup")
+
   await exec(`
     CREATE TABLE IF NOT EXISTS google_meet_connections (
       id                      INT AUTO_INCREMENT PRIMARY KEY,

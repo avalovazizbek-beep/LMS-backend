@@ -24,7 +24,7 @@ import announcementsRoutes from "./routes/announcements"
 import reeduRoutes from "./routes/reedu"
 import plagiarismRoutes from "./routes/plagiarism"
 import supportRoutes from "./routes/support"
-import zoomRoutes from "./routes/zoom"
+import zoomRoutes, { zoomWebhookHandler } from "./routes/zoom"
 import googleMeetRoutes from "./routes/googleMeet"
 import {
   getAttendance,
@@ -74,6 +74,8 @@ app.use(cors({
   },
   credentials: true,
 }))
+// Zoom webhook imzosi xom body bo'yicha tekshiriladi — JSON parserdan oldin
+app.post("/api/integrations/zoom/webhook", express.raw({ type: "*/*", limit: "1mb" }), zoomWebhookHandler)
 app.use(express.json({ limit: "25mb" }))
 app.use(express.urlencoded({ extended: true }))
 app.use("/uploads", express.static(publicResourcePath(), {

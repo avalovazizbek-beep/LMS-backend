@@ -24,6 +24,8 @@ const ZOOM_CLIENT_ID = process.env.ZOOM_CLIENT_ID || ""
 const ZOOM_CLIENT_SECRET = process.env.ZOOM_CLIENT_SECRET || ""
 const ZOOM_REDIRECT_URI = process.env.ZOOM_REDIRECT_URI || ""
 const ZOOM_STATE_SECRET = process.env.ZOOM_STATE_SECRET || process.env.JWT_SECRET || "secret"
+// Zoom App → Features → Access → "Secret Token" (Event Subscription imzosi uchun)
+const ZOOM_WEBHOOK_SECRET_TOKEN = process.env.ZOOM_WEBHOOK_SECRET_TOKEN || ""
 const ZOOM_TIMEOUT_MS = 15000
 
 export function isZoomConfigured(): boolean {
@@ -72,6 +74,16 @@ interface ZoomOAuthState {
   codeVerifier: string
 }
 
+/** state JWT'ining o'zi — code_verifier shifrlangan holda (JWT imzolangan,
+ *  lekin ochiq o'qiladi; PKCE verifier esa Zoom va brauzerdan sir qolishi kerak). */
+interface ZoomOAuthStatePayload {
+  teacherId: number
+  nonce: string
+  cv?: string
+  /** eski (shifrlanmagan) formatdagi state — o'tish davri uchun */
+  codeVerifier?: string
+}
+
 /** Zoom'ning yangi "General App" turi PKCE (RFC 7636) talab qiladi — bo'lmasa
  *  /oauth/authorize "Invalid client_id" deb (chalg'ituvchi, lekin aslida PKCE
  *  yo'qligi haqidagi) xato qaytaradi. code_verifier'ni serverda saqlamasdan,
@@ -88,7 +100,7 @@ function codeChallengeFromVerifier(verifier: string): string {
 export function buildAuthorizationUrl(teacherId: number): string {
   const nonce = crypto.randomBytes(16).toString("hex")
   const codeVerifier = generateCodeVerifier()
-  const state = jwt.sign({ teacherId, nonce, codeVerifier } satisfies ZoomOAuthState, ZOOM_STATE_SECRET, { expiresIn: "10m" })
+  const state = jwt.sign({ teacherId, nonce, cv: encrypt(codeVerifier) } satisfies ZoomOAuthStatePayload, ZOOM_STATE_SECRET, { expiresIn: "10m" })
   const params = new URLSearchParams({
     response_type: "code",
     client_id: ZOOM_CLIENT_ID,
@@ -102,7 +114,10 @@ export function buildAuthorizationUrl(teacherId: number): string {
 
 export function verifyState(state: string): ZoomOAuthState | null {
   try {
-    return jwt.verify(state, ZOOM_STATE_SECRET) as ZoomOAuthState
+    const payload = jwt.verify(state, ZOOM_STATE_SECRET) as ZoomOAuthStatePayload
+    const codeVerifier = payload.cv ? decrypt(payload.cv) : payload.codeVerifier
+    if (!codeVerifier) return null
+    return { teacherId: payload.teacherId, nonce: payload.nonce, codeVerifier }
   } catch {
     return null
   }
@@ -257,11 +272,84 @@ export async function completeAuthorization(teacherId: number, code: string, cod
   return { email: zoomUser.email }
 }
 
+/** Tokenni Zoom tomonida bekor qiladi — shu bilan ilova foydalanuvchining
+ *  Zoom hisobidagi "Installed apps" ro'yxatidan ham olib tashlanadi. */
+async function revokeAtZoom(token: string): Promise<boolean> {
+  try {
+    await axios.post(`${ZOOM_OAUTH_BASE}/revoke`, new URLSearchParams({ token }).toString(), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: basicAuthHeader() },
+      timeout: ZOOM_TIMEOUT_MS,
+    })
+    return true
+  } catch (err) {
+    console.warn("[zoom] tokenni bekor qilishda xato:", zoomOAuthErrorMessage(err))
+    return false
+  }
+}
+
+/** O'qituvchining Zoom'dan olingan barcha shaxsiy ma'lumotlarini o'chiradi:
+ *  tokenlar, Zoom user id/email (zoom_connections qatori butunlay) va
+ *  meeting'larning host havolasi (start_url — ichida host tokeni bor).
+ *  Talabalar ishlatadigan join havolalari o'quv jarayoni uchun qoladi. */
+async function purgeTeacherZoomData(teacherIds: number[]): Promise<void> {
+  if (!teacherIds.length) return
+  await pool.query("DELETE FROM zoom_connections WHERE teacher_id IN (?)", [teacherIds])
+  await pool.query("UPDATE lms_meeting_zoom SET zoom_start_url_encrypted = NULL WHERE teacher_id IN (?)", [teacherIds])
+}
+
+/** "Zoomni uzish" (LMS Profil sahifasi): avval Zoom'da token bekor qilinadi
+ *  (ilova Zoom hisobidan ham o'chadi), keyin bizdagi ma'lumot o'chiriladi. */
 export async function disconnect(teacherId: number): Promise<void> {
-  // Yozuv butunlay o'chirilmaydi — eski meeting'larning zoom_connection_id
-  // bog'lanishi (agar kerak bo'lib qolsa) buzilmasligi uchun holat
-  // 'revoked'ga o'tkaziladi, xolos.
-  await pool.query("UPDATE zoom_connections SET status = 'revoked' WHERE teacher_id = ?", [teacherId])
+  const row = await getConnectionRow(teacherId)
+  if (row) {
+    let revoked = false
+    try { revoked = await revokeAtZoom(decrypt(row.access_token_encrypted)) } catch { /* shifr buzilgan */ }
+    if (!revoked) {
+      try { await revokeAtZoom(decrypt(row.refresh_token_encrypted)) } catch { /* best-effort */ }
+    }
+  }
+  await purgeTeacherZoomData([teacherId])
+}
+
+/* ── Zoom Event Subscription (webhook) ─────────────────────────────────
+   Zoom Marketplace talabi: foydalanuvchi ilovani Zoom tomonidan olib
+   tashlasa ("app_deauthorized"), undan olingan ma'lumotlar o'chirilishi
+   shart. Har bir so'rov x-zm-signature bilan imzolanadi. */
+export function isZoomWebhookConfigured(): boolean {
+  return !!ZOOM_WEBHOOK_SECRET_TOKEN
+}
+
+function hmacHex(message: string): string {
+  return crypto.createHmac("sha256", ZOOM_WEBHOOK_SECRET_TOKEN).update(message).digest("hex")
+}
+
+/** x-zm-signature = "v0=" + HMAC_SHA256(secret, "v0:{timestamp}:{raw body}") */
+export function verifyZoomWebhook(rawBody: string, signature: string | undefined, timestamp: string | undefined): boolean {
+  if (!ZOOM_WEBHOOK_SECRET_TOKEN || !signature || !timestamp) return false
+  const ts = Number(timestamp)
+  // Eski so'rovni qayta yuborish (replay) hujumidan himoya — 5 daqiqa
+  if (!Number.isFinite(ts) || Math.abs(Date.now() - ts * (ts < 1e12 ? 1000 : 1)) > 5 * 60 * 1000) return false
+  const expected = `v0=${hmacHex(`v0:${timestamp}:${rawBody}`)}`
+  const a = Buffer.from(expected)
+  const b = Buffer.from(signature)
+  return a.length === b.length && crypto.timingSafeEqual(a, b)
+}
+
+/** endpoint.url_validation javobi (Zoom sozlamada "Validate" bosilganda) */
+export function zoomUrlValidationResponse(plainToken: string) {
+  return { plainToken, encryptedToken: hmacHex(plainToken) }
+}
+
+/** app_deauthorized — shu Zoom foydalanuvchisiga tegishli barcha ma'lumotni o'chiradi. */
+export async function handleZoomDeauthorization(zoomUserId: string): Promise<number> {
+  if (!zoomUserId) return 0
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT teacher_id FROM zoom_connections WHERE zoom_user_id = ?",
+    [zoomUserId]
+  )
+  const teacherIds = rows.map((r) => Number(r.teacher_id)).filter(Number.isFinite)
+  await purgeTeacherZoomData(teacherIds)
+  return teacherIds.length
 }
 
 /* ── Zoom Meeting yaratish ─────────────────────────────────────────── */

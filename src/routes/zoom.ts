@@ -1,4 +1,4 @@
-import { Router, Response } from "express"
+import { Router, Request, Response } from "express"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { teacherUserId } from "../services/teachingStore"
 import {
@@ -8,6 +8,10 @@ import {
   completeAuthorization,
   disconnect,
   getConnectionStatus,
+  isZoomWebhookConfigured,
+  verifyZoomWebhook,
+  zoomUrlValidationResponse,
+  handleZoomDeauthorization,
 } from "../services/zoomService"
 
 const router = Router()
@@ -51,6 +55,52 @@ router.get("/callback", async (req, res: Response): Promise<void> => {
   }
 })
 
+/* ── POST /api/integrations/zoom/webhook — Zoom Event Subscription.
+   server.ts'da express.json'DAN OLDIN, xom body bilan ulanadi: imzo xom
+   matn bo'yicha tekshiriladi. Zoom ilova sozlamasida shu URL va
+   "App Deauthorized" hodisasi yoqilgan bo'lishi kerak. ─────────────── */
+export async function zoomWebhookHandler(req: Request, res: Response): Promise<void> {
+  if (!isZoomWebhookConfigured()) {
+    res.status(503).json({ message: "ZOOM_WEBHOOK_SECRET_TOKEN sozlanmagan" })
+    return
+  }
+  const rawBody = Buffer.isBuffer(req.body) ? req.body.toString("utf8") : ""
+  let body: { event?: string; payload?: Record<string, unknown> }
+  try {
+    body = JSON.parse(rawBody || "{}")
+  } catch {
+    res.status(400).json({ message: "JSON noto'g'ri" })
+    return
+  }
+
+  const signature = req.header("x-zm-signature")
+  const timestamp = req.header("x-zm-request-timestamp")
+  if (!verifyZoomWebhook(rawBody, signature, timestamp)) {
+    res.status(401).json({ message: "Imzo noto'g'ri" })
+    return
+  }
+
+  if (body.event === "endpoint.url_validation") {
+    const plainToken = String(body.payload?.plainToken ?? "")
+    res.status(200).json(zoomUrlValidationResponse(plainToken))
+    return
+  }
+
+  if (body.event === "app_deauthorized") {
+    const zoomUserId = String(body.payload?.user_id ?? "")
+    try {
+      const removed = await handleZoomDeauthorization(zoomUserId)
+      console.log(`[zoom webhook] app_deauthorized user=${zoomUserId} — ${removed} ta ulanish ma'lumoti o'chirildi`)
+    } catch (err) {
+      console.error("[zoom webhook] deauthorization xato:", err instanceof Error ? err.message : err)
+      res.status(500).json({ message: "O'chirishda xato" })
+      return
+    }
+  }
+
+  res.status(200).json({ received: true })
+}
+
 router.use(authMiddleware)
 
 function requireTeacher(req: AuthRequest, res: Response): number | null {
@@ -79,9 +129,6 @@ router.get("/connect", async (req: AuthRequest, res: Response): Promise<void> =>
     return
   }
   const url = buildAuthorizationUrl(teacherId)
-  // Vaqtincha diagnostika — brauzer manzil satri qirqilib, code_challenge
-  // ko'rinmayotgani sabab, to'liq URL'ni serverning o'z logida ko'ramiz.
-  console.log(`[zoom connect] teacherId=${teacherId} url=${url}`)
   res.json({ success: true, data: { url } })
 })
 
