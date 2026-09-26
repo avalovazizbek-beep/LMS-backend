@@ -555,20 +555,18 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
     }
   } catch { /* moslashtirish xatosi bo'lsa ham davom etamiz */ }
 
-  // Start from lms_teacher_content so teachers without hemis_users entry still appear
-  const [rows] = await pool.query<RowDataPacket[]>(`
+  // Har bir ko'rsatkich alohida, indeksli so'rov bilan hisoblanadi va Node'da
+  // birlashtiriladi. Avval hammasi bitta JOIN'da edi: kontent × tugatgan
+  // talabalar × topshiriqlar × meetinglar × davomat qatorlari bir-biriga
+  // ko'payib (har o'qituvchiga millionlab qator), hemis_users esa OR + CAST
+  // bilan (indekssiz) bog'lanardi — ma'lumot ko'paygan sari sahifa
+  // daqiqalab yuklanardi. Natija o'sha-o'sha.
+
+  // 1) Kontent ko'rsatkichlari — noyob MAVZU (fan + tur + nom) bo'yicha:
+  //    bir mavzu 4 guruhda bo'lsa — 1 mavzu, videosi bo'lsa — 1 video.
+  const [contentRows] = await pool.query<RowDataPacket[]>(`
     SELECT
-      tc.teacher_user_id AS teacher_id,
-      COALESCE(
-        NULLIF(TRIM(MAX(hu.full_name)), ''),
-        NULLIF(TRIM(MAX(JSON_UNQUOTE(JSON_EXTRACT(hu.profile, '$.full_name')))), ''),
-        NULLIF(TRIM(MAX(JSON_UNQUOTE(JSON_EXTRACT(hu.profile, '$.name')))), ''),
-        NULLIF(TRIM(MAX(ps.full_name)), ''),
-        CONCAT('O\\'qituvchi #', tc.teacher_user_id)
-      ) AS full_name,
-      COALESCE(MAX(hu.updated_at), MAX(ps.login_at))                                 AS last_seen,
-      -- Hamma ustun bitta qoida bilan: noyob MAVZU (fan + tur + nom) bo'yicha.
-      -- Bir mavzu 4 guruhda bo'lsa — 1 mavzu, videosi bo'lsa — 1 video (4 emas).
+      tc.teacher_user_id AS tid,
       COUNT(DISTINCT CASE WHEN tc.topic_key IS NOT NULL AND NOT (tc.type='mavzu' AND tc.kind='topic') THEN ${TOPIC_IDENTITY_SQL} END) AS mavzular,
       COUNT(DISTINCT CASE WHEN tc.kind='video_lesson' THEN ${TOPIC_IDENTITY_SQL} END) AS videolar,
       COUNT(DISTINCT CASE WHEN tc.kind='audio'        THEN ${TOPIC_IDENTITY_SQL} END) AS audiolar,
@@ -576,54 +574,120 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
       COUNT(DISTINCT CASE WHEN tc.kind='qollanma'     THEN ${TOPIC_IDENTITY_SQL} END) AS qollanmalar,
       COUNT(DISTINCT CASE WHEN tc.type='exam' AND tc.topic_key IS NOT NULL THEN ${TOPIC_IDENTITY_SQL} END) AS testlar,
       COUNT(DISTINCT CASE WHEN tc.type='assignment' AND tc.topic_key IS NOT NULL THEN ${TOPIC_IDENTITY_SQL} END) AS amaliy,
-      COUNT(DISTINCT tc.group_id)                                                      AS guruhlar,
-      COUNT(DISTINCT COALESCE(cp.student_user_id, ma.user_id))                         AS students_completed,
-      COUNT(DISTINCT sub.student_user_id)                                              AS students_submitted,
-      COUNT(DISTINCT m.id)                                                             AS meeting_count
+      COUNT(DISTINCT tc.group_id) AS guruhlar
     FROM lms_teacher_content tc
     -- Qism qaysi mavzuga tegishli (nom/tur marker'dan) — TOPIC_IDENTITY_SQL uchun
     LEFT JOIN lms_teacher_content mk
       ON mk.topic_key = tc.topic_key AND mk.type = 'mavzu' AND mk.kind = 'topic'
      AND mk.teacher_user_id = tc.teacher_user_id
-    LEFT JOIN hemis_users hu
-      ON hu.teacher_user_id = tc.teacher_user_id
-      OR CAST(hu.hemis_id AS UNSIGNED) = tc.teacher_user_id
-    LEFT JOIN (
-      SELECT user_id, MAX(full_name) AS full_name, MAX(login_at) AS login_at
-      FROM lms_platform_sessions WHERE role = 'employee' GROUP BY user_id
-    ) ps ON ps.user_id = tc.teacher_user_id
-    LEFT JOIN lms_content_progress cp
-      ON cp.content_id = tc.id AND cp.completed = 1
-    LEFT JOIN lms_submissions sub
-      ON sub.content_id = tc.id
-    LEFT JOIN lms_meetings m
-      ON m.created_by_user_id = tc.teacher_user_id
-    LEFT JOIN lms_meeting_attendance ma
-      ON ma.meeting_id = m.id AND ma.group_id IS NOT NULL
     WHERE tc.is_active = 1
     GROUP BY tc.teacher_user_id
-    ORDER BY mavzular DESC, last_seen DESC
-    LIMIT 200
+  `)
+  const teacherIds = contentRows.map(r => Number(r.tid))
+  if (!teacherIds.length) {
+    res.json({ success: true, data: [] })
+    return
+  }
+
+  // 2) Tugatgan talabalar: kontentni tugatganlar YOKI meetingga qatnashganlar (birlashma)
+  const [completedRows] = await pool.query<RowDataPacket[]>(`
+    SELECT tid, COUNT(DISTINCT sid) AS n FROM (
+      SELECT tc.teacher_user_id AS tid, cp.student_user_id AS sid
+        FROM lms_content_progress cp
+        JOIN lms_teacher_content tc ON tc.id = cp.content_id AND tc.is_active = 1
+       WHERE cp.completed = 1
+      UNION
+      SELECT m.created_by_user_id AS tid, ma.user_id AS sid
+        FROM lms_meeting_attendance ma
+        JOIN lms_meetings m ON m.id = ma.meeting_id
+       WHERE ma.group_id IS NOT NULL AND m.created_by_user_id IN (?)
+    ) x
+    GROUP BY tid
+  `, [teacherIds])
+
+  // 3) Topshiriq yuborgan talabalar
+  const [submittedRows] = await pool.query<RowDataPacket[]>(`
+    SELECT tc.teacher_user_id AS tid, COUNT(DISTINCT sub.student_user_id) AS n
+      FROM lms_submissions sub
+      JOIN lms_teacher_content tc ON tc.id = sub.content_id AND tc.is_active = 1
+     GROUP BY tc.teacher_user_id
   `)
 
-  const data = rows.map(r => ({
-    hemisId: String(r.teacher_id),
-    fullName: r.full_name ?? `O'qituvchi #${r.teacher_id}`,
-    lastSeen: r.last_seen,
-    mavzular: Number(r.mavzular ?? 0),
-    videolar: Number(r.videolar ?? 0),
-    audiolar: Number(r.audiolar ?? 0),
-    taqdimotlar: Number(r.taqdimotlar ?? 0),
-    qollanmalar: Number(r.qollanmalar ?? 0),
-    testlar: Number(r.testlar ?? 0),
-    amaliy: Number(r.amaliy ?? 0),
-    guruhlar: Number(r.guruhlar ?? 0),
-    studentsCompleted: Number(r.students_completed ?? 0),
-    studentsSubmitted: Number(r.students_submitted ?? 0),
-    meetingCount: Number(r.meeting_count ?? 0),
-  }))
+  // 4) Meetinglar soni
+  const [meetingRows] = await pool.query<RowDataPacket[]>(`
+    SELECT created_by_user_id AS tid, COUNT(*) AS n
+      FROM lms_meetings WHERE created_by_user_id IN (?)
+     GROUP BY created_by_user_id
+  `, [teacherIds])
 
-  res.json({ success: true, data })
+  // 5) Ism va oxirgi faollik — hemis_users ikki yo'l bilan (teacher_user_id
+  //    yoki hemis_id = o'qituvchi ID), ikkalasi ham indeks bo'yicha
+  const [huRows] = await pool.query<RowDataPacket[]>(`
+    SELECT teacher_user_id, hemis_id, full_name,
+           JSON_UNQUOTE(JSON_EXTRACT(profile, '$.full_name')) AS profile_full_name,
+           JSON_UNQUOTE(JSON_EXTRACT(profile, '$.name')) AS profile_name,
+           updated_at
+      FROM hemis_users
+     WHERE teacher_user_id IN (?) OR (hemis_id IN (?) AND role = 'employee')
+  `, [teacherIds, teacherIds.map(String)])
+  const [psRows] = await pool.query<RowDataPacket[]>(`
+    SELECT user_id, MAX(full_name) AS full_name, MAX(login_at) AS login_at
+      FROM lms_platform_sessions
+     WHERE role = 'employee' AND user_id IN (?)
+     GROUP BY user_id
+  `, [teacherIds])
+
+  const countBy = (rows: RowDataPacket[]) => new Map(rows.map(r => [Number(r.tid), Number(r.n ?? 0)]))
+  const completedBy = countBy(completedRows)
+  const submittedBy = countBy(submittedRows)
+  const meetingsBy = countBy(meetingRows)
+  const psBy = new Map(psRows.map(r => [Number(r.user_id), r]))
+
+  // SQL'dagi MAX() bilan bir xil: bir nechta mos hemis_users qatoridan eng kattasi
+  const maxStr = (a: string | null, b: unknown) => {
+    const v = typeof b === "string" ? b.trim() : ""
+    return v && (!a || v > a) ? v : a
+  }
+  const huBy = new Map<number, { fullName: string | null; profileFull: string | null; profileName: string | null; updatedAt: Date | null }>()
+  for (const tid of teacherIds) {
+    const agg = { fullName: null as string | null, profileFull: null as string | null, profileName: null as string | null, updatedAt: null as Date | null }
+    for (const r of huRows) {
+      if (Number(r.teacher_user_id) !== tid && String(r.hemis_id) !== String(tid)) continue
+      agg.fullName = maxStr(agg.fullName, r.full_name)
+      agg.profileFull = maxStr(agg.profileFull, r.profile_full_name)
+      agg.profileName = maxStr(agg.profileName, r.profile_name)
+      const u = r.updated_at ? new Date(r.updated_at) : null
+      if (u && (!agg.updatedAt || u > agg.updatedAt)) agg.updatedAt = u
+    }
+    huBy.set(tid, agg)
+  }
+
+  const data = contentRows.map(r => {
+    const tid = Number(r.tid)
+    const hu = huBy.get(tid)
+    const ps = psBy.get(tid)
+    const psName = typeof ps?.full_name === "string" ? ps.full_name.trim() : ""
+    return {
+      hemisId: String(tid),
+      fullName: hu?.fullName || hu?.profileFull || hu?.profileName || psName || `O'qituvchi #${tid}`,
+      lastSeen: hu?.updatedAt ?? ps?.login_at ?? null,
+      mavzular: Number(r.mavzular ?? 0),
+      videolar: Number(r.videolar ?? 0),
+      audiolar: Number(r.audiolar ?? 0),
+      taqdimotlar: Number(r.taqdimotlar ?? 0),
+      qollanmalar: Number(r.qollanmalar ?? 0),
+      testlar: Number(r.testlar ?? 0),
+      amaliy: Number(r.amaliy ?? 0),
+      guruhlar: Number(r.guruhlar ?? 0),
+      studentsCompleted: completedBy.get(tid) ?? 0,
+      studentsSubmitted: submittedBy.get(tid) ?? 0,
+      meetingCount: meetingsBy.get(tid) ?? 0,
+    }
+  })
+  const seenMs = (v: unknown) => (v ? new Date(v as string).getTime() || 0 : 0)
+  data.sort((a, b) => b.mavzular - a.mavzular || seenMs(b.lastSeen) - seenMs(a.lastSeen))
+
+  res.json({ success: true, data: data.slice(0, 200) })
 })
 
 /* ── GET /api/admin/teacher-stats/:teacherId/topics — o'qituvchining
