@@ -117,8 +117,11 @@ export async function getUserAdminRole(req: AuthRequest): Promise<"admin" | "dea
   )
   const role = rows[0]?.lms_role
   const grantedRole = String(rows[0]?.hemis_role ?? "")
-  // Huquq boshqa turdagi hisobga (masalan xodimga) berilgan bo'lsa — talabaga o'tmaydi
-  if (isStudent && grantedRole && grantedRole !== "student") return null
+  // Huquq aynan shu turdagi hisobga berilgan bo'lishi shart. hemis_role bo'sh
+  // yozuvlar (hemis_users'da topilmagan foydalanuvchiga berilgan) — xodimniki
+  // hisoblanadi: aks holda xuddi shu raqamli ID'li talaba admin/dekan bo'lib
+  // qolardi (admin panel, dekanat/admin murojaatlari).
+  if (isStudent ? grantedRole !== "student" : grantedRole === "student") return null
   return role === "admin" || role === "dean" ? role : null
 }
 

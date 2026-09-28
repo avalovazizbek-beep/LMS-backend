@@ -138,13 +138,20 @@ export async function adminOwnersFor(module: AdminModule): Promise<NotificationO
   return [...owners.values()]
 }
 
-/** Guruh(lar)dagi talabalar — platformaga kirgan talabalar sessiyalaridan. */
+/** Guruh(lar)dagi talabalar — platformaga kirgan talabalar sessiyalaridan.
+ *  Talabaning faqat OXIRGI sessiyasidagi guruh hisobga olinadi: guruhi
+ *  o'zgargan talaba eski guruhining dars/muddat xabarlarini olmasligi uchun. */
 export async function studentOwnersInGroups(groupIds: number[]): Promise<NotificationOwner[]> {
   const ids = groupIds.filter((g) => Number.isFinite(g) && g > 0)
   if (!ids.length) return []
   const [rows] = await pool.query<RowDataPacket[]>(
-    "SELECT DISTINCT user_id FROM lms_platform_sessions WHERE role = 'student' AND group_id IN (?)",
-    [ids]
+    `SELECT s.user_id FROM lms_platform_sessions s
+     JOIN (SELECT user_id, MAX(id) AS last_id FROM lms_platform_sessions
+           WHERE role = 'student' AND group_id IS NOT NULL
+             AND user_id IN (SELECT user_id FROM lms_platform_sessions WHERE role = 'student' AND group_id IN (?))
+           GROUP BY user_id) l ON l.last_id = s.id
+     WHERE s.group_id IN (?)`,
+    [ids, ids]
   )
   return rows.map((r) => ({ role: "student", userId: Number(r.user_id) })).filter((o) => o.userId > 0)
 }

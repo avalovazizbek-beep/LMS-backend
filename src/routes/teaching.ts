@@ -6,7 +6,7 @@ import jwt from "jsonwebtoken"
 import express, { Router, Response } from "express"
 import { authMiddleware, requireRole, AuthRequest, AuthUser } from "../middleware/auth"
 import { pool } from "../services/db"
-import { createNotification, notifySafe, bumpGroupedSafe, type NotificationType } from "../services/notificationStore"
+import { createNotification, notifySafe, bumpGroupedSafe, studentOwnersInGroups, type NotificationType } from "../services/notificationStore"
 import { parseNumber } from "../services/meetingStore"
 import { syncTeacherFromHemis, employeeTeachesGroup, fetchTeacherGroupsForYear, fetchTeacherSubjectsFromSchedule, fetchTeacherGroupsFromSchedule } from "./hemis"
 import {
@@ -1653,12 +1653,8 @@ function notifyGradePending(teacherId: number, contentId: number, title: string)
 /** Guruhdagi (platformadan foydalangan) talabalarga yangi material haqida xabar beradi. */
 async function notifyGroupStudents(groupId: number, title: string, body: string, i18n?: { key: string; params?: Record<string, string | number> }) {
   try {
-    const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
-      "SELECT DISTINCT user_id FROM lms_platform_sessions WHERE group_id = ? AND role = 'student'",
-      [groupId]
-    )
-    for (const row of rows) {
-      await notifyUser("student", Number(row.user_id), "teacher", title, body, i18n)
+    for (const owner of await studentOwnersInGroups([groupId])) {
+      await notifyUser("student", owner.userId, "teacher", title, body, i18n)
     }
   } catch { /* best-effort */ }
 }
@@ -3172,6 +3168,28 @@ router.post("/notify-student", async (req: AuthRequest, res: Response): Promise<
 
   if (!studentName || !message) {
     res.status(400).json({ success: false, message: "studentName va message majburiy" }); return
+  }
+
+  // O'qituvchi faqat o'zi dars beradigan guruh talabasiga yoza oladi —
+  // aks holda istalgan xodim istalgan talabaga "O'qituvchidan xabar" yubora
+  // olardi. Admin (hisobot sahifasi) — cheklovsiz.
+  if (studentUserId !== null && !(await isAdminUser(req))) {
+    const [dir] = await pool.query<import("mysql2").RowDataPacket[]>(
+      "SELECT group_id FROM hemis_students_directory WHERE hemis_id = ? AND group_id IS NOT NULL LIMIT 1",
+      [studentUserId]
+    )
+    let studentGroupId = dir[0] ? Number(dir[0].group_id) : null
+    if (studentGroupId === null) {
+      const [ses] = await pool.query<import("mysql2").RowDataPacket[]>(
+        "SELECT group_id FROM lms_platform_sessions WHERE user_id = ? AND role = 'student' AND group_id IS NOT NULL ORDER BY id DESC LIMIT 1",
+        [studentUserId]
+      )
+      studentGroupId = ses[0] ? Number(ses[0].group_id) : null
+    }
+    const own = await getTeacherGroupIds(teacherUserId(req.user))
+    if (studentGroupId === null || !own.includes(studentGroupId)) {
+      res.status(403).json({ success: false, message: "Bu talaba siz dars beradigan guruhda emas" }); return
+    }
   }
 
   // Platforma ichidagi xabarnoma — talaba LMS'ga kirganda "Xabarnomalar" bo'limida
