@@ -242,6 +242,29 @@ io.on("connection", async (socket) => {
   }
 
   const room = `meeting:${meetingId}`
+
+  // Bitta foydalanuvchi — bitta ulanish. Boshqa oyna/qurilmadagi (yoki uzilgan
+  // tarmoqdan qolib ketgan) eski ulanishlari yopiladi: aks holda yangi ulanish
+  // eskisining mikrofonini "boshqa ishtirokchi" deb qabul qiladi — odam o'z
+  // ovozini kechikish bilan qayta eshitadi, boshqalar esa uni bir necha
+  // nusxada eshitadi (aks-sado va shovqin).
+  if (user.id) {
+    for (const other of await io.in(room).fetchSockets()) {
+      const otherUser = other.data.user as MeetingUser | undefined
+      if (other.id === socket.id || !otherUser || otherUser.id !== user.id || otherUser.role !== user.role) continue
+      other.data.replaced = true
+      for (const producerId of mediasoupService.cleanupPeer(meetingId, other.id)) {
+        io.to(room).emit("mediasoup:producerClosed", { producerId, socketId: other.id })
+      }
+      io.to(room).emit("participant:left", {
+        socketId: other.id, userId: user.id, fullName: user.fullName, role: user.role, groupId: user.groupId, status: "left",
+      })
+      other.emit("meeting:replaced")
+      other.leave(room)
+      other.disconnect(true)
+    }
+  }
+
   await joinMeeting(meeting, user)
   socket.join(room)
   socket.data.meetingJoined = true
@@ -475,7 +498,16 @@ io.on("connection", async (socket) => {
     })
   }
 
+  // O'qituvchi (darsni boshqaruvchi) — boshqa barcha ishtirokchilarning
+  // mikrofonini o'chiradi; ular keyin o'zlari qayta yoqishi mumkin.
+  socket.on("meeting:muteAll", () => {
+    if (!toMeetingResponse(meeting, user).permissions.canManageMeeting) return
+    socket.to(room).emit("meeting:forceMute", { by: user.fullName })
+  })
+
   socket.on("meeting:leave", async () => {
+    // Boshqa ulanish bilan almashtirilgan — foydalanuvchi darsda qolmoqda
+    if (socket.data.replaced) return
     await leaveMeeting(meetingId, user.id)
     cleanupMediasoupPeer()
     socket.to(room).emit("participant:left", {
@@ -492,6 +524,7 @@ io.on("connection", async (socket) => {
   })
 
   socket.on("disconnect", async () => {
+    if (socket.data.replaced) return
     await leaveMeeting(meetingId, user.id)
     cleanupMediasoupPeer()
     socket.to(room).emit("participant:left", {
