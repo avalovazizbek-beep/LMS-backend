@@ -1,7 +1,7 @@
 import type mysql from "mysql2/promise"
 import { pool, withHemisCache } from "./db"
 import { studentUserId } from "./teachingStore"
-import { fetchGroupRoster } from "../routes/hemis"
+import { fetchGroupRoster, type GroupRosterStudent } from "../routes/hemis"
 
 export type AttendanceStatus = "present" | "absent" | "excused" | "late"
 
@@ -30,13 +30,41 @@ export function sortByFullName<T extends { fullName: string }>(list: T[]): T[] {
   return [...list].sort((a, b) => nameCollator.compare(a.fullName.trim(), b.fullName.trim()))
 }
 
-export async function getGroupRoster(groupId: number): Promise<RosterStudent[]> {
-  const { data } = await withHemisCache(
-    `group-${groupId}`,
-    "attendance-roster",
-    () => fetchGroupRoster(groupId),
-    ROSTER_CACHE_TTL_MS
-  )
+/* Fan nomini solishtirish uchun: katta-kichik harf, bo'shliqlar va turli
+   tutuq belgilari (‘ ’ ʻ ` ') farqi hisobga olinmaydi */
+function normalizeSubject(name: string): string {
+  return name.toLowerCase().replace(/[‘’ʻʼ`´']/g, "'").replace(/\s+/g, " ").trim()
+}
+
+/** HEMIS jurnalidagi kabi faqat haqiqatan o'qiyotganlar: joriy semestrda
+    birorta fan biriktirilmagan talaba (chetlashtirish jarayonida, semestrga
+    o'tkazilmagan) chiqarib tashlanadi; fan nomi berilsa va HEMIS'da shu fan
+    topilsa — faqat shu fanga biriktirilganlar qoladi. Fan ma'lumoti yo'q
+    (eski kesh yoki HEMIS javob bermagan) bo'lsa ro'yxat o'zgarmaydi. */
+function filterEnrolled(data: GroupRosterStudent[], subjectName?: string): GroupRosterStudent[] {
+  if (!data.some((s) => Array.isArray(s.subjects))) return data
+  let list = data.filter((s) => !Array.isArray(s.subjects) || s.subjects.length > 0)
+  const wanted = subjectName ? normalizeSubject(subjectName) : ""
+  if (wanted && list.some((s) => s.subjects?.some((n) => normalizeSubject(n) === wanted))) {
+    list = list.filter((s) => !Array.isArray(s.subjects) || s.subjects.some((n) => normalizeSubject(n) === wanted))
+  }
+  return list.length ? list : data
+}
+
+async function cachedGroupRoster(groupId: number): Promise<GroupRosterStudent[]> {
+  try {
+    // v2 — fanlar (subjects) bilan; eski keshda ular yo'q edi, deploy'dan
+    // keyin darhol yangilanishi uchun kalit almashtirildi
+    return (await withHemisCache(`group-${groupId}`, "attendance-roster-v2", () => fetchGroupRoster(groupId), ROSTER_CACHE_TTL_MS)).data
+  } catch (issue) {
+    // HEMIS javob bermasa — eski (fansiz) kesh bo'lsa o'shani ishlatamiz
+    const legacy = await withHemisCache(`group-${groupId}`, "attendance-roster", () => Promise.reject(issue), ROSTER_CACHE_TTL_MS)
+    return legacy.data as GroupRosterStudent[]
+  }
+}
+
+export async function getGroupRoster(groupId: number, subjectName?: string): Promise<RosterStudent[]> {
+  const data = filterEnrolled(await cachedGroupRoster(groupId), subjectName)
   if (data.length) {
     return sortByFullName(data.map((s) => ({
       studentUserId: studentUserId({ id: s.hemisId }),

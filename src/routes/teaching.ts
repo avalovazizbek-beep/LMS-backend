@@ -2721,7 +2721,7 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
   }
 
   const [hemisRoster, existing, trainingType] = await Promise.all([
-    getGroupRoster(groupId).catch(() => [] as import("../services/attendanceStore").RosterStudent[]),
+    getGroupRoster(groupId, subjectName).catch(() => [] as import("../services/attendanceStore").RosterStudent[]),
     getAttendanceForGroupDate(groupId, subjectName, date),
     getTrainingTypeForGroupDate(groupId, subjectName, date),
   ])
@@ -2897,7 +2897,7 @@ router.get("/grades/roster", async (req: AuthRequest, res: Response): Promise<vo
   }
 
   const [roster, existing] = await Promise.all([
-    getGroupRoster(groupId),
+    getGroupRoster(groupId, subjectName),
     getGradeForGroupDate(groupId, subjectName, date),
   ])
 
@@ -3005,7 +3005,7 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
       return { key, idx: idx + 1, title: mavzuItem?.title ?? key, maxScore }
     })
 
-  const roster = await getGroupRoster(groupId)
+  const roster = await getGroupRoster(groupId, subjectName)
   if (!roster.length || !topics.length) {
     res.json({ success: true, data: { topics, students: [] } })
     return
@@ -3169,7 +3169,7 @@ router.get("/exam-results", async (req: AuthRequest, res: Response): Promise<voi
 
   const [subsPerExam, roster] = await Promise.all([
     Promise.all(exams.map(e => listSubmissions(e.id))),
-    getGroupRoster(groupId),
+    getGroupRoster(groupId, subjectName),
   ])
 
   const topics = exams.map((e, i) => ({

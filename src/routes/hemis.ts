@@ -522,6 +522,9 @@ export interface GroupRosterStudent {
   hemisId: number
   fullName: string
   studentIdNumber: string | null
+  /** Joriy semestrda shu talabaga biriktirilgan fanlar (HEMIS student-subject-list).
+      null — ma'lumot olinmadi, bunday holda ro'yxat filtrlanmaydi. */
+  subjects?: string[] | null
 }
 
 /** HEMIS'ning "o'quv yili" kodi — sentyabrdan boshlab yangi yil hisoblanadi
@@ -562,16 +565,62 @@ export async function employeeTeachesGroup(groupId: number, user?: AuthRequest["
   return false
 }
 
+/**
+ * Guruh talabalariga joriy semestrda biriktirilgan fanlar: hemisId → fan nomlari.
+ * HEMIS o'z davomat/baho jurnalini aynan shu biriktirishdan quradi — student-list
+ * esa statusi "O'qimoqda" bo'lgan hammani qaytaradi. O'qishdan chetlashtirish
+ * jarayonidagi yoki semestrga o'tkazilmagan talaba statusi 11 bo'lib tursa ham,
+ * unga fan biriktirilmagan bo'ladi va HEMIS jurnalida chiqmaydi (tekshirilgan:
+ * MN-M-126 — student-list 22 ta, student-subject-list 17 ta, HEMIS jurnali 17 ta).
+ * Ma'lumot topilmasa null qaytadi — chaqiruvchi filtrlamaydi.
+ */
+async function fetchGroupStudentSubjects(groupId: number): Promise<Map<number, string[]> | null> {
+  const currentYear = academicYearStart()
+  for (const year of [currentYear, currentYear - 1]) {
+    const items: unknown[] = []
+    let pageCount = 1
+    // Ketma-ket (parallel emas) — /v1/data/* ning o'z rate-limiti bor
+    for (let page = 1; page <= pageCount && page <= 10; page++) {
+      const res = await employeeDataPage("/v1/data/student-subject-list", {
+        _group: String(groupId), _education_year: String(year), limit: "200", page: String(page),
+      })
+      items.push(...(Array.isArray(res.items) ? res.items : normalizeDataItems(res.items)))
+      pageCount = numberValue(res.pagination.pageCount) ?? 1
+    }
+    if (!items.length) continue
+
+    // Faqat eng oxirgi (joriy) semestr: o'tgan semestrdan keyin chetlashtirilgan
+    // talabaning eski biriktirishlari hisobga olinmasligi kerak
+    const semesterOf = (r: Record<string, unknown>) => numberValue(r._semester) ?? 0
+    const latest = Math.max(...items.map((item) => semesterOf(asRecord(item))))
+    const byStudent = new Map<number, string[]>()
+    for (const item of items) {
+      const r = asRecord(item)
+      if (r.active === false || semesterOf(r) !== latest) continue
+      const studentId = numberValue(r._student)
+      if (!studentId) continue
+      const name = textValue(asRecord(asRecord(r.curriculumSubject).subject).name) ?? ""
+      byStudent.set(studentId, [...(byStudent.get(studentId) ?? []), name.trim()])
+    }
+    return byStudent.size ? byStudent : null
+  }
+  return null
+}
+
 export async function fetchGroupRoster(groupId: number): Promise<GroupRosterStudent[]> {
   const items = await employeeDataItems("/v1/data/student-list", { _group: String(groupId), limit: "200" })
   const list = Array.isArray(items) ? items : normalizeDataItems(items)
+  // Fanlar olinmasa ham ro'yxat qaytadi (filtrsiz) — asosiy oqim to'xtamasin
+  const subjects = await fetchGroupStudentSubjects(groupId).catch(() => null)
   return list
     .map((item) => {
       const record = asRecord(item)
+      const hemisId = numberValue(record.id) ?? 0
       return {
-        hemisId: numberValue(record.id) ?? 0,
+        hemisId,
         fullName: textValue(record.full_name, record.name) || "Talaba",
         studentIdNumber: textValue(record.student_id_number) || null,
+        subjects: subjects ? (subjects.get(hemisId) ?? []) : null,
       }
     })
     .filter((s) => s.hemisId > 0)
