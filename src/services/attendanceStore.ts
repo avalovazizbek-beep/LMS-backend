@@ -23,6 +23,13 @@ export interface RosterStudent {
   studentIdNumber: string | null
 }
 
+/* F.I.Sh. bo'yicha alifbo tartibi (Excel/HEMIS'dagi kabi lotin tartibida;
+   O‘/G‘ dagi tutuq belgisi va katta-kichik harf farqi hisobga olinmaydi). */
+const nameCollator = new Intl.Collator("en", { sensitivity: "base", ignorePunctuation: true, numeric: true })
+export function sortByFullName<T extends { fullName: string }>(list: T[]): T[] {
+  return [...list].sort((a, b) => nameCollator.compare(a.fullName.trim(), b.fullName.trim()))
+}
+
 export async function getGroupRoster(groupId: number): Promise<RosterStudent[]> {
   const { data } = await withHemisCache(
     `group-${groupId}`,
@@ -31,11 +38,11 @@ export async function getGroupRoster(groupId: number): Promise<RosterStudent[]> 
     ROSTER_CACHE_TTL_MS
   )
   if (data.length) {
-    return data.map((s) => ({
+    return sortByFullName(data.map((s) => ({
       studentUserId: studentUserId({ id: s.hemisId }),
       fullName: s.fullName,
       studentIdNumber: s.studentIdNumber,
-    }))
+    })))
   }
   // HEMIS has no record of this group (e.g. a locally-seeded demo group,
   // or a transient lookup miss) — fall back to whoever has actually
@@ -44,11 +51,11 @@ export async function getGroupRoster(groupId: number): Promise<RosterStudent[]> 
     `SELECT DISTINCT user_id, full_name FROM lms_platform_sessions WHERE group_id = ? AND role = 'student'`,
     [groupId]
   )
-  return rows.map((r) => ({
+  return sortByFullName(rows.map((r) => ({
     studentUserId: Number(r.user_id),
     fullName: String(r.full_name),
     studentIdNumber: null,
-  }))
+  })))
 }
 
 /* ── Davomatni saqlash ──────────────────────────────────────────────── */

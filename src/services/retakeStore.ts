@@ -1,5 +1,8 @@
 import type mysql from "mysql2/promise"
 import { pool, fromMysqlDate } from "./db"
+import { listSubmissions } from "./teachingStore"
+import { isExamPassed } from "./examStore"
+import { notifySafe } from "./notificationStore"
 
 export type RetakeGrantStatus = "active" | "used" | "revoked"
 
@@ -62,4 +65,39 @@ export async function revokeRetakeGrant(contentId: number, studentUserId: number
     "UPDATE lms_exam_retake_grants SET status='revoked', revoked_at=CURRENT_TIMESTAMP WHERE content_id=? AND student_user_id=? AND status='active'",
     [contentId, studentUserId]
   )
+}
+
+/** Tanlangan talabalarga bir martalik qo'shimcha urinish beradi — admin
+    paneli ham, o'qituvchi ham shu yo'ldan foydalanadi. Testdan allaqachon
+    o'tgan talaba o'tkazib yuboriladi (bahosi pasayib ketmasligi uchun).
+    Yangi ruxsat olgan talabaga bildirishnoma boradi. Nechta talabaga
+    ruxsat berilganini qaytaradi. */
+export async function grantRetakesForContent(
+  content: { id: number; title: string; maxScore: number | null },
+  studentUserIds: number[],
+  grantedBy: string | null,
+  reason?: string | null
+): Promise<number> {
+  const submissions = await listSubmissions(content.id)
+  const byStudent = new Map(submissions.map((s) => [s.studentUserId, s]))
+  let granted = 0
+  for (const studentId of new Set(studentUserIds)) {
+    const sub = byStudent.get(studentId)
+    if (sub && isExamPassed(sub.grade, content.maxScore)) continue
+    const already = await getActiveRetakeGrant(content.id, studentId)
+    await grantRetake(content.id, studentId, grantedBy, reason)
+    granted++
+    if (!already) {
+      notifySafe({
+        role: "student",
+        userId: studentId,
+        type: "teacher",
+        title: "Qayta urinish ruxsati berildi",
+        body: `${content.title}: sizga yana bir urinish berildi`,
+        i18nKey: "retakeGranted",
+        i18nParams: { title: content.title },
+      })
+    }
+  }
+  return granted
 }

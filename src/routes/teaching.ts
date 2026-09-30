@@ -50,6 +50,7 @@ import {
   getContentProgress,
   upsertContentProgress,
   isTopicReopened,
+  applyTopicReopen,
   findTopicMarker,
   setTopicReopen,
   updateTopicItems,
@@ -89,6 +90,7 @@ import {
   type AttendanceStatus,
   type AttendanceRecordInput,
   getGroupRoster,
+  sortByFullName,
   saveAttendance,
   getAttendanceForGroupDate,
   getTrainingTypeForGroupDate,
@@ -104,7 +106,7 @@ import {
   getGradeForGroupDate,
   getGroupGradeHistory,
 } from "../services/gradeStore"
-import { getActiveRetakeGrant, consumeRetakeGrant } from "../services/retakeStore"
+import { getActiveRetakeGrant, consumeRetakeGrant, grantRetakesForContent, revokeRetakeGrant } from "../services/retakeStore"
 import { isAdminUser } from "./admin"
 import { isDemoUser } from "../services/demoHemis"
 import { logAudit } from "../services/auditLog"
@@ -1024,7 +1026,7 @@ router.get("/content", async (req: AuthRequest, res: Response): Promise<void> =>
     res.json({ success: true, data: [] })
     return
   }
-  const items = await listTeacherContent({ type, groupId, subjectName })
+  const items = await applyTopicReopen(await listTeacherContent({ type, groupId, subjectName }))
   res.json({ success: true, data: items.map(presentForStudent) })
 })
 
@@ -1434,8 +1436,10 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
     const audioSection    = audio    ? { ...presentForStudent(audio),    progress: audioProgress,    sectionLocked: computeSectionLocked("audio") }    : null
     const theorySection   = theory   ? { ...presentForStudent(theory),   progress: theoryProgress,   sectionLocked: computeSectionLocked("theory") }   : null
     const qollanmaSection = qollanma ? { ...presentForStudent(qollanma), progress: qollanmaProgress, sectionLocked: computeSectionLocked("qollanma") } : null
-    const testSection     = test     ? { ...presentForStudent(test),     submission: testSubmission, maxScore, sectionLocked: computeSectionLocked("test") }             : null
-    const assignmentSection = assignment ? { ...presentForStudent(assignment), submission: assignmentSubmission, sectionLocked: computeSectionLocked("assignment") }    : null
+    // Qayta ochish belgisi faqat markerda — kartada qayta topshirish tugmasi chiqishi uchun ko'chiriladi
+    const topicReopened = marker?.isReopened === true
+    const testSection     = test     ? { ...presentForStudent(test),     isReopened: topicReopened, submission: testSubmission, maxScore, sectionLocked: computeSectionLocked("test") }             : null
+    const assignmentSection = assignment ? { ...presentForStudent(assignment), isReopened: topicReopened, submission: assignmentSubmission, sectionLocked: computeSectionLocked("assignment") }    : null
     // Youtube — ixtiyoriy bonus material, hech qachon qulflanmaydi (ketma-ket zanjirga kirmaydi)
     const youtubeSection = youtube ? { ...presentForStudent(youtube), sectionLocked: false } : null
 
@@ -1610,7 +1614,8 @@ router.get("/content/:id", async (req: AuthRequest, res: Response): Promise<void
     res.status(403).json({ success: false, message: "Sizga ruxsat yo'q" })
     return
   }
-  res.json({ success: true, data: presentForStudent(content) })
+  const [withReopen] = await applyTopicReopen([content])
+  res.json({ success: true, data: presentForStudent(withReopen) })
 })
 
 /* ── Avtomatik bildirishnoma — faqat platforma ichida ("Xabarnomalar"),
@@ -2067,6 +2072,49 @@ router.get("/content/:id/submissions", async (req: AuthRequest, res: Response): 
   res.json({ success: true, data: submissions })
 })
 
+/* ── POST /content/:id/retake-grants — o'qituvchi o'z testida tanlangan
+   (yiqilgan) talabalarga bittadan qo'shimcha urinish beradi. Muddat o'tgan
+   bo'lsa ham ishlaydi; testdan o'tgan talabalar o'tkazib yuboriladi. ───── */
+router.post("/content/:id/retake-grants", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  const id = numberValue(req.params.id)
+  const content = id !== null ? await getTeacherContent(id) : null
+  if (!content || content.type !== "exam" || content.teacherUserId !== teacherUserId(req.user)) {
+    res.status(404).json({ success: false, message: "Test topilmadi" })
+    return
+  }
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
+  const ids = Array.isArray(body.studentUserIds)
+    ? body.studentUserIds.map((v) => numberValue(v)).filter((n): n is number => n !== null)
+    : []
+  if (!ids.length) {
+    res.status(400).json({ success: false, message: "Talaba tanlanmagan" })
+    return
+  }
+  const granted = await grantRetakesForContent(content, ids, fullNameOf(req.user) || null, textValue(body.reason) || null)
+  res.json({ success: true, data: { granted }, message: `${granted} ta talabaga qayta urinish ruxsati berildi` })
+})
+
+/* ── DELETE /content/:id/retake-grants/:studentUserId — ruxsatni bekor qilish ── */
+router.delete("/content/:id/retake-grants/:studentUserId", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  const id = numberValue(req.params.id)
+  const studentId = numberValue(req.params.studentUserId)
+  const content = id !== null ? await getTeacherContent(id) : null
+  if (!content || studentId === null || content.teacherUserId !== teacherUserId(req.user)) {
+    res.status(404).json({ success: false, message: "Topilmadi" })
+    return
+  }
+  await revokeRetakeGrant(content.id, studentId)
+  res.json({ success: true, message: "Ruxsat bekor qilindi" })
+})
+
 /* ── PUT /submissions/:id/grade — baholash ─────────────────────────── */
 router.put("/submissions/:id/grade", async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.user?.role !== "employee") {
@@ -2188,18 +2236,18 @@ router.get("/content/:id/questions", async (req: AuthRequest, res: Response): Pr
   }
   const status = contentStatus(new Date(), content.availableFrom, content.deadline)
   const topicReopened = await isTopicReopened(content.topicKey)
-  if (status === "locked" || (status === "closed" && !topicReopened)) {
+  const sIdForSession = studentUserId(req.user)
+  // Admin/o'qituvchi shu talabaga qayta urinish ruxsati bergan bo'lsa (retake
+  // grant) — muddat o'tgan bo'lsa ham, urinishlar tugagan bo'lsa ham ochiladi
+  const activeGrant = await getActiveRetakeGrant(content.id, sIdForSession)
+  if (status === "locked" || (status === "closed" && !topicReopened && !activeGrant)) {
     res.status(403).json({ success: false, message: "Imtihon hozircha ochiq emas" })
     return
   }
-  const sIdForSession = studentUserId(req.user)
 
   // Oldingi urinishni va limitni tekshirish
   const prevSubmission = await getSubmissionForStudent(content.id, sIdForSession)
   const maxAttempts = content.attemptsCount && content.attemptsCount > 0 ? content.attemptsCount : null
-  // Admin qayta urinish ruxsati bergan bo'lsa (retake grant) yoki mavzu qayta
-  // ochilgan bo'lsa, limitga qaramasdan o'tkaziladi
-  const activeGrant = maxAttempts !== null ? await getActiveRetakeGrant(content.id, sIdForSession) : null
   const attemptsLeft = maxAttempts === null
     ? true
     : (prevSubmission ? prevSubmission.attemptsUsed < maxAttempts : true) || !!activeGrant || topicReopened
@@ -2343,12 +2391,15 @@ router.post("/content/:id/exam-submit", async (req: AuthRequest, res: Response):
   }
   const status = contentStatus(new Date(), content.availableFrom, content.deadline)
   const topicReopened = await isTopicReopened(content.topicKey)
-  if (status === "locked" || (status === "closed" && !topicReopened)) {
+  const sId = studentUserId(req.user)
+  // Admin/o'qituvchi bergan qayta urinish ruxsati (retake grant) — muddat va
+  // urinishlar chegarasidan qat'i nazar bitta qo'shimcha topshirish
+  const activeGrant = await getActiveRetakeGrant(content.id, sId)
+  if (status === "locked" || (status === "closed" && !topicReopened && !activeGrant)) {
     res.status(403).json({ success: false, message: "Imtihon hozircha ochiq emas yoki muddati tugagan" })
     return
   }
 
-  const sId = studentUserId(req.user)
   const existing = await getSubmissionForStudent(content.id, sId)
 
   // Agar talaba allaqachon o'tish balini olgan bo'lsa — qayta urinishga yo'l qo'ymaslik
@@ -2363,11 +2414,9 @@ router.post("/content/:id/exam-submit", async (req: AuthRequest, res: Response):
     }
   }
 
-  // Urinishlar limitini tekshirish (0 yoki null = cheksiz)
+  // Urinishlar limitini tekshirish (0 yoki null = cheksiz). Qayta urinish
+  // ruxsati bo'lsa yoki mavzu qayta ochilgan bo'lsa, limitga qaramasdan o'tkaziladi
   const maxAttempts = content.attemptsCount && content.attemptsCount > 0 ? content.attemptsCount : null
-  // Admin qayta urinish ruxsati bergan bo'lsa (retake grant) yoki mavzu qayta
-  // ochilgan bo'lsa, limitga qaramasdan o'tkaziladi
-  const activeGrant = maxAttempts !== null ? await getActiveRetakeGrant(content.id, sId) : null
   if (existing && maxAttempts !== null && existing.attemptsUsed >= maxAttempts && !activeGrant && !topicReopened) {
     res.status(409).json({
       success: false,
@@ -2441,13 +2490,15 @@ router.get("/content/:id/adaptive/next", async (req: AuthRequest, res: Response)
     res.status(404).json({ success: false, message: "Topilmadi" })
     return
   }
+  const sId = studentUserId(req.user)
   const status = contentStatus(new Date(), content.availableFrom, content.deadline)
-  if (status === "locked" || (status === "closed" && !(await isTopicReopened(content.topicKey)))) {
+  const topicReopened = await isTopicReopened(content.topicKey)
+  const activeGrant = await getActiveRetakeGrant(content.id, sId)
+  if (status === "locked" || (status === "closed" && !topicReopened && !activeGrant)) {
     res.status(403).json({ success: false, message: "Imtihon hozircha ochiq emas" })
     return
   }
 
-  const sId = studentUserId(req.user)
   const pool = await listQuestions(content.id)
   if (!pool.length) {
     res.status(400).json({ success: false, message: "Bu imtihon uchun savollar mavjud emas" })
@@ -2456,6 +2507,21 @@ router.get("/content/:id/adaptive/next", async (req: AuthRequest, res: Response)
 
   const state = await getAdaptiveState(content.id, sId)
   const total = adaptiveTotal(content, pool.length)
+
+  // Yangi urinish boshlanayotgan bo'lsa — oddiy testdagi kabi o'tgan baho va
+  // urinishlar chegarasi tekshiriladi (avval moslashuvchan testda cheklanmasdi)
+  if (!state.answers.length && !state.currentQuestionId) {
+    const existing = await getSubmissionForStudent(content.id, sId)
+    if (existing && isExamPassed(existing.grade, content.maxScore)) {
+      res.status(409).json({ success: false, message: "Siz bu testni allaqachon muvaffaqiyatli topshirdingiz" })
+      return
+    }
+    const maxAttempts = content.attemptsCount && content.attemptsCount > 0 ? content.attemptsCount : null
+    if (existing && maxAttempts !== null && existing.attemptsUsed >= maxAttempts && !activeGrant && !topicReopened) {
+      res.status(409).json({ success: false, message: `Siz bu imtihonga ${maxAttempts} marta urinib bo'ldingiz` })
+      return
+    }
+  }
 
   if (state.answers.length >= total) {
     res.json({ success: true, data: { done: true, progress: { answered: state.answers.length, total } } })
@@ -2503,13 +2569,14 @@ router.post("/content/:id/adaptive/answer", async (req: AuthRequest, res: Respon
     res.status(404).json({ success: false, message: "Topilmadi" })
     return
   }
+  const sId = studentUserId(req.user)
   const status = contentStatus(new Date(), content.availableFrom, content.deadline)
-  if (status === "locked" || (status === "closed" && !(await isTopicReopened(content.topicKey)))) {
+  const activeGrant = await getActiveRetakeGrant(content.id, sId)
+  if (status === "locked" || (status === "closed" && !activeGrant && !(await isTopicReopened(content.topicKey)))) {
     res.status(403).json({ success: false, message: "Imtihon hozircha ochiq emas" })
     return
   }
 
-  const sId = studentUserId(req.user)
   const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
   const questionId = numberValue(body.questionId)
   const selectedIndex = numberValue(body.selectedIndex)
@@ -2545,6 +2612,7 @@ router.post("/content/:id/adaptive/answer", async (req: AuthRequest, res: Respon
 
   if (!next) {
     const { submission, score } = await finalizeAdaptiveExam(content.id, sId, fullNameOf(req.user), studentGroupId(req.user), nextState, content.maxScore)
+    if (activeGrant) await consumeRetakeGrant(content.id, sId)
     await deleteExamSession(content.id, sId)
     res.json({ success: true, data: { done: true, correct, submission, maxScore: content.maxScore, score } })
     return
@@ -2666,11 +2734,11 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
        WHERE group_id = ? AND LOWER(subject_name) = LOWER(?) ORDER BY student_full_name`,
       [groupId, subjectName]
     )
-    roster = attRows.map(r => ({
+    roster = sortByFullName(attRows.map(r => ({
       studentUserId: Number(r.student_user_id),
       fullName: String(r.student_full_name),
       studentIdNumber: null,
-    }))
+    })))
   }
 
   const data = roster.map((s) => {

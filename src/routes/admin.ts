@@ -7,7 +7,7 @@ import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
 import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen, getTeacherGroupIds } from "../services/teachingStore"
 import { listQuestions, isExamPassed } from "../services/examStore"
-import { grantRetake, revokeRetakeGrant } from "../services/retakeStore"
+import { grantRetakesForContent, revokeRetakeGrant } from "../services/retakeStore"
 import {
   listAllForAdmin as listAllAnnouncements,
   createTextOnly as createTextOnlyAnnouncement,
@@ -1608,6 +1608,8 @@ router.get("/teacher-topics-list", requirePermission("retake", "view"), async (r
         reopenedBy: marker.reopenedBy,
         hasTest: !!test,
         testId: test?.id ?? null,
+        testMaxScore: test?.maxScore ?? null,
+        testAttemptsCount: test?.attemptsCount ?? null,
         hasAssignment: !!assignment,
         assignmentId: assignment?.id ?? null,
       }
@@ -1836,16 +1838,7 @@ router.post("/content/:id/retake-grants", requirePermission("retake", "create"),
   if (!ids.length) { res.status(400).json({ success: false, message: "studentUserIds majburiy" }); return }
 
   const grantedBy = textVal(String(req.user?.fullName ?? ""), String(req.user?.username ?? ""))
-  const submissions = await listSubmissions(content.id)
-  const byStudent = new Map(submissions.map(s => [s.studentUserId, s]))
-
-  let granted = 0
-  for (const studentId of ids) {
-    const sub = byStudent.get(studentId)
-    if (sub && isExamPassed(sub.grade, content.maxScore)) continue
-    await grantRetake(content.id, studentId, grantedBy || null, body.reason)
-    granted++
-  }
+  const granted = await grantRetakesForContent(content, ids, grantedBy || null, body.reason)
   void logAudit(req, "retake.grant", "retake", String(id), { studentIds: ids, reason: body.reason ?? null, granted })
   res.json({ success: true, message: `${granted} ta talabaga qayta urinish ruxsati berildi` })
 })

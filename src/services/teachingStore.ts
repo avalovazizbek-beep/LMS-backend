@@ -628,6 +628,22 @@ export async function isTopicReopened(topicKey: string | null): Promise<boolean>
   return marker?.isReopened === true
 }
 
+/** "Qayta ochilgan" belgisi faqat mavzu markerida turadi — talabaga
+    beriladigan test/topshiriq yozuvlariga ham ko'chiriladi, aks holda
+    kartada "muddat o'tgan / urinishlar tugagan" ko'rinib, qayta topshirish
+    tugmasi chiqmay qolardi (backend esa qabul qilardi). */
+export async function applyTopicReopen<T extends TeacherContentRecord>(items: T[]): Promise<T[]> {
+  const keys = [...new Set(items.map((i) => i.topicKey).filter((k): k is string => !!k))]
+  if (!keys.length) return items
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT DISTINCT topic_key FROM lms_teacher_content
+     WHERE type = 'mavzu' AND kind = 'topic' AND is_reopened = 1 AND topic_key IN (?)`,
+    [keys]
+  )
+  const reopened = new Set(rows.map((r) => String(r.topic_key)))
+  return items.map((i) => (i.topicKey && reopened.has(i.topicKey) ? { ...i, isReopened: true } : i))
+}
+
 /** Mavzuni "qayta ochish" — shu mavzudagi test/topshiriqni deadline/urinish
     chegarasidan qat'i nazar qayta topshirishga ruxsat beradi (allaqachon
     o'tgan baho esa hech qachon qayta yozilmaydi — bu boshqa joyda tekshiriladi). */
