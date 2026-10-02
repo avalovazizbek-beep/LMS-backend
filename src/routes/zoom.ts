@@ -119,11 +119,17 @@ router.get("/status", async (req: AuthRequest, res: Response): Promise<void> => 
   res.json({ success: true, data: { ...status, configured: isZoomConfigured() } })
 })
 
-/* ── GET /api/integrations/zoom/connect — Zoom authorize URL'ini qaytaradi
-   (frontend shu URL'ga window.location bilan o'tadi) ─────────────────── */
+/* ── GET /api/integrations/zoom/connect?ageConfirmed=1 — Zoom authorize
+   URL'ini qaytaradi (frontend shu URL'ga window.location bilan o'tadi).
+   18+ tasdig'i faqat frontend checkbox'ida qolmasligi uchun shu yerda
+   ham talab qilinadi — Zoom EDU age-gate talabi. ────────────────────── */
 router.get("/connect", async (req: AuthRequest, res: Response): Promise<void> => {
   const teacherId = requireTeacher(req, res)
   if (teacherId === null) return
+  if (req.query.ageConfirmed !== "1") {
+    res.status(400).json({ success: false, message: "18 yoshdan kattaligingizni tasdiqlang" })
+    return
+  }
   if (!isZoomConfigured()) {
     res.status(503).json({ success: false, message: "Zoom integratsiyasi hali serverda sozlanmagan" })
     return

@@ -264,11 +264,15 @@ function expiresAtToMysql(date: Date): string {
 }
 
 /** Zoom OAuth callback'da chaqiriladi — kod token'larga almashtiriladi,
- *  Zoom foydalanuvchi ma'lumoti olinadi va shu teacher bilan bog'lanadi. */
+ *  Zoom foydalanuvchi ma'lumoti olinadi va shu teacher bilan bog'lanadi.
+ *  state faqat /connect'da 18+ tasdig'i bilan imzolanadi, shuning uchun
+ *  bu yerga yetib kelgan har bir ulanish o'sha tasdiqdan o'tgan —
+ *  age_confirmed_at shu paytni qayd etadi (Zoom EDU age-gate talabi). */
 export async function completeAuthorization(teacherId: number, code: string, codeVerifier: string): Promise<{ email: string }> {
   const tokens = await exchangeCodeForTokens(code, codeVerifier)
   const zoomUser = await fetchZoomUser(tokens.access_token)
   await persistTokens(teacherId, tokens, { zoomUserId: zoomUser.id, zoomAccountId: zoomUser.account_id ?? null, zoomEmail: zoomUser.email })
+  await pool.query(`UPDATE zoom_connections SET age_confirmed_at = NOW() WHERE teacher_id = ?`, [teacherId])
   return { email: zoomUser.email }
 }
 

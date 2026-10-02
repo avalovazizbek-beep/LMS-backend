@@ -390,6 +390,7 @@ export async function initDatabase() {
       UNIQUE KEY uq_zoom_teacher (teacher_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
+  await execIgnoreDuplicate(`ALTER TABLE zoom_connections ADD COLUMN age_confirmed_at DATETIME NULL AFTER scope`)
 
   await exec(`
     CREATE TABLE IF NOT EXISTS lms_meeting_zoom (
