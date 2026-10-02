@@ -53,6 +53,15 @@ const app = express()
 // Nginx/reverse-proxy ortida haqiqiy klient IP'sini X-Forwarded-For'dan olish uchun
 // (audit log yozuvlari uchun kerak — aks holda hammasi proksi IP'si bo'lib qolardi)
 app.set("trust proxy", true)
+// "X-Powered-By: Express" texnologiyani oshkor qiladi; qolgan sarlavhalar —
+// audit skanerlari tekshiradigan asosiy himoyalar (MIME sniffing, iframe).
+app.disable("x-powered-by")
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff")
+  res.setHeader("X-Frame-Options", "SAMEORIGIN")
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin")
+  next()
+})
 const PORT = process.env.PORT || 5000
 const FRONTEND_ORIGIN = process.env.FRONTEND_URL || "http://localhost:3000"
 const ALLOWED_ORIGINS = [
