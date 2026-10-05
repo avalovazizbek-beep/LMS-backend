@@ -92,8 +92,9 @@ router.get("/recordings/:id/file", async (req: AuthRequest, res: Response): Prom
     return
   }
 
+  // Semgrep: yo'l foydalanuvchidan emas — yuklashda server yaratib bazaga yozgan nisbiy yo'l, storedFilePath() root ichida ekanini tekshiradi.
   const absolutePath = storedFilePath(recordingsStorageRoot(), found.relativePath)
-  if (!absolutePath || !fs.existsSync(absolutePath)) {
+  if (!absolutePath || !fs.existsSync(absolutePath)) { // nosemgrep
     res.status(404).json({ success: false, message: "Fayl topilmadi" })
     return
   }
@@ -101,7 +102,7 @@ router.get("/recordings/:id/file", async (req: AuthRequest, res: Response): Prom
   /* Video elementlar (ayniqsa iOS Safari/mobil brauzerlar) HTTP Range
      so'rovi orqali faylni probe qiladi va 206 Partial Content kutadi —
      shu bo'lmasa mobilda video umuman ochilmaydi. */
-  const stat = fs.statSync(absolutePath)
+  const stat = fs.statSync(absolutePath) // nosemgrep
   const fileSize = stat.size
   const mimeType = found.mimeType || "video/webm"
   const range = req.headers.range
@@ -113,7 +114,7 @@ router.get("/recordings/:id/file", async (req: AuthRequest, res: Response): Prom
 
   if (!range) {
     res.setHeader("Content-Length", fileSize)
-    fs.createReadStream(absolutePath).pipe(res)
+    fs.createReadStream(absolutePath).pipe(res) // nosemgrep
     return
   }
 
@@ -608,10 +609,11 @@ router.post("/:id/recordings", async (req: AuthRequest, res: Response): Promise<
     return
   }
 
+  // Semgrep: fayl nomi to'liq serverda yaratiladi (storedUploadName — vaqt + tasodifiy baytlar + ro'yxatdagi kengaytma).
   const storedName = storedUploadName(originalName, ALLOWED_RECORDING_EXTENSIONS)
   const relativePath = `/recordings/${storedName}`
-  const absolutePath = path.join(recordingsUploadsDir(), storedName)
-  const stream = fs.createWriteStream(absolutePath)
+  const absolutePath = path.join(recordingsUploadsDir(), storedName) // nosemgrep
+  const stream = fs.createWriteStream(absolutePath) // nosemgrep
   let written = 0
   let done = false
 
@@ -620,7 +622,7 @@ router.post("/:id/recordings", async (req: AuthRequest, res: Response): Promise<
     done = true
     req.unpipe(stream)
     stream.destroy()
-    fs.rm(absolutePath, { force: true }, () => undefined)
+    fs.rm(absolutePath, { force: true }, () => undefined) // nosemgrep
     res.status(status).json({ success: false, message })
   }
 

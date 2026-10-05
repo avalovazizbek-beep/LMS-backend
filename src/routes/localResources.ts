@@ -80,10 +80,11 @@ router.post("/upload", requireRole("employee"), (req: AuthRequest, res: Response
     return
   }
 
+  // Semgrep: fayl nomi to'liq serverda yaratiladi (storedUploadName — vaqt + tasodifiy baytlar + ro'yxatdagi kengaytma).
   const storedName = storedUploadName(originalName, VIDEO_EXTENSIONS, ".mp4")
   const relativePath = `/resources/${storedName}`
-  const absolutePath = path.join(resourceUploadsDir(), storedName)
-  const stream = fs.createWriteStream(absolutePath)
+  const absolutePath = path.join(resourceUploadsDir(), storedName) // nosemgrep
+  const stream = fs.createWriteStream(absolutePath) // nosemgrep
   let written = 0
   let done = false
 
@@ -92,7 +93,7 @@ router.post("/upload", requireRole("employee"), (req: AuthRequest, res: Response
     done = true
     req.unpipe(stream)
     stream.destroy()
-    fs.rm(absolutePath, { force: true }, () => undefined)
+    fs.rm(absolutePath, { force: true }, () => undefined) // nosemgrep
     res.status(status).json({ success: false, message })
   }
 

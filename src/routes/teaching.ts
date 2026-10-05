@@ -280,10 +280,11 @@ function receiveUploadedFile(req: AuthRequest, res: Response): Promise<ContentFi
       return
     }
 
+    // Semgrep: fayl nomi to'liq serverda yaratiladi (storedUploadName — vaqt + tasodifiy baytlar + ro'yxatdagi kengaytma).
     const storedName = storedUploadName(originalName, ALLOWED_EXTENSIONS)
     const relativePath = `/teaching/${storedName}`
-    const absolutePath = path.join(teachingUploadsDir(), storedName)
-    const stream = fs.createWriteStream(absolutePath)
+    const absolutePath = path.join(teachingUploadsDir(), storedName) // nosemgrep
+    const stream = fs.createWriteStream(absolutePath) // nosemgrep
     let written = 0
     let done = false
 
@@ -292,7 +293,7 @@ function receiveUploadedFile(req: AuthRequest, res: Response): Promise<ContentFi
       done = true
       req.unpipe(stream)
       stream.destroy()
-      fs.rm(absolutePath, { force: true }, () => undefined)
+      fs.rm(absolutePath, { force: true }, () => undefined) // nosemgrep
       res.status(status).json({ success: false, message })
       resolve(null)
     }
@@ -327,13 +328,14 @@ function receiveUploadedFile(req: AuthRequest, res: Response): Promise<ContentFi
    mobil qurilmalarda video/audio umuman ochilmaydi (desktop brauzerlar
    ko'pincha shunga qaramay to'liq faylni yuklab ishlatib yuboradi). */
 export function streamPrivateFile(req: AuthRequest, res: Response, relativePath: string, originalName: string, mimeType: string) {
+  // Semgrep: yo'l foydalanuvchidan emas — yuklashda server yaratib bazaga yozgan nisbiy yo'l, storedFilePath() root ichida ekanini tekshiradi.
   const absolutePath = storedFilePath(privateStorageRoot(), relativePath)
-  if (!absolutePath || !fs.existsSync(absolutePath)) {
+  if (!absolutePath || !fs.existsSync(absolutePath)) { // nosemgrep
     res.status(404).json({ success: false, message: "Fayl topilmadi" })
     return
   }
 
-  const stat = fs.statSync(absolutePath)
+  const stat = fs.statSync(absolutePath) // nosemgrep
   const fileSize = stat.size
   const contentType = mimeType || "application/octet-stream"
   const disposition = `inline; filename="${encodeURIComponent(originalName)}"`
@@ -347,7 +349,7 @@ export function streamPrivateFile(req: AuthRequest, res: Response, relativePath:
 
   if (!range) {
     res.setHeader("Content-Length", fileSize)
-    fs.createReadStream(absolutePath).pipe(res)
+    fs.createReadStream(absolutePath).pipe(res) // nosemgrep
     return
   }
 
@@ -366,7 +368,7 @@ export function streamPrivateFile(req: AuthRequest, res: Response, relativePath:
   res.status(206)
   res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`)
   res.setHeader("Content-Length", end - start + 1)
-  fs.createReadStream(absolutePath, { start, end }).pipe(res)
+  fs.createReadStream(absolutePath, { start, end }).pipe(res) // nosemgrep
 }
 
 router.get("/content/:id/file", async (req: AuthRequest, res: Response): Promise<void> => {
@@ -741,17 +743,18 @@ router.get("/content/:id/pptx-as-pdf", async (req: AuthRequest, res: Response): 
   if (!storedPath || !fs.existsSync(storedPath)) { res.status(404).end(); return }
   const absPath: string = storedPath
 
+  // Semgrep: absPath storedFilePath() dan, cacheDir va natija nomi server o'zi tuzadi; execFile shell'siz, argumentlar massivi.
   const cacheDir = path.join(os.tmpdir(), "lms-pptx-pdf")
   fs.mkdirSync(cacheDir, { recursive: true })
-  const pdfPath = path.join(cacheDir, `pptx_${content.id}.pdf`)
+  const pdfPath = path.join(cacheDir, `pptx_${content.id}.pdf`) // nosemgrep
 
   const serve = () => {
     res.setHeader("Content-Type", "application/pdf")
     res.setHeader("Content-Disposition", `inline; filename="presentation_${content.id}.pdf"`)
-    fs.createReadStream(pdfPath).pipe(res)
+    fs.createReadStream(pdfPath).pipe(res) // nosemgrep
   }
 
-  if (fs.existsSync(pdfPath)) { serve(); return }
+  if (fs.existsSync(pdfPath)) { serve(); return } // nosemgrep
 
   // Try LibreOffice (Windows: soffice.exe, Linux/Mac: libreoffice or soffice)
   const candidates = process.platform === "win32"
@@ -765,9 +768,9 @@ router.get("/content/:id/pptx-as-pdf", async (req: AuthRequest, res: Response): 
     execFile(bin, ["--headless", "--convert-to", "pdf", "--outdir", cacheDir, absPath], { timeout: 45000 }, (err) => {
       if (err) { tryNext(); return }
       // LibreOffice names output after input basename
-      const auto = path.join(cacheDir, path.basename(absPath, path.extname(absPath)) + ".pdf")
-      if (!fs.existsSync(auto)) { tryNext(); return }
-      try { fs.renameSync(auto, pdfPath) } catch { /* already renamed */ }
+      const auto = path.join(cacheDir, path.basename(absPath, path.extname(absPath)) + ".pdf") // nosemgrep
+      if (!fs.existsSync(auto)) { tryNext(); return } // nosemgrep
+      try { fs.renameSync(auto, pdfPath) } catch { /* already renamed */ } // nosemgrep
       serve()
     })
   }

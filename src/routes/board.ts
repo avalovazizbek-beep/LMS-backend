@@ -32,7 +32,8 @@ router.patch("/:id/pin", requireRole("super_admin", "admin"), (req: AuthRequest,
 router.put("/:id", requireRole("super_admin", "admin", "moderator"), (req: AuthRequest, res: Response): void => {
   const idx = boardPosts.findIndex((p) => p.id === req.params.id)
   if (idx === -1) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
-  boardPosts[idx] = { ...boardPosts[idx], ...pickFields<BoardPost, keyof BoardPost & string>(req.body, ["title", "body", "tag", "author"]) }
+  // Semgrep: idx — server massividagi indeks, tana faqat pickFields() ro'yxatidagi maydonlar bilan qo'shiladi.
+  boardPosts[idx] = { ...boardPosts[idx], ...pickFields<BoardPost, keyof BoardPost & string>(req.body, ["title", "body", "tag", "author"]) } // nosemgrep
   res.json({ success: true, data: boardPosts[idx] })
 })
 

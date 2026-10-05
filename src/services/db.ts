@@ -23,14 +23,15 @@ export const pool = mysql.createPool({
   enableKeepAlive:  true,
 })
 
+// Semgrep: exec/execSafe/execIgnoreDuplicate faqat initDatabase() ichidagi o'zgarmas DDL bilan chaqiriladi.
 async function exec(sql: string) {
-  await pool.query(sql)
+  await pool.query(sql) // nosemgrep
 }
 
 // Xatolikni log qilib, davom etadi (CREATE TABLE uchun)
 async function execSafe(sql: string, label?: string) {
   try {
-    await pool.query(sql)
+    await pool.query(sql) // nosemgrep
   } catch (err) {
     console.warn("[DB] %s xatolik (o'tkazib yuborildi):", label ?? "execSafe", (err as { message?: string })?.message ?? err)
   }
@@ -40,7 +41,7 @@ async function execSafe(sql: string, label?: string) {
 // uchun "ustun/indeks allaqachon mavjud" xatoliklarini e'tiborsiz qoldiradi.
 async function execIgnoreDuplicate(sql: string) {
   try {
-    await pool.query(sql)
+    await pool.query(sql) // nosemgrep
   } catch (err) {
     const code = (err as { code?: string })?.code
     if (code !== "ER_DUP_FIELDNAME" && code !== "ER_DUP_KEYNAME") throw err

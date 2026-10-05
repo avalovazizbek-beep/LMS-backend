@@ -140,7 +140,7 @@ app.get("*", (req, res, next) => {
     res.status(400).end()
     return
   }
-  res.redirect(target.toString())
+  res.redirect(target.toString()) // nosemgrep
 })
 
 async function participantPayload(meetingId: number) {

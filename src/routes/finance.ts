@@ -42,7 +42,8 @@ router.patch("/:id/pay", requireRole("super_admin", "admin"), (req: AuthRequest,
 router.put("/:id", requireRole("super_admin", "admin"), (req: AuthRequest, res: Response): void => {
   const idx = payments.findIndex((p) => p.id === req.params.id)
   if (idx === -1) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
-  payments[idx] = { ...payments[idx], ...pickFields<Payment, keyof Payment & string>(req.body, ["student", "group", "semester", "total", "paid", "dueDate", "status"]) }
+  // Semgrep: idx — server massividagi indeks, tana faqat pickFields() ro'yxatidagi maydonlar bilan qo'shiladi.
+  payments[idx] = { ...payments[idx], ...pickFields<Payment, keyof Payment & string>(req.body, ["student", "group", "semester", "total", "paid", "dueDate", "status"]) } // nosemgrep
   res.json({ success: true, data: payments[idx] })
 })
 

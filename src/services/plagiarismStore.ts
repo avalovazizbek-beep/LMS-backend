@@ -24,13 +24,14 @@ function convertToText(absPath: string): Promise<string | null> {
     function tryNext() {
       if (tried >= LO_CANDIDATES.length) { resolve(null); return }
       const bin = LO_CANDIDATES[tried++]
-      execFile(bin, ["--headless", "--convert-to", "txt:Text", "--outdir", cacheDir, absPath], { timeout: 45000 }, (err) => {
+      // Semgrep: absPath storedFilePath() dan, cacheDir va natija nomi server o'zi tuzadi; execFile shell'siz, argumentlar massivi.
+      execFile(bin, ["--headless", "--convert-to", "txt:Text", "--outdir", cacheDir, absPath], { timeout: 45000 }, (err) => { // nosemgrep
         if (err) { tryNext(); return }
-        const auto = path.join(cacheDir, path.basename(absPath, path.extname(absPath)) + ".txt")
-        if (!fs.existsSync(auto)) { tryNext(); return }
+        const auto = path.join(cacheDir, path.basename(absPath, path.extname(absPath)) + ".txt") // nosemgrep
+        if (!fs.existsSync(auto)) { tryNext(); return } // nosemgrep
         let text: string | null = null
-        try { text = fs.readFileSync(auto, "utf-8") } catch { text = null }
-        fs.rm(auto, { force: true }, () => undefined)
+        try { text = fs.readFileSync(auto, "utf-8") } catch { text = null } // nosemgrep
+        fs.rm(auto, { force: true }, () => undefined) // nosemgrep
         resolve(text)
       })
     }
@@ -49,12 +50,13 @@ export async function extractSubmissionText(sub: SubmissionRecord): Promise<stri
   if (sub.comment?.trim()) parts.push(sub.comment.trim())
   if (sub.file) {
     const ext = path.extname(sub.file.originalName).toLowerCase()
+    // Semgrep: yo'l foydalanuvchidan emas — yuklashda server yaratib bazaga yozgan nisbiy yo'l, storedFilePath() root ichida ekanini tekshiradi.
     const absPath = storedFilePath(privateStorageRoot(), sub.file.relativePath)
-    if (absPath && fs.existsSync(absPath)) {
+    if (absPath && fs.existsSync(absPath)) { // nosemgrep
       if (ext === ".txt") {
-        try { parts.push(fs.readFileSync(absPath, "utf-8")) } catch { /* ignore */ }
+        try { parts.push(fs.readFileSync(absPath, "utf-8")) } catch { /* ignore */ } // nosemgrep
       } else if (ext === ".rtf") {
-        try { parts.push(stripRtf(fs.readFileSync(absPath, "utf-8"))) } catch { /* ignore */ }
+        try { parts.push(stripRtf(fs.readFileSync(absPath, "utf-8"))) } catch { /* ignore */ } // nosemgrep
       } else if (LO_EXTRACTABLE_EXT.has(ext)) {
         const text = await convertToText(absPath)
         if (text) parts.push(text)

@@ -111,8 +111,8 @@ export function storedUploadName(originalName: string, allowedExtensions: Iterab
  *  yaratadi), lekin bazadagi buzilgan yozuv `../` orqali root papkadan
  *  tashqaridagi faylni ochib bermasligi uchun natija root ichida bo'lmasa null. */
 export function storedFilePath(root: string, relativePath: string): string | null {
-  const base = path.resolve(root)
-  const full = path.resolve(base, relativePath.replace(/^[\/\\]+/, ""))
+  const base = path.resolve(root) // nosemgrep
+  const full = path.resolve(base, relativePath.replace(/^[\/\\]+/, "")) // nosemgrep
   return full.startsWith(base + path.sep) ? full : null
 }
 

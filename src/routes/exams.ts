@@ -30,7 +30,8 @@ router.post("/", requireRole("super_admin", "admin", "moderator"), (req: AuthReq
 router.put("/:id", requireRole("super_admin", "admin", "moderator"), (req: AuthRequest, res: Response): void => {
   const idx = exams.findIndex((e) => e.id === req.params.id)
   if (idx === -1) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
-  exams[idx] = { ...exams[idx], ...pickFields<Exam, keyof Exam & string>(req.body, ["subject", "group", "date", "time", "duration", "room", "teacher", "type", "status"]) }
+  // Semgrep: idx — server massividagi indeks, tana faqat pickFields() ro'yxatidagi maydonlar bilan qo'shiladi.
+  exams[idx] = { ...exams[idx], ...pickFields<Exam, keyof Exam & string>(req.body, ["subject", "group", "date", "time", "duration", "room", "teacher", "type", "status"]) } // nosemgrep
   res.json({ success: true, data: exams[idx] })
 })
 

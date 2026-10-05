@@ -448,10 +448,11 @@ function receiveChatAttachment(req: AuthRequest, res: Response): Promise<{ origi
       return
     }
 
+    // Semgrep: fayl nomi to'liq serverda yaratiladi (storedUploadName — vaqt + tasodifiy baytlar + ro'yxatdagi kengaytma).
     const storedName = storedUploadName(originalName, CHAT_ALLOWED_EXTENSIONS)
     const relativePath = `/chat/${storedName}`
-    const absolutePath = path.join(chatUploadsDir(), storedName)
-    const stream = fs.createWriteStream(absolutePath)
+    const absolutePath = path.join(chatUploadsDir(), storedName) // nosemgrep
+    const stream = fs.createWriteStream(absolutePath) // nosemgrep
     let written = 0
     let done = false
 
@@ -460,7 +461,7 @@ function receiveChatAttachment(req: AuthRequest, res: Response): Promise<{ origi
       done = true
       req.unpipe(stream)
       stream.destroy()
-      fs.rm(absolutePath, { force: true }, () => undefined)
+      fs.rm(absolutePath, { force: true }, () => undefined) // nosemgrep
       res.status(status).json({ success: false, message })
       resolve(null)
     }

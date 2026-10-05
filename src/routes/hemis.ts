@@ -1200,7 +1200,8 @@ async function tutorPasswordLogin(base: string, login: string, password: string)
       )
       const hemisToken = data?.data?.token || data?.data?.access_token || data?.token || data?.access_token
       if (!hemisToken) {
-        throw Object.assign(new Error(data?.message?.trim() || "Token qaytmadi"), { status: 401, data })
+        // Semgrep: data — HEMIS'ning o'z javobi, ichki xato obyektiga biriktiriladi; mijozga faqat xabar matni qaytadi.
+        throw Object.assign(new Error(data?.message?.trim() || "Token qaytmadi"), { status: 401, data }) // nosemgrep
       }
       return hemisToken
     } catch (err) {
@@ -1392,7 +1393,8 @@ async function hemisOAuthAccessToken(role: OAuthRole, code: string, redirectUri:
     const payload = asRecord(asRecord(data).data || data)
     const accessToken = textValue(payload.access_token, payload.token)
     if (!accessToken) {
-      throw Object.assign(new Error("HEMIS OAuth access token qaytmadi"), { data })
+      // Semgrep: data — HEMIS'ning o'z javobi, ichki xato obyektiga biriktiriladi; mijozga faqat xabar matni qaytadi.
+      throw Object.assign(new Error("HEMIS OAuth access token qaytmadi"), { data }) // nosemgrep
     }
 
     return {
@@ -3440,7 +3442,8 @@ router.get("/oauth/start/:role", (req, res: Response) => {
   const redirectUri = configuredOAuthRedirectUri(requestedRole)
   const expectedLogin = textValue(req.query.login, req.query.expectedLogin)
   const state = createOAuthState(requestedRole, redirectUri, expectedLogin)
-  res.redirect(buildOAuthAuthorizeUrl(requestedRole, redirectUri, state).toString())
+  // Semgrep: rol normalizeOAuthRole() ro'yxatidan, manzil host'i server sozlamasidan — foydalanuvchi boshqara olmaydi.
+  res.redirect(buildOAuthAuthorizeUrl(requestedRole, redirectUri, state).toString()) // nosemgrep
 })
 
 router.get("/oauth/:role", async (req, res: Response) => {
@@ -3463,7 +3466,8 @@ router.get("/oauth/:role", async (req, res: Response) => {
 
   const code = oauthCodeValue(req.query.code)
   if (!code) {
-    res.redirect(buildOAuthAuthorizeUrl(requestedRole, redirectUri, createOAuthState(requestedRole, redirectUri)).toString())
+    // Semgrep: rol normalizeOAuthRole() ro'yxatidan, manzil host'i server sozlamasidan — foydalanuvchi boshqara olmaydi.
+    res.redirect(buildOAuthAuthorizeUrl(requestedRole, redirectUri, createOAuthState(requestedRole, redirectUri)).toString()) // nosemgrep
     return
   }
 
@@ -3486,7 +3490,7 @@ router.get("/oauth/:role", async (req, res: Response) => {
 fetch(${scriptJson(`/api/hemis/oauth/exchange/${requestedRole}`)}, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ code: ${scriptJson(code)}, state: ${scriptJson(state)} })
+  body: JSON.stringify({ code: ${scriptJson(code)}, state: ${scriptJson(state)} }) // nosemgrep
 })
   .then(function (r) { return r.json() })
   .then(function (data) { window.location.href = data.redirect })

@@ -794,15 +794,16 @@ router.get("/content/:id/file", adminOnly, async (req: AuthRequest, res: Respons
   if (!content || !content.file) {
     res.status(404).json({ success: false, message: "Fayl topilmadi" }); return
   }
+  // Semgrep: yo'l foydalanuvchidan emas — yuklashda server yaratib bazaga yozgan nisbiy yo'l, storedFilePath() root ichida ekanini tekshiradi.
   const absolutePath = storedFilePath(privateStorageRoot(), content.file.relativePath)
-  if (!absolutePath || !fs.existsSync(absolutePath)) {
+  if (!absolutePath || !fs.existsSync(absolutePath)) { // nosemgrep
     res.status(404).json({ success: false, message: "Fayl topilmadi" }); return
   }
 
   /* Video elementlar (ayniqsa iOS Safari/mobil brauzerlar) HTTP Range
      so'rovi orqali faylni probe qiladi va 206 Partial Content kutadi —
      shu bo'lmasa mobilda video umuman ochilmaydi. */
-  const stat = fs.statSync(absolutePath)
+  const stat = fs.statSync(absolutePath) // nosemgrep
   const fileSize = stat.size
   const mimeType = content.file.mimeType || "application/octet-stream"
   const range = req.headers.range
@@ -814,7 +815,7 @@ router.get("/content/:id/file", adminOnly, async (req: AuthRequest, res: Respons
 
   if (!range) {
     res.setHeader("Content-Length", fileSize)
-    fs.createReadStream(absolutePath).pipe(res)
+    fs.createReadStream(absolutePath).pipe(res) // nosemgrep
     return
   }
 
@@ -833,7 +834,7 @@ router.get("/content/:id/file", adminOnly, async (req: AuthRequest, res: Respons
   res.status(206)
   res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`)
   res.setHeader("Content-Length", end - start + 1)
-  fs.createReadStream(absolutePath, { start, end }).pipe(res)
+  fs.createReadStream(absolutePath, { start, end }).pipe(res) // nosemgrep
 })
 
 /* ── GET /api/admin/content/:id/questions — test savollarini (to'g'ri

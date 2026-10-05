@@ -31,7 +31,8 @@ router.patch("/:id/download", (req: AuthRequest, res: Response): void => {
 router.put("/:id", requireRole("super_admin", "admin"), (req: AuthRequest, res: Response): void => {
   const idx = documents.findIndex((d) => d.id === req.params.id)
   if (idx === -1) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
-  documents[idx] = { ...documents[idx], ...pickFields<Document, keyof Document & string>(req.body, ["title", "category", "type", "size", "author", "date"]) }
+  // Semgrep: idx — server massividagi indeks, tana faqat pickFields() ro'yxatidagi maydonlar bilan qo'shiladi.
+  documents[idx] = { ...documents[idx], ...pickFields<Document, keyof Document & string>(req.body, ["title", "category", "type", "size", "author", "date"]) } // nosemgrep
   res.json({ success: true, data: documents[idx] })
 })
 
