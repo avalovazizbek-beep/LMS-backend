@@ -8,7 +8,7 @@ import {
   teacherUserId,
   studentUserId,
   chatUploadsDir,
-  sanitizeFilename,
+  storedUploadName,
   safeMimeType,
 } from "../services/teachingStore"
 import { streamPrivateFile } from "./teaching"
@@ -448,7 +448,7 @@ function receiveChatAttachment(req: AuthRequest, res: Response): Promise<{ origi
       return
     }
 
-    const storedName = sanitizeFilename(originalName)
+    const storedName = storedUploadName(originalName, CHAT_ALLOWED_EXTENSIONS)
     const relativePath = `/chat/${storedName}`
     const absolutePath = path.join(chatUploadsDir(), storedName)
     const stream = fs.createWriteStream(absolutePath)

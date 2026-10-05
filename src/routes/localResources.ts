@@ -1,6 +1,5 @@
 import fs from "fs"
 import path from "path"
-import { randomBytes } from "crypto"
 import { Router, Response } from "express"
 import { authMiddleware, requireRole, AuthRequest } from "../middleware/auth"
 import {
@@ -11,7 +10,7 @@ import {
   resourceUploadsDir,
   type LocalResourceKind,
 } from "../services/localResourceStore"
-import { safeMimeType } from "../services/teachingStore"
+import { safeMimeType, storedUploadName } from "../services/teachingStore"
 
 const router = Router()
 const MAX_VIDEO_BYTES = Number(process.env.LOCAL_RESOURCE_MAX_BYTES || 2 * 1024 * 1024 * 1024)
@@ -23,12 +22,6 @@ function textValue(value: unknown) {
   return typeof value === "string" ? value.trim() : ""
 }
 
-function sanitizeFilename(filename: string) {
-  const parsed = path.parse(filename || "video.mp4")
-  const base = parsed.name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "video"
-  const ext = (parsed.ext || ".mp4").toLowerCase().replace(/[^a-z0-9.]/g, "").slice(0, 16)
-  return `${base.slice(0, 80)}-${Date.now()}-${randomBytes(4).toString("hex")}${ext}`
-}
 
 function safeKind(value: string): LocalResourceKind {
   if (
@@ -87,7 +80,7 @@ router.post("/upload", requireRole("employee"), (req: AuthRequest, res: Response
     return
   }
 
-  const storedName = sanitizeFilename(originalName)
+  const storedName = storedUploadName(originalName, VIDEO_EXTENSIONS, ".mp4")
   const relativePath = `/resources/${storedName}`
   const absolutePath = path.join(resourceUploadsDir(), storedName)
   const stream = fs.createWriteStream(absolutePath)

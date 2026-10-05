@@ -8,7 +8,7 @@ import { authMiddleware, AuthRequest, AuthUser } from "../middleware/auth"
 
 let _io: SocketIOServer | null = null
 export function setSocketIO(io: SocketIOServer) { _io = io }
-import { sanitizeFilename, safeMimeType, storedFilePath } from "../services/teachingStore"
+import { safeMimeType, storedFilePath, storedUploadName } from "../services/teachingStore"
 import { closeMeetingRouter } from "../services/mediasoupService"
 import { pool } from "../services/db"
 import { randomUUID } from "crypto"
@@ -608,7 +608,7 @@ router.post("/:id/recordings", async (req: AuthRequest, res: Response): Promise<
     return
   }
 
-  const storedName = sanitizeFilename(originalName)
+  const storedName = storedUploadName(originalName, ALLOWED_RECORDING_EXTENSIONS)
   const relativePath = `/recordings/${storedName}`
   const absolutePath = path.join(recordingsUploadsDir(), storedName)
   const stream = fs.createWriteStream(absolutePath)

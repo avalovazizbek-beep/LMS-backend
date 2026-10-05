@@ -23,6 +23,7 @@ import {
   questionImagesDir,
   sanitizeFilename,
   storedFilePath,
+  storedUploadName,
   safeMimeType,
   getTeacherGroupIds,
   getTeacherGroups,
@@ -279,7 +280,7 @@ function receiveUploadedFile(req: AuthRequest, res: Response): Promise<ContentFi
       return
     }
 
-    const storedName = sanitizeFilename(originalName)
+    const storedName = storedUploadName(originalName, ALLOWED_EXTENSIONS)
     const relativePath = `/teaching/${storedName}`
     const absolutePath = path.join(teachingUploadsDir(), storedName)
     const stream = fs.createWriteStream(absolutePath)

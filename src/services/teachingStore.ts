@@ -92,6 +92,20 @@ export function sanitizeFilename(filename: string) {
   return `${base.slice(0, 80)}-${Date.now()}-${randomBytes(4).toString("hex")}${ext}`
 }
 
+/** Yuklangan fayl uchun diskdagi nom: faqat vaqt + tasodifiy belgilar + shu
+ *  marshrutning ruxsat etilgan ro'yxatidagi kengaytma. Foydalanuvchi bergan
+ *  nomdan hech narsa olinmaydi (asl nom bazada alohida saqlanadi), shu sabab
+ *  nom orqali papkadan chiqish (path traversal) umuman mumkin emas. Kengaytma
+ *  ro'yxatdagi qiymatning o'zi qaytariladi, foydalanuvchi matni emas. */
+export function storedUploadName(originalName: string, allowedExtensions: Iterable<string>, fallbackExt = ""): string {
+  const requested = path.extname(originalName).toLowerCase()
+  let ext = fallbackExt
+  for (const known of allowedExtensions) {
+    if (known === requested) { ext = known; break }
+  }
+  return `${Date.now()}-${randomBytes(8).toString("hex")}${ext}`
+}
+
 /** Bazada saqlangan nisbiy yo'ldan (masalan "/teaching/x.pdf") diskdagi to'liq
  *  yo'lni tuzadi. Yo'l foydalanuvchidan kelmaydi (yuklashda server o'zi
  *  yaratadi), lekin bazadagi buzilgan yozuv `../` orqali root papkadan
