@@ -5,7 +5,7 @@ import { execFile } from "child_process"
 import axios from "axios"
 import type mysql from "mysql2/promise"
 import { pool } from "./db"
-import { privateStorageRoot, type SubmissionRecord } from "./teachingStore"
+import { privateStorageRoot, storedFilePath, type SubmissionRecord } from "./teachingStore"
 
 /* ── Fayldan matn ajratib olish — mavjud "pptx-as-pdf" yo'lidagi bilan bir
    xil, allaqachon serverga o'rnatilgan LibreOffice (soffice) orqali ────── */
@@ -49,8 +49,8 @@ export async function extractSubmissionText(sub: SubmissionRecord): Promise<stri
   if (sub.comment?.trim()) parts.push(sub.comment.trim())
   if (sub.file) {
     const ext = path.extname(sub.file.originalName).toLowerCase()
-    const absPath = path.join(privateStorageRoot(), sub.file.relativePath.replace(/^\/+/, ""))
-    if (fs.existsSync(absPath)) {
+    const absPath = storedFilePath(privateStorageRoot(), sub.file.relativePath)
+    if (absPath && fs.existsSync(absPath)) {
       if (ext === ".txt") {
         try { parts.push(fs.readFileSync(absPath, "utf-8")) } catch { /* ignore */ }
       } else if (ext === ".rtf") {

@@ -8,7 +8,7 @@ import { authMiddleware, AuthRequest, AuthUser } from "../middleware/auth"
 
 let _io: SocketIOServer | null = null
 export function setSocketIO(io: SocketIOServer) { _io = io }
-import { sanitizeFilename, safeMimeType } from "../services/teachingStore"
+import { sanitizeFilename, safeMimeType, storedFilePath } from "../services/teachingStore"
 import { closeMeetingRouter } from "../services/mediasoupService"
 import { pool } from "../services/db"
 import { randomUUID } from "crypto"
@@ -92,8 +92,8 @@ router.get("/recordings/:id/file", async (req: AuthRequest, res: Response): Prom
     return
   }
 
-  const absolutePath = path.join(recordingsStorageRoot(), found.relativePath.replace(/^\/+/, ""))
-  if (!fs.existsSync(absolutePath)) {
+  const absolutePath = storedFilePath(recordingsStorageRoot(), found.relativePath)
+  if (!absolutePath || !fs.existsSync(absolutePath)) {
     res.status(404).json({ success: false, message: "Fayl topilmadi" })
     return
   }

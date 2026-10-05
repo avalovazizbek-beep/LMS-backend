@@ -26,7 +26,7 @@ function textValue(value: unknown) {
 function sanitizeFilename(filename: string) {
   const parsed = path.parse(filename || "video.mp4")
   const base = parsed.name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "video"
-  const ext = (parsed.ext || ".mp4").toLowerCase()
+  const ext = (parsed.ext || ".mp4").toLowerCase().replace(/[^a-z0-9.]/g, "").slice(0, 16)
   return `${base.slice(0, 80)}-${Date.now()}-${randomBytes(4).toString("hex")}${ext}`
 }
 

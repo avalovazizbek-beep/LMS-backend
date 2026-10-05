@@ -22,6 +22,7 @@ import {
   privateStorageRoot,
   questionImagesDir,
   sanitizeFilename,
+  storedFilePath,
   safeMimeType,
   getTeacherGroupIds,
   getTeacherGroups,
@@ -325,8 +326,8 @@ function receiveUploadedFile(req: AuthRequest, res: Response): Promise<ContentFi
    mobil qurilmalarda video/audio umuman ochilmaydi (desktop brauzerlar
    ko'pincha shunga qaramay to'liq faylni yuklab ishlatib yuboradi). */
 export function streamPrivateFile(req: AuthRequest, res: Response, relativePath: string, originalName: string, mimeType: string) {
-  const absolutePath = path.join(privateStorageRoot(), relativePath.replace(/^\/+/, ""))
-  if (!fs.existsSync(absolutePath)) {
+  const absolutePath = storedFilePath(privateStorageRoot(), relativePath)
+  if (!absolutePath || !fs.existsSync(absolutePath)) {
     res.status(404).json({ success: false, message: "Fayl topilmadi" })
     return
   }
@@ -735,8 +736,9 @@ router.get("/content/:id/pptx-as-pdf", async (req: AuthRequest, res: Response): 
     }
   }
 
-  const absPath = path.join(privateStorageRoot(), content.file.relativePath.replace(/^\/+/, ""))
-  if (!fs.existsSync(absPath)) { res.status(404).end(); return }
+  const storedPath = storedFilePath(privateStorageRoot(), content.file.relativePath)
+  if (!storedPath || !fs.existsSync(storedPath)) { res.status(404).end(); return }
+  const absPath: string = storedPath
 
   const cacheDir = path.join(os.tmpdir(), "lms-pptx-pdf")
   fs.mkdirSync(cacheDir, { recursive: true })

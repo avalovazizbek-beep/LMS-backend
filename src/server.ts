@@ -133,7 +133,14 @@ app.get("*", (req, res, next) => {
     return
   }
 
-  res.redirect(new URL(req.originalUrl, FRONTEND_ORIGIN).toString())
+  // "//evil.com" kabi yo'l new URL() da boshqa domenga aylanadi (open redirect) —
+  // boshidagi barcha / va \ olib tashlanib, natija faqat frontend domenida qoladi
+  const target = new URL("/" + req.originalUrl.replace(/^[\/\\]+/, ""), FRONTEND_ORIGIN)
+  if (target.origin !== new URL(FRONTEND_ORIGIN).origin) {
+    res.status(400).end()
+    return
+  }
+  res.redirect(target.toString())
 })
 
 async function participantPayload(meetingId: number) {

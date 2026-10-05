@@ -364,7 +364,7 @@ async function syncOneResource(name: string, fn: () => Promise<number>, errors: 
     return await fn()
   } catch (err) {
     const message = err instanceof Error ? err.message : "noma'lum xatolik"
-    console.error(`[hemisSync] ${name} sinxronlanmadi:`, message)
+    console.error("[hemisSync] %s sinxronlanmadi:", name, message)
     errors.push(`${name}: ${message}`)
     return 0
   }

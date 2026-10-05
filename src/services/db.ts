@@ -32,7 +32,7 @@ async function execSafe(sql: string, label?: string) {
   try {
     await pool.query(sql)
   } catch (err) {
-    console.warn(`[DB] ${label ?? "execSafe"} xatolik (o'tkazib yuborildi):`, (err as { message?: string })?.message ?? err)
+    console.warn("[DB] %s xatolik (o'tkazib yuborildi):", label ?? "execSafe", (err as { message?: string })?.message ?? err)
   }
 }
 

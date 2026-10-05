@@ -26,7 +26,7 @@ export function decryptSecret(payload: string): string | null {
     const iv = buf.subarray(0, 12)
     const authTag = buf.subarray(12, 28)
     const encrypted = buf.subarray(28)
-    const decipher = createDecipheriv("aes-256-gcm", KEY, iv)
+    const decipher = createDecipheriv("aes-256-gcm", KEY, iv, { authTagLength: 16 })
     decipher.setAuthTag(authTag)
     const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()])
     return decrypted.toString("utf8")

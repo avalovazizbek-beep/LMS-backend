@@ -64,7 +64,7 @@ function decrypt(payload: string): string {
   const iv = raw.subarray(0, 12)
   const tag = raw.subarray(12, 28)
   const enc = raw.subarray(28)
-  const decipher = crypto.createDecipheriv("aes-256-gcm", ENCRYPTION_KEY, iv)
+  const decipher = crypto.createDecipheriv("aes-256-gcm", ENCRYPTION_KEY, iv, { authTagLength: 16 })
   decipher.setAuthTag(tag)
   return Buffer.concat([decipher.update(enc), decipher.final()]).toString("utf8")
 }
@@ -213,7 +213,7 @@ export async function getValidAccessToken(teacherId: number): Promise<string | n
     )
     return tokens.access_token
   } catch (err) {
-    console.warn(`[google-meet] teacher ${teacherId} uchun token yangilashda xato:`, googleApiErrorMessage(err))
+    console.warn("[google-meet] teacher %s uchun token yangilashda xato:", teacherId, googleApiErrorMessage(err))
     await pool.query("UPDATE google_meet_connections SET status = 'expired' WHERE teacher_id = ?", [teacherId])
     return null
   }

@@ -5,7 +5,7 @@ import { Router, Response, NextFunction } from "express"
 import type { RowDataPacket } from "mysql2"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
-import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen, getTeacherGroupIds } from "../services/teachingStore"
+import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, storedFilePath, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen, getTeacherGroupIds } from "../services/teachingStore"
 import { listQuestions, isExamPassed } from "../services/examStore"
 import { grantRetakesForContent, revokeRetakeGrant } from "../services/retakeStore"
 import {
@@ -794,8 +794,8 @@ router.get("/content/:id/file", adminOnly, async (req: AuthRequest, res: Respons
   if (!content || !content.file) {
     res.status(404).json({ success: false, message: "Fayl topilmadi" }); return
   }
-  const absolutePath = path.join(privateStorageRoot(), content.file.relativePath.replace(/^\/+/, ""))
-  if (!fs.existsSync(absolutePath)) {
+  const absolutePath = storedFilePath(privateStorageRoot(), content.file.relativePath)
+  if (!absolutePath || !fs.existsSync(absolutePath)) {
     res.status(404).json({ success: false, message: "Fayl topilmadi" }); return
   }
 

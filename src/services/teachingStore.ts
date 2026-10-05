@@ -87,8 +87,19 @@ export function questionImagesDir() {
 export function sanitizeFilename(filename: string) {
   const parsed = path.parse(filename || "file")
   const base = parsed.name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "file"
-  const ext = (parsed.ext || "").toLowerCase()
+  // Kengaytmada ham faqat harf/raqam qoladi (\, bo'shliq, qo'shtirnoq va h.k. kirmasin)
+  const ext = (parsed.ext || "").toLowerCase().replace(/[^a-z0-9.]/g, "").slice(0, 16)
   return `${base.slice(0, 80)}-${Date.now()}-${randomBytes(4).toString("hex")}${ext}`
+}
+
+/** Bazada saqlangan nisbiy yo'ldan (masalan "/teaching/x.pdf") diskdagi to'liq
+ *  yo'lni tuzadi. Yo'l foydalanuvchidan kelmaydi (yuklashda server o'zi
+ *  yaratadi), lekin bazadagi buzilgan yozuv `../` orqali root papkadan
+ *  tashqaridagi faylni ochib bermasligi uchun natija root ichida bo'lmasa null. */
+export function storedFilePath(root: string, relativePath: string): string | null {
+  const base = path.resolve(root)
+  const full = path.resolve(base, relativePath.replace(/^[\/\\]+/, ""))
+  return full.startsWith(base + path.sep) ? full : null
 }
 
 export function removeStoredFile(relativePath?: string | null) {
