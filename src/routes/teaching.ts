@@ -6,7 +6,7 @@ import jwt from "jsonwebtoken"
 import express, { Router, Response } from "express"
 import { authMiddleware, requireRole, AuthRequest, AuthUser } from "../middleware/auth"
 import { pool } from "../services/db"
-import { createNotification, notifySafe, bumpGroupedSafe, studentOwnersInGroups, type NotificationType } from "../services/notificationStore"
+import { createNotification, notifySafe, bumpGroupedSafe, studentOwnersInGroups, adminOwnersFor, type NotificationType } from "../services/notificationStore"
 import { parseNumber } from "../services/meetingStore"
 import { syncTeacherFromHemis, employeeTeachesGroup, fetchTeacherGroupsForYear, fetchTeacherSubjectsFromSchedule, fetchTeacherGroupsFromSchedule } from "./hemis"
 import {
@@ -99,6 +99,10 @@ import {
   getGroupSessions,
   getStudentSessions,
   getAttendanceSummary,
+  todayDateOnly,
+  isAttendanceSheetSaved,
+  getLatestEditRequest,
+  createEditRequest,
 } from "../services/attendanceStore"
 import {
   type GradeRecordInput,
@@ -2720,10 +2724,12 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
     return
   }
 
-  const [hemisRoster, existing, trainingType] = await Promise.all([
+  const [hemisRoster, existing, trainingType, saved, editRequest] = await Promise.all([
     getGroupRoster(groupId, subjectName).catch(() => [] as import("../services/attendanceStore").RosterStudent[]),
     getAttendanceForGroupDate(groupId, subjectName, date),
     getTrainingTypeForGroupDate(groupId, subjectName, date),
+    isAttendanceSheetSaved(groupId, subjectName, date),
+    getLatestEditRequest(groupId, subjectName, date, tId),
   ])
 
   // If HEMIS roster is empty, fall back to students from attendance history
@@ -2752,7 +2758,9 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
     }
   })
 
-  res.json({ success: true, data, trainingType })
+  // Saqlangan kun qulflangan: o'zgartirish faqat admin tasdiqlagan so'rov bilan
+  const locked = saved && editRequest?.status !== "approved"
+  res.json({ success: true, data, trainingType, saved, locked, editRequest })
 })
 
 /* ── POST /attendance — davomatni saqlash ──────────────────────────── */
@@ -2770,6 +2778,10 @@ router.post("/attendance", async (req: AuthRequest, res: Response): Promise<void
 
   if (groupId === null || !subjectName || !isValidDateOnly(date) || !records) {
     res.status(400).json({ success: false, message: "groupId, subjectName, date va records majburiy" })
+    return
+  }
+  if (date > todayDateOnly()) {
+    res.status(400).json({ success: false, message: "Kelajakdagi kun uchun davomat qo'yib bo'lmaydi" })
     return
   }
 
@@ -2797,8 +2809,86 @@ router.post("/attendance", async (req: AuthRequest, res: Response): Promise<void
     })
   }
 
-  await saveAttendance(groupId, subjectName, date, parsed, tId, trainingType)
+  const result = await saveAttendance(groupId, subjectName, date, parsed, tId, trainingType)
+  if (!result.ok) {
+    res.status(409).json({
+      success: false,
+      locked: true,
+      message: "Bu kun uchun davomat allaqachon saqlangan. O'zgartirish uchun adminga so'rov yuboring",
+    })
+    return
+  }
+  if (result.usedRequestId !== null) {
+    void logAudit(req, "attendance.edit", "attendance", String(result.usedRequestId), { groupId, subjectName, date })
+  }
   res.json({ success: true, message: "Davomat saqlandi" })
+})
+
+/* ── POST /attendance/edit-requests — saqlangan (qulflangan) davomatni
+   o'zgartirish uchun adminga so'rov ─────────────────────────────────── */
+router.post("/attendance/edit-requests", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
+  const groupId = numberValue(body.groupId)
+  const subjectName = textValue(body.subjectName)
+  const date = textValue(body.date)
+  const reason = textValue(body.reason).slice(0, 1000)
+  if (groupId === null || !subjectName || !isValidDateOnly(date)) {
+    res.status(400).json({ success: false, message: "groupId, subjectName va date majburiy" })
+    return
+  }
+  if (!reason) {
+    res.status(400).json({ success: false, message: "O'zgartirish sababini yozing" })
+    return
+  }
+
+  const tId = teacherUserId(req.user)
+  const ownGroupIds = await getTeacherGroupIds(tId)
+  if (!ownGroupIds.includes(groupId)) {
+    res.status(403).json({ success: false, message: "Bu guruh sizga HEMIS orqali biriktirilmagan" })
+    return
+  }
+  if (!(await isAttendanceSheetSaved(groupId, subjectName, date))) {
+    res.status(400).json({ success: false, message: "Bu kun uchun davomat hali saqlanmagan — so'rovsiz belgilashingiz mumkin" })
+    return
+  }
+  const latest = await getLatestEditRequest(groupId, subjectName, date, tId)
+  if (latest?.status === "pending") {
+    res.status(409).json({ success: false, message: "So'rov allaqachon yuborilgan, admin javobini kuting" })
+    return
+  }
+  if (latest?.status === "approved") {
+    res.status(409).json({ success: false, message: "Admin ruxsat bergan — davomatni o'zgartirib saqlashingiz mumkin" })
+    return
+  }
+
+  const created = await createEditRequest({
+    groupId,
+    subjectName,
+    lessonDate: date,
+    teacherUserId: tId,
+    teacherName: fullNameOf(req.user),
+    reason,
+  })
+
+  // Davomat bo'limiga ruxsati bor adminlarga — bitta yig'ma xabar
+  adminOwnersFor("attendance").then((owners) => {
+    for (const owner of owners) {
+      bumpGroupedSafe({
+        ...owner,
+        type: "system",
+        groupKey: "attendance-edit-requests",
+        link: "/admin/davomatlar?tab=requests",
+        i18nKey: "attendanceEditRequests",
+        text: (n) => ({ title: "Davomatni o'zgartirish so'rovlari", body: `${n} ta so'rov ko'rib chiqilishini kutmoqda` }),
+      })
+    }
+  }).catch(() => { /* best-effort */ })
+
+  res.json({ success: true, message: "So'rov adminga yuborildi", data: created })
 })
 
 /* ── GET /attendance — o'qituvchi uchun tarix/hisobot ──────────────── */

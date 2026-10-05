@@ -372,6 +372,29 @@ export async function initDatabase() {
   `)
   await execIgnoreDuplicate(`ALTER TABLE lms_attendance ADD COLUMN training_type VARCHAR(60) NULL AFTER lesson_date`)
 
+  // ── Davomatni o'zgartirish so'rovlari: o'qituvchi saqlagan davomat
+  // qulflanadi, o'zgartirish uchun adminga so'rov yuboradi. Admin tasdiqlasa
+  // o'qituvchi shu kunni BIR MARTA qayta saqlay oladi (status → 'used'). ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_attendance_edit_requests (
+      id                  INT AUTO_INCREMENT PRIMARY KEY,
+      group_id            INT NOT NULL,
+      subject_name        VARCHAR(255) NOT NULL,
+      lesson_date         DATE NOT NULL,
+      teacher_user_id     INT NOT NULL,
+      teacher_name        VARCHAR(255) NOT NULL,
+      reason              TEXT NOT NULL,
+      status              ENUM('pending','approved','rejected','used') NOT NULL DEFAULT 'pending',
+      admin_note          TEXT NULL,
+      reviewed_by_name    VARCHAR(255) NULL,
+      reviewed_at         TIMESTAMP NULL,
+      used_at             TIMESTAMP NULL,
+      created_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_att_edit_sheet (group_id, subject_name, lesson_date),
+      INDEX idx_att_edit_status (status, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_attendance_edit_requests")
+
   // ── Zoom integratsiyasi — har bir o'qituvchi o'z Zoom hisobini ulaydi ──
   await exec(`
     CREATE TABLE IF NOT EXISTS zoom_connections (

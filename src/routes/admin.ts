@@ -34,6 +34,12 @@ import {
   type PermissionAction,
 } from "../services/permissionsStore"
 import { logAudit, listAuditLog } from "../services/auditLog"
+import {
+  listEditRequests as listAttendanceEditRequests,
+  countPendingEditRequests as countPendingAttendanceEditRequests,
+  reviewEditRequest as reviewAttendanceEditRequest,
+  type AttendanceEditStatus,
+} from "../services/attendanceStore"
 
 const router = Router()
 router.use(authMiddleware)
@@ -1028,6 +1034,56 @@ router.patch("/face-requests/:id", requirePermission("faceid", "edit"), async (r
   void logAudit(req, `faceRequest.${action}`, "faceid", id, { note: note ?? null })
 
   res.json({ success: true, message: action === "approve" ? "Tasdiqlandi" : "Rad etildi" })
+})
+
+/* ── GET /api/admin/attendance-edit-requests — o'qituvchilarning saqlangan
+   davomatni o'zgartirish so'rovlari ─────────────────────────────────── */
+router.get("/attendance-edit-requests", requirePermission("attendance", "view"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const raw = typeof req.query.status === "string" ? req.query.status : "pending"
+  const status: AttendanceEditStatus = (["pending", "approved", "rejected", "used"] as const).find((s) => s === raw) ?? "pending"
+  const [data, pendingCount] = await Promise.all([
+    listAttendanceEditRequests(status),
+    countPendingAttendanceEditRequests(),
+  ])
+  res.json({ success: true, data, pendingCount })
+})
+
+/* ── PATCH /api/admin/attendance-edit-requests/:id — tasdiqlash / rad etish ── */
+router.patch("/attendance-edit-requests/:id", requirePermission("attendance", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  const body = (req.body ?? {}) as { action?: string; note?: string }
+  const action = body.action === "approve" || body.action === "reject" ? body.action : null
+  if (!Number.isFinite(id) || !action) {
+    res.status(400).json({ success: false, message: "action approve yoki reject bo'lishi kerak" })
+    return
+  }
+  const note = typeof body.note === "string" && body.note.trim() ? body.note.trim().slice(0, 1000) : null
+  const reviewer = textVal(req.user?.fullName, req.user?.username) || "Admin"
+
+  const updated = await reviewAttendanceEditRequest(id, action, note, reviewer)
+  if (!updated) {
+    res.status(409).json({ success: false, message: "So'rov topilmadi yoki allaqachon ko'rib chiqilgan" })
+    return
+  }
+
+  const approved = action === "approve"
+  const params = { group: updated.groupName ?? `#${updated.groupId}`, subject: updated.subjectName, date: updated.lessonDate }
+  const link = `/oqituvchi-kabineti/davomat-jurnali?group=${updated.groupId}&subject=${encodeURIComponent(updated.subjectName)}&date=${updated.lessonDate}`
+  notifySafe({
+    role: "employee",
+    userId: updated.teacherUserId,
+    type: "system",
+    title: approved ? "Davomatni o'zgartirishga ruxsat berildi" : "Davomatni o'zgartirish so'rovi rad etildi",
+    body: `${params.group} · ${params.subject} · ${params.date}${note ? ` — ${note}` : ""}`,
+    link,
+    i18nKey: approved ? "attendanceEditApproved" : "attendanceEditRejected",
+    i18nParams: params,
+  })
+  void logAudit(req, `attendanceEdit.${action}`, "attendance", String(id), {
+    groupId: updated.groupId, subjectName: updated.subjectName, date: updated.lessonDate, note,
+  })
+
+  res.json({ success: true, message: approved ? "Tasdiqlandi" : "Rad etildi", data: updated })
 })
 
 /* ── GET /api/admin/attendance ──────────────────────────────────────── */

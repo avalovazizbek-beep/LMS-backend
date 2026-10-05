@@ -440,7 +440,21 @@ async function syncMeetingAttendanceToMain(meeting: MeetingRecord): Promise<void
     [meeting.id]
   )
 
+  // O'qituvchi shu kunni allaqachon qo'lda saqlagan (qulflangan) guruhlar
+  // o'tkazib yuboriladi — qulflangan davomat faqat admin ruxsati bilan o'zgaradi.
+  const groupIds = [...new Set(rows.map((r) => Number(r.group_id)))]
+  const lockedGroupIds = new Set<number>()
+  if (groupIds.length) {
+    const [lockedRows] = await pool.query<mysql.RowDataPacket[]>(
+      `SELECT DISTINCT group_id FROM lms_attendance
+       WHERE subject_name = ? AND lesson_date = ? AND marked_by_user_id <> 0 AND group_id IN (?)`,
+      [subjectName.trim(), lessonDate, groupIds]
+    )
+    for (const r of lockedRows) lockedGroupIds.add(Number(r.group_id))
+  }
+
   for (const row of rows) {
+    if (lockedGroupIds.has(Number(row.group_id))) continue
     const facePresent = Number(row.face_visible_seconds) >= requiredSeconds
     const status = facePresent ? "present" : "absent"
     const comment = facePresent

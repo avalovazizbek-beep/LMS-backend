@@ -94,6 +94,31 @@ export interface AttendanceRecordInput {
   comment?: string | null
 }
 
+/** Server mahalliy vaqti (Asia/Tashkent) bo'yicha bugungi sana — kelajak
+ *  kunlarga davomat qo'yilmasligi uchun. */
+export function todayDateOnly(): string {
+  return toDateOnly(new Date())
+}
+
+/** O'qituvchi "Saqlash" bosgan kun (marked_by_user_id <> 0) qulflangan
+ *  hisoblanadi. Meeting'dan avtomatik (Face ID) yozilgan qatorlar
+ *  (marked_by_user_id = 0) qulflamaydi — o'qituvchi ularni bir marta
+ *  ko'rib chiqib, o'zi saqlaydi. */
+export async function isAttendanceSheetSaved(groupId: number, subjectName: string, lessonDate: string): Promise<boolean> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT 1 FROM lms_attendance WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND marked_by_user_id <> 0 LIMIT 1",
+    [groupId, subjectName.trim(), lessonDate]
+  )
+  return rows.length > 0
+}
+
+export type SaveAttendanceResult =
+  | { ok: true; usedRequestId: number | null }
+  | { ok: false; reason: "locked" }
+
+/** Davomatni saqlaydi. Kun allaqachon saqlangan bo'lsa — faqat admin
+ *  tasdiqlagan (ishlatilmagan) so'rov bo'lgandagina qayta yoziladi va o'sha
+ *  so'rov "used" bo'lib qoladi, ya'ni kun yana qulflanadi. */
 export async function saveAttendance(
   groupId: number,
   subjectName: string,
@@ -101,21 +126,180 @@ export async function saveAttendance(
   records: AttendanceRecordInput[],
   markedByUserId: number,
   trainingType?: string | null
-) {
-  for (const r of records) {
-    await pool.query(
-      `INSERT INTO lms_attendance
-        (group_id, subject_name, lesson_date, training_type, student_user_id, student_full_name, status, comment, marked_by_user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         training_type      = VALUES(training_type),
-         student_full_name = VALUES(student_full_name),
-         status            = VALUES(status),
-         comment           = VALUES(comment),
-         marked_by_user_id = VALUES(marked_by_user_id)`,
-      [groupId, subjectName.trim(), lessonDate, trainingType?.trim() || null, r.studentUserId, r.fullName, r.status, r.comment?.trim() || null, markedByUserId]
+): Promise<SaveAttendanceResult> {
+  const subject = subjectName.trim()
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+    const [savedRows] = await conn.query<mysql.RowDataPacket[]>(
+      "SELECT 1 FROM lms_attendance WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND marked_by_user_id <> 0 LIMIT 1",
+      [groupId, subject, lessonDate]
     )
+    let usedRequestId: number | null = null
+    if (savedRows.length) {
+      const [grantRows] = await conn.query<mysql.RowDataPacket[]>(
+        `SELECT id FROM lms_attendance_edit_requests
+         WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND teacher_user_id = ? AND status = 'approved'
+         ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+        [groupId, subject, lessonDate, markedByUserId]
+      )
+      if (!grantRows.length) {
+        await conn.rollback()
+        return { ok: false, reason: "locked" }
+      }
+      usedRequestId = Number(grantRows[0].id)
+    }
+
+    for (const r of records) {
+      await conn.query(
+        `INSERT INTO lms_attendance
+          (group_id, subject_name, lesson_date, training_type, student_user_id, student_full_name, status, comment, marked_by_user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           training_type      = VALUES(training_type),
+           student_full_name = VALUES(student_full_name),
+           status            = VALUES(status),
+           comment           = VALUES(comment),
+           marked_by_user_id = VALUES(marked_by_user_id)`,
+        [groupId, subject, lessonDate, trainingType?.trim() || null, r.studentUserId, r.fullName, r.status, r.comment?.trim() || null, markedByUserId]
+      )
+    }
+    if (usedRequestId !== null) {
+      await conn.query(
+        "UPDATE lms_attendance_edit_requests SET status = 'used', used_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [usedRequestId]
+      )
+    }
+    await conn.commit()
+    return { ok: true, usedRequestId }
+  } catch (err) {
+    await conn.rollback().catch(() => undefined)
+    throw err
+  } finally {
+    conn.release()
   }
+}
+
+/* ── Davomatni o'zgartirish so'rovlari (o'qituvchi → admin) ──────────── */
+export type AttendanceEditStatus = "pending" | "approved" | "rejected" | "used"
+
+export interface AttendanceEditRequest {
+  id: number
+  groupId: number
+  groupName: string | null
+  subjectName: string
+  lessonDate: string
+  teacherUserId: number
+  teacherName: string
+  reason: string
+  status: AttendanceEditStatus
+  adminNote: string | null
+  reviewedByName: string | null
+  reviewedAt: string | null
+  usedAt: string | null
+  createdAt: string
+}
+
+function toIso(value: unknown): string | null {
+  if (!value) return null
+  const d = value instanceof Date ? value : new Date(String(value))
+  return Number.isNaN(d.getTime()) ? null : d.toISOString()
+}
+
+function mapEditRequest(row: mysql.RowDataPacket): AttendanceEditRequest {
+  return {
+    id: Number(row.id),
+    groupId: Number(row.group_id),
+    groupName: row.group_name ? String(row.group_name) : null,
+    subjectName: String(row.subject_name),
+    lessonDate: toDateOnly(row.lesson_date),
+    teacherUserId: Number(row.teacher_user_id),
+    teacherName: String(row.teacher_name),
+    reason: String(row.reason ?? ""),
+    status: row.status as AttendanceEditStatus,
+    adminNote: row.admin_note ? String(row.admin_note) : null,
+    reviewedByName: row.reviewed_by_name ? String(row.reviewed_by_name) : null,
+    reviewedAt: toIso(row.reviewed_at),
+    usedAt: toIso(row.used_at),
+    createdAt: toIso(row.created_at) ?? new Date().toISOString(),
+  }
+}
+
+const EDIT_REQUEST_SELECT = `
+  SELECT r.*, g.name AS group_name
+  FROM lms_attendance_edit_requests r
+  LEFT JOIN lms_groups g ON g.id = r.group_id`
+
+/** O'qituvchining shu kun uchun oxirgi so'rovi (jurnalda holatini ko'rsatish uchun). */
+export async function getLatestEditRequest(
+  groupId: number,
+  subjectName: string,
+  lessonDate: string,
+  teacherUserId: number
+): Promise<AttendanceEditRequest | null> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `${EDIT_REQUEST_SELECT}
+     WHERE r.group_id = ? AND r.subject_name = ? AND r.lesson_date = ? AND r.teacher_user_id = ?
+     ORDER BY r.id DESC LIMIT 1`,
+    [groupId, subjectName.trim(), lessonDate, teacherUserId]
+  )
+  return rows[0] ? mapEditRequest(rows[0]) : null
+}
+
+export async function getEditRequest(id: number): Promise<AttendanceEditRequest | null> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(`${EDIT_REQUEST_SELECT} WHERE r.id = ? LIMIT 1`, [id])
+  return rows[0] ? mapEditRequest(rows[0]) : null
+}
+
+export async function createEditRequest(input: {
+  groupId: number
+  subjectName: string
+  lessonDate: string
+  teacherUserId: number
+  teacherName: string
+  reason: string
+}): Promise<AttendanceEditRequest> {
+  const [result] = await pool.query<mysql.ResultSetHeader>(
+    `INSERT INTO lms_attendance_edit_requests
+       (group_id, subject_name, lesson_date, teacher_user_id, teacher_name, reason)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [input.groupId, input.subjectName.trim(), input.lessonDate, input.teacherUserId, input.teacherName, input.reason]
+  )
+  const created = await getEditRequest(result.insertId)
+  if (!created) throw new Error("So'rov saqlanmadi")
+  return created
+}
+
+export async function listEditRequests(status: AttendanceEditStatus): Promise<AttendanceEditRequest[]> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `${EDIT_REQUEST_SELECT} WHERE r.status = ? ORDER BY r.created_at DESC, r.id DESC LIMIT 200`,
+    [status]
+  )
+  return rows.map(mapEditRequest)
+}
+
+export async function countPendingEditRequests(): Promise<number> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT COUNT(*) AS n FROM lms_attendance_edit_requests WHERE status = 'pending'"
+  )
+  return Number(rows[0]?.n ?? 0)
+}
+
+/** Faqat "pending" so'rovni ko'rib chiqadi; boshqa holatda null qaytaradi. */
+export async function reviewEditRequest(
+  id: number,
+  action: "approve" | "reject",
+  note: string | null,
+  reviewerName: string
+): Promise<AttendanceEditRequest | null> {
+  const [result] = await pool.query<mysql.ResultSetHeader>(
+    `UPDATE lms_attendance_edit_requests
+     SET status = ?, admin_note = ?, reviewed_by_name = ?, reviewed_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND status = 'pending'`,
+    [action === "approve" ? "approved" : "rejected", note, reviewerName, id]
+  )
+  if (!result.affectedRows) return null
+  return getEditRequest(id)
 }
 
 /* ── Bir kunlik davomat (o'qituvchi uchun roster bilan birlashtirish) ── */
