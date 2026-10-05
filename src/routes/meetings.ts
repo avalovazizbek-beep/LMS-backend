@@ -133,7 +133,7 @@ router.get("/recordings/:id/file", async (req: AuthRequest, res: Response): Prom
   res.status(206)
   res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`)
   res.setHeader("Content-Length", end - start + 1)
-  fs.createReadStream(absolutePath, { start, end }).pipe(res)
+  fs.createReadStream(absolutePath, { start, end }).pipe(res) // nosemgrep
 })
 
 router.use(authMiddleware)

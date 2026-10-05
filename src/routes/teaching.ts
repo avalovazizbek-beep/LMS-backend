@@ -677,10 +677,11 @@ router.get("/content/:id/pptx-slides", async (req: AuthRequest, res: Response): 
     }
   }
 
-  const absPath = path.join(privateStorageRoot(), content.file.relativePath.replace(/^\/+/, ""))
-  if (!fs.existsSync(absPath)) { res.json({ count: 0, slides: [] }); return }
+  // Semgrep: yo'l foydalanuvchidan emas — yuklashda server yaratib bazaga yozgan nisbiy yo'l, storedFilePath() root ichida ekanini tekshiradi.
+  const absPath = storedFilePath(privateStorageRoot(), content.file.relativePath)
+  if (!absPath || !fs.existsSync(absPath)) { res.json({ count: 0, slides: [] }); return } // nosemgrep
 
-  execFile("python", ["-c", PPTX_EXTRACT_PY, absPath], { timeout: 12000 }, (err, stdout) => {
+  execFile("python", ["-c", PPTX_EXTRACT_PY, absPath], { timeout: 12000 }, (err, stdout) => { // nosemgrep
     try {
       res.json(JSON.parse(stdout || "{}"))
     } catch {
@@ -704,15 +705,17 @@ router.get("/content/:id/pptx-rich-slides", async (req: AuthRequest, res: Respon
     }
   }
 
-  const absPath = path.join(privateStorageRoot(), content.file.relativePath.replace(/^\/+/, ""))
-  if (!fs.existsSync(absPath)) { res.json({ count: 0, slides: [] }); return }
+  // Semgrep: yo'l foydalanuvchidan emas — yuklashda server yaratib bazaga yozgan nisbiy yo'l, storedFilePath() root ichida ekanini tekshiradi.
+  const storedPath = storedFilePath(privateStorageRoot(), content.file.relativePath)
+  if (!storedPath || !fs.existsSync(storedPath)) { res.json({ count: 0, slides: [] }); return } // nosemgrep
+  const absPath: string = storedPath
 
   // "python3" is the standard binary name on Linux (prod); Windows dev
   // machines often only have "python". Try both instead of hardcoding one.
   const pythonCandidates = ["python3", "python"]
   const tryPython = (i: number) => {
     if (i >= pythonCandidates.length) { res.json({ count: 0, slides: [] }); return }
-    execFile(pythonCandidates[i], ["-c", PPTX_RICH_PY, absPath], { timeout: 20000 }, (err, stdout) => {
+    execFile(pythonCandidates[i], ["-c", PPTX_RICH_PY, absPath], { timeout: 20000 }, (err, stdout) => { // nosemgrep
       if (err && (err as NodeJS.ErrnoException).code === "ENOENT") { tryPython(i + 1); return }
       try {
         res.json(JSON.parse(stdout || "{}"))

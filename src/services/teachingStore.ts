@@ -118,8 +118,10 @@ export function storedFilePath(root: string, relativePath: string): string | nul
 
 export function removeStoredFile(relativePath?: string | null) {
   if (!relativePath) return
-  const absolute = path.join(PRIVATE_ROOT, relativePath.replace(/^\/+/, ""))
-  fs.rm(absolute, { force: true }, () => undefined)
+  // Semgrep: yo'l foydalanuvchidan emas — yuklashda server yaratib bazaga yozgan nisbiy yo'l, storedFilePath() root ichida ekanini tekshiradi. Buzilgan yozuv root'dan tashqaridagi faylni o'chira olmaydi.
+  const absolute = storedFilePath(PRIVATE_ROOT, relativePath)
+  if (!absolute) return
+  fs.rm(absolute, { force: true }, () => undefined) // nosemgrep
 }
 
 /* ── Xavfsiz MIME turi — fayl kengaytmasiga qarab serverda aniqlanadi ──
@@ -806,10 +808,11 @@ export async function deleteTeacherContent(id: number): Promise<boolean> {
     o'chiradi (deleteTeacherContent), shu sabab guruhlar bitta faylni bo'lisha
     olmaydi. Asinxron nusxa: katta videoda ham server bloklanmaydi. */
 async function copyStoredFile(file: ContentFile): Promise<ContentFile | null> {
-  const source = path.join(PRIVATE_ROOT, file.relativePath.replace(/^\/+/, ""))
-  if (!fs.existsSync(source)) return null
+  // Semgrep: yo'l foydalanuvchidan emas — yuklashda server yaratib bazaga yozgan nisbiy yo'l, storedFilePath() root ichida ekanini tekshiradi.
+  const source = storedFilePath(PRIVATE_ROOT, file.relativePath)
+  if (!source || !fs.existsSync(source)) return null // nosemgrep
   const name = sanitizeFilename(file.originalName)
-  await fs.promises.copyFile(source, path.join(teachingUploadsDir(), name))
+  await fs.promises.copyFile(source, path.join(teachingUploadsDir(), name)) // nosemgrep
   return { ...file, name, relativePath: `/teaching/${name}`, url: "" }
 }
 
