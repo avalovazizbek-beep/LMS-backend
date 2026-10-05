@@ -2,6 +2,7 @@ import { Router, Response } from "express"
 import { v4 as uuid } from "uuid"
 import { documents, Document } from "../db/data"
 import { authMiddleware, requireRole, AuthRequest } from "../middleware/auth"
+import { pickFields } from "../services/pickFields"
 
 const router = Router()
 router.use(authMiddleware)
@@ -30,7 +31,7 @@ router.patch("/:id/download", (req: AuthRequest, res: Response): void => {
 router.put("/:id", requireRole("super_admin", "admin"), (req: AuthRequest, res: Response): void => {
   const idx = documents.findIndex((d) => d.id === req.params.id)
   if (idx === -1) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
-  documents[idx] = { ...documents[idx], ...req.body }
+  documents[idx] = { ...documents[idx], ...pickFields<Document, keyof Document & string>(req.body, ["title", "category", "type", "size", "author", "date"]) }
   res.json({ success: true, data: documents[idx] })
 })
 

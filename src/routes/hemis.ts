@@ -272,7 +272,7 @@ async function fetchTutorGroupsFrom(endpoint: string, base: string, token: strin
       })
       .filter((g): g is SyncedGroup => g !== null)
   } catch (err) {
-    console.warn(`[hemis] ${endpoint} olishda xato:`, extractMessage(err))
+    console.warn("[hemis] %s olishda xato:", endpoint, extractMessage(err))
     return []
   }
 }
@@ -925,6 +925,19 @@ function textValue(...values: unknown[]) {
     if (typeof value === "number" && Number.isFinite(value)) return String(value)
   }
   return undefined
+}
+
+/** Qiymatni HTML ichidagi <script> ga xavfsiz joylash uchun JSON. JSON.stringify
+ *  `</script>` ni to'xtatmaydi — URL'dan kelgan qiymat skriptdan chiqib, sahifada
+ *  begona kod ishga tushirmasligi (XSS) uchun < > & va qator ajratgichlari
+ *  \uXXXX ko'rinishiga o'tkaziladi. */
+function scriptJson(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029")
 }
 
 function oauthCodeValue(value: unknown) {
@@ -2889,7 +2902,7 @@ async function safeEmployeeDataCount(path: string, params: Record<string, string
   try {
     return employeeDataTotal(path, params, user)
   } catch (err) {
-    console.warn(`[HEMIS employee dashboard] ${path}:`, extractMessage(err))
+    console.warn("[HEMIS employee dashboard] %s:", path, extractMessage(err))
     return 0
   }
 }
@@ -3470,15 +3483,15 @@ router.get("/oauth/:role", async (req, res: Response) => {
 <body style="font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f6f9ff;color:#012970">
 <p>Tizimga kirilmoqda...</p>
 <script>
-fetch(${JSON.stringify(`/api/hemis/oauth/exchange/${requestedRole}`)}, {
+fetch(${scriptJson(`/api/hemis/oauth/exchange/${requestedRole}`)}, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ code: ${JSON.stringify(code)}, state: ${JSON.stringify(state)} })
+  body: JSON.stringify({ code: ${scriptJson(code)}, state: ${scriptJson(state)} })
 })
   .then(function (r) { return r.json() })
   .then(function (data) { window.location.href = data.redirect })
   .catch(function () {
-    window.location.href = ${JSON.stringify(new URL(OAUTH_CALLBACK_PATH, FRONTEND_URL).toString())} + "?error=oauth_failed&message=" + encodeURIComponent("Tarmoq xatosi")
+    window.location.href = ${scriptJson(new URL(OAUTH_CALLBACK_PATH, FRONTEND_URL).toString())} + "?error=oauth_failed&message=" + encodeURIComponent("Tarmoq xatosi")
   })
 </script>
 </body></html>`)

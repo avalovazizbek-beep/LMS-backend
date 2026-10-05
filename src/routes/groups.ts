@@ -2,6 +2,7 @@ import { Router, Response } from "express"
 import { v4 as uuid } from "uuid"
 import { groups, Group } from "../db/data"
 import { authMiddleware, requireRole, AuthRequest } from "../middleware/auth"
+import { pickFields } from "../services/pickFields"
 
 const router = Router()
 router.use(authMiddleware)
@@ -29,7 +30,7 @@ router.post("/", requireRole("super_admin", "admin"), (req: AuthRequest, res: Re
 router.put("/:id", requireRole("super_admin", "admin"), (req: AuthRequest, res: Response): void => {
   const idx = groups.findIndex((g) => g.id === req.params.id)
   if (idx === -1) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
-  groups[idx] = { ...groups[idx], ...req.body }
+  groups[idx] = { ...groups[idx], ...pickFields<Group, keyof Group & string>(req.body, ["name", "course", "direction", "students", "tutor", "status"]) }
   res.json({ success: true, data: groups[idx] })
 })
 

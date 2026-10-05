@@ -2,6 +2,7 @@ import { Router, Response } from "express"
 import { v4 as uuid } from "uuid"
 import { payments, Payment } from "../db/data"
 import { authMiddleware, requireRole, AuthRequest } from "../middleware/auth"
+import { pickFields } from "../services/pickFields"
 
 const router = Router()
 router.use(authMiddleware)
@@ -41,7 +42,7 @@ router.patch("/:id/pay", requireRole("super_admin", "admin"), (req: AuthRequest,
 router.put("/:id", requireRole("super_admin", "admin"), (req: AuthRequest, res: Response): void => {
   const idx = payments.findIndex((p) => p.id === req.params.id)
   if (idx === -1) { res.status(404).json({ success: false, message: "Topilmadi" }); return }
-  payments[idx] = { ...payments[idx], ...req.body }
+  payments[idx] = { ...payments[idx], ...pickFields<Payment, keyof Payment & string>(req.body, ["student", "group", "semester", "total", "paid", "dueDate", "status"]) }
   res.json({ success: true, data: payments[idx] })
 })
 
