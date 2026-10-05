@@ -403,7 +403,7 @@ export async function runFullHemisSync(): Promise<void> {
 
       if (errors.length) {
         await markHemisSyncFailed(logId, errors.join(" | "))
-        console.warn(`[hemisSync] QISMAN tugadi (${errors.length} ta resurs xato berdi) —`, { ...counts, curricula }, errors)
+        console.warn("[hemisSync] QISMAN tugadi (%d ta resurs xato berdi) —", errors.length, { ...counts, curricula }, errors)
       } else {
         await markHemisSyncFinished(logId, counts)
         console.log(
