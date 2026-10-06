@@ -149,6 +149,16 @@ function numberValue(value: unknown): number | null {
 const CONTENT_TYPES: ContentType[] = ["lesson", "assignment", "exam", "mavzu", "kurs-topshiriq", "kalendar", "malumot"]
 const EXAM_PASS_RATIO = 0.6   // 60% — test o'tish chegarasi (keyingi mavzuni ochish uchun)
 
+// Institut baholash tuzilishi: JN 35 (faqat amaliyot) + ON1 17 + ON2 18 = 70
+// (umumiy), YN 30 → jami 100. Jurnal ballarni shu maksimallarga nisbatan
+// butun son qilib beradi (32.3 → 32, 33.6 → 34).
+const GRADE_SCALE = { jn: 35, on1: 17, on2: 18, yn: 30 } as const
+const JN_TRAINING_TYPE = "Amaliyot"
+
+function toScaleBall(pct: number, max: number): number {
+  return Math.round((Math.min(100, Math.max(0, pct)) * max) / 100)
+}
+
 // Old submissions stored grade as 0-100 percentage; new ones are scaled to contentMaxScore.
 // If grade > maxScore (and maxScore > 0 && maxScore < 100), it's old format — convert it.
 function normalizeGrade(grade: number | null | undefined, maxScore: number | null | undefined): number {
@@ -3139,35 +3149,45 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
     return
   }
 
-  const allContent = await listTeacherContent({ teacherUserId: tId, groupId, subjectName })
+  // Fanning barcha o'qituvchilari kontenti — amaliyot domlasining JN'i va
+  // ma'ruza domlasining oraliq nazorati bitta qatorda yig'iladi (talaba ham
+  // mavzularni shu tarzda, o'qituvchidan qat'i nazar ko'radi).
+  const allContent = await listTeacherContent({ groupId, subjectName })
 
-  // Topiclarni topic_key bo'yicha guruhlash, sana bo'yicha tartiblash
-  const topicMap = new Map<string, { minDate: number; items: TeacherContentRecord[] }>()
+  const topicMap = new Map<string, TeacherContentRecord[]>()
   for (const c of allContent) {
-    const key = c.topicKey ?? ""
-    if (!key) continue
-    if (!topicMap.has(key)) topicMap.set(key, { minDate: new Date(c.availableFrom).getTime(), items: [] })
-    const entry = topicMap.get(key)!
-    const d = new Date(c.availableFrom).getTime()
-    if (d < entry.minDate) entry.minDate = d
-    entry.items.push(c)
+    if (!c.topicKey) continue
+    if (!topicMap.has(c.topicKey)) topicMap.set(c.topicKey, [])
+    topicMap.get(c.topicKey)!.push(c)
   }
 
-  const topics = Array.from(topicMap.entries())
+  // JN faqat amaliyot mavzularidagi test/topshiriqdan. Ma'ruza testlari
+  // faqat keyingi mavzuni ochish uchun — ball bermaydi; ma'ruza bahosi
+  // oraliq nazorat orqali qo'yiladi. Savolsiz test talabaga ko'rinmaydi.
+  const now = Date.now()
+  let untypedTopicCount = 0
+  const journalTopics = Array.from(topicMap.entries())
     .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
-    .map(([key, { items }], idx) => {
-      const mavzuItem = items.find(c => c.type === "mavzu") ?? items[0]
-      // Only exam and assignment items count toward score
-      const maxScore = items.reduce((s, c) => {
-        if (c.type === "exam" || c.type === "assignment") return s + (c.maxScore ?? 0)
-        return s
-      }, 0)
-      return { key, idx: idx + 1, title: mavzuItem?.title ?? key, maxScore }
+    .flatMap(([key, items]) => {
+      const graded = items.filter(c => (c.type === "exam" && c.questionCount > 0) || c.type === "assignment")
+      if (!graded.length) return []
+      const type = topicTrainingType(items)
+      if (type === null) untypedTopicCount++
+      if (type !== JN_TRAINING_TYPE) return []
+      const marker = items.find(c => c.type === "mavzu" && c.kind === "topic")
+      const maxScore = graded.reduce((s, c) => s + (c.maxScore && c.maxScore > 0 ? c.maxScore : 100), 0)
+      // Muddati o'tgan (va qayta ochilmagan) mavzuni topshirmagan talaba 0 oladi;
+      // muddati hali tugamagan mavzu esa JN'ni tushirmaydi.
+      const closed = !marker?.isReopened &&
+        graded.every(c => c.deadline != null && new Date(c.deadline).getTime() < now)
+      return [{ key, title: marker?.title ?? graded[0].title, maxScore, graded, closed }]
     })
+  const topics = journalTopics.map(({ key, title, maxScore }, i) => ({ key, idx: i + 1, title, maxScore }))
+  const meta = { scale: GRADE_SCALE, untypedTopicCount }
 
   const roster = await getGroupRoster(groupId, subjectName)
-  if (!roster.length || !topics.length) {
-    res.json({ success: true, data: { topics, students: [] } })
+  if (!roster.length) {
+    res.json({ success: true, data: { topics, students: [], ...meta } })
     return
   }
 
@@ -3184,7 +3204,7 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
   const periodExamContent = [...oraliqContent, ...yakuniyContent]
 
   const contentIds = Array.from(new Set([
-    ...allContent.filter(c => c.topicKey).map(c => c.id),
+    ...journalTopics.flatMap(tp => tp.graded.map(c => c.id)),
     ...periodExamContent.map(c => c.id),
   ]))
   const studentIds = roster.map(s => s.studentUserId)
@@ -3224,29 +3244,31 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
   const students = roster.map(s => {
     const topicScores: Record<string, number | null> = {}
 
-    for (const { key, items } of Array.from(topicMap.entries()).map(([k, v]) => ({ key: k, ...v }))) {
-      let earned = 0; let hasActivity = false
-      for (const c of items) {
-        if (c.type === "exam" || c.type === "assignment") {
-          const g = subMap.get(`${c.id}:${s.studentUserId}`)
-          if (g !== undefined) { earned += normalizeGrade(g, c.maxScore); hasActivity = true }
-        }
+    // Har bir mavzu 100 ballik (foiz) ko'rinishga keltiriladi, o'rtachasi
+    // JN maksimaliga (35) nisbatan butun ballga aylantiriladi.
+    let pctSum = 0
+    let counted = 0
+    for (const tp of journalTopics) {
+      let earned = 0
+      let graded = false
+      let pending = false
+      for (const c of tp.graded) {
+        const key = `${c.id}:${s.studentUserId}`
+        if (!subMap.has(key)) continue
+        const g = subMap.get(key)
+        if (g == null) { pending = true; continue }   // topshirilgan, hali baholanmagan
+        earned += normalizeGrade(g, c.maxScore)
+        graded = true
       }
-      topicScores[key] = hasActivity ? earned : null
+      topicScores[tp.key] = graded ? earned : null
+      if (graded) {
+        pctSum += Math.min(100, (earned / tp.maxScore) * 100)
+        counted++
+      } else if (!pending && tp.closed) {
+        counted++
+      }
     }
-
-    // Average of submitted topic scores (only topics where student has activity)
-    // Each topic score is converted to 0-100 percentage using its maxScore (default 100)
-    const submittedPcts = topics
-      .filter(t => topicScores[t.key] !== null && topicScores[t.key] !== undefined)
-      .map(t => {
-        const earned = topicScores[t.key] as number
-        const max = t.maxScore > 0 ? t.maxScore : 100
-        return Math.min(100, Math.round((earned / max) * 100 * 10) / 10)
-      })
-    const jn = submittedPcts.length > 0
-      ? Math.round(submittedPcts.reduce((a, b) => a + b, 0) / submittedPcts.length * 10) / 10
-      : null
+    const jn = counted > 0 ? toScaleBall(pctSum / counted, GRADE_SCALE.jn) : null
 
     const on1 = (oraliqContent[0] ? periodScoreFromExam(oraliqContent[0], s.studentUserId) : null)
       ?? periodMap.get(`${s.studentUserId}:ON1`) ?? null
@@ -3261,14 +3283,14 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
       studentIdNumber: s.studentIdNumber ?? null,
       topicScores,
       jn,
-      on1,
-      on2,
-      yn,
+      on1: on1 == null ? null : toScaleBall(on1, GRADE_SCALE.on1),
+      on2: on2 == null ? null : toScaleBall(on2, GRADE_SCALE.on2),
+      yn:  yn  == null ? null : toScaleBall(yn,  GRADE_SCALE.yn),
       attendancePct: attMap.get(s.studentUserId) ?? null,
     }
   })
 
-  res.json({ success: true, data: { topics, students } })
+  res.json({ success: true, data: { topics, students, ...meta } })
 })
 
 /* ── POST /period-grade — ON1/ON2/YN bahosini saqlash ───────────────── */
@@ -3454,11 +3476,11 @@ router.post("/notify-student", async (req: AuthRequest, res: Response): Promise<
   ]
   if (stats) {
     if (stats.subject)       lines.push(`📚 <b>Fan:</b> ${stats.subject}`)
-    if (stats.jn != null)    lines.push(`📊 <b>JN (joriy nazorat):</b> ${stats.jn}%`)
+    if (stats.jn != null)    lines.push(`📊 <b>JN (joriy nazorat):</b> ${stats.jn}/${GRADE_SCALE.jn}`)
     if (stats.topics)        lines.push(`📖 <b>Mavzular:</b> ${stats.topics}`)
-    if (stats.on1 != null)   lines.push(`📝 <b>ON1:</b> ${stats.on1}`)
-    if (stats.on2 != null)   lines.push(`📝 <b>ON2:</b> ${stats.on2}`)
-    if (stats.yn  != null)   lines.push(`📝 <b>YN:</b>  ${stats.yn}`)
+    if (stats.on1 != null)   lines.push(`📝 <b>ON1:</b> ${stats.on1}/${GRADE_SCALE.on1}`)
+    if (stats.on2 != null)   lines.push(`📝 <b>ON2:</b> ${stats.on2}/${GRADE_SCALE.on2}`)
+    if (stats.yn  != null)   lines.push(`📝 <b>YN:</b>  ${stats.yn}/${GRADE_SCALE.yn}`)
     if (stats.attendance != null) lines.push(`🏫 <b>Davomat:</b> ${stats.attendance}%`)
   }
   lines.push(``, `💬 <b>O'qituvchi xabari:</b>`)
