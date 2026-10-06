@@ -45,6 +45,9 @@ export interface AdminCertificateItem {
   teacherUserId: number
   fullName: string
   completedTopics: number
+  /** Kamida bitta materiali bor mavzular va har bir qism nechta mavzuda borligi */
+  totalTopics: number
+  partCounts: Record<TopicPart, number>
   certificate: { issuedAt: string; issuedBy: string | null; revoked: boolean } | null
 }
 
@@ -166,13 +169,27 @@ interface TopicInstance {
   title: string
   trainingType: string | null
   hasMarker: boolean
+  hasContent: boolean
   parts: Set<TopicPart>
+}
+
+export interface TeacherTopicStats {
+  /** To'liq mavzular (barcha majburiy qismlari bor) */
+  complete: number
+  /** Kamida bitta materiali bor mavzular */
+  total: number
+  /** Har bir qism nechta mavzuda bor — admin nima yetishmayotganini ko'rishi uchun */
+  parts: Record<TopicPart, number>
 }
 
 /** O'qituvchi → to'liq mavzular soni (mavzusi bor har bir o'qituvchi, 0 bo'lsa ham).
     Bitta mavzu parallel guruhlarga nusxalangan bo'lsa BITTA sanaladi (fan + tur +
     nom bo'yicha) — aks holda bitta mavzuni 15 guruhga nusxalash yetarli bo'lardi. */
 function countCompleteTopics(rows: mysql.RowDataPacket[], required: TopicPart[]): Map<number, number> {
+  return new Map(Array.from(topicStats(rows, required), ([teacher, s]) => [teacher, s.complete]))
+}
+
+function topicStats(rows: mysql.RowDataPacket[], required: TopicPart[]): Map<number, TeacherTopicStats> {
   const instances = new Map<string, TopicInstance>()
   for (const row of rows) {
     const key = String(row.topic_key)
@@ -184,6 +201,7 @@ function countCompleteTopics(rows: mysql.RowDataPacket[], required: TopicPart[])
         title: String(row.title),
         trainingType: row.training_type ?? null,
         hasMarker: false,
+        hasContent: false,
         parts: new Set(),
       }
       instances.set(key, inst)
@@ -195,19 +213,37 @@ function countCompleteTopics(rows: mysql.RowDataPacket[], required: TopicPart[])
       inst.hasMarker = true
       continue
     }
+    inst.hasContent = true
     if (!inst.hasMarker && !inst.trainingType && row.training_type) inst.trainingType = row.training_type
     const part = partOf(row)
     if (part) inst.parts.add(part)
   }
 
-  const complete = new Map<number, Set<string>>()
+  // Noyob mavzu (fan + tur + nom) bo'yicha: to'liq bo'lgani, umuman bor
+  // bo'lgani va har bir qism uchrashi — parallel nusxalarning birortasida
+  // bo'lsa yetarli.
+  const byTeacher = new Map<number, { complete: Set<string>; total: Set<string>; parts: Record<TopicPart, Set<string>> }>()
   for (const inst of instances.values()) {
-    if (!complete.has(inst.teacherUserId)) complete.set(inst.teacherUserId, new Set())
-    if (!required.every((p) => inst.parts.has(p))) continue
+    let acc = byTeacher.get(inst.teacherUserId)
+    if (!acc) {
+      acc = { complete: new Set(), total: new Set(), parts: { media: new Set(), presentation: new Set(), guide: new Set(), check: new Set() } }
+      byTeacher.set(inst.teacherUserId, acc)
+    }
     const id = [inst.subjectName, inst.trainingType ?? "", inst.title].map((s) => s.trim().toLowerCase()).join("|")
-    complete.get(inst.teacherUserId)!.add(id)
+    if (inst.hasContent) acc.total.add(id)
+    for (const p of inst.parts) acc.parts[p].add(id)
+    if (required.every((p) => inst.parts.has(p))) acc.complete.add(id)
   }
-  return new Map(Array.from(complete, ([teacher, ids]) => [teacher, ids.size]))
+  return new Map(Array.from(byTeacher, ([teacher, acc]) => [teacher, {
+    complete: acc.complete.size,
+    total: acc.total.size,
+    parts: {
+      media: acc.parts.media.size,
+      presentation: acc.parts.presentation.size,
+      guide: acc.parts.guide.size,
+      check: acc.parts.check.size,
+    },
+  }]))
 }
 
 /* ── Tashakkurnoma yozuvlari ────────────────────────────────────────── */
@@ -319,11 +355,11 @@ export function startCertificateSweep(intervalMs = 10 * 60 * 1000) {
 /* ── Admin ──────────────────────────────────────────────────────────── */
 export async function listCertificatesForAdmin(q: string): Promise<AdminCertificateItem[]> {
   const config = await getCertificateConfig()
-  const counts = countCompleteTopics(await loadTopicRows({}), config.parts)
+  const stats = topicStats(await loadTopicRows({}), config.parts)
   const [certRows] = await pool.query<mysql.RowDataPacket[]>("SELECT * FROM lms_teacher_certificates")
   const certs = new Map(certRows.map((r) => [Number(r.teacher_user_id), mapCertificateRow(r)]))
 
-  const ids = new Set<number>([...counts.keys(), ...certs.keys()])
+  const ids = new Set<number>([...stats.keys(), ...certs.keys()])
   // Har bir so'z alohida, tartibidan qat'i nazar: "Kudratova Iroda Turdibayevna"
   // ham, "Iroda Kudratova" ham topadi. Tashakkurnomadagi ism faqat 2 so'z
   // (familiya + ism) — shuning uchun qidiruv to'liq ism bo'yicha qilinadi.
@@ -342,10 +378,13 @@ export async function listCertificatesForAdmin(q: string): Promise<AdminCertific
     .map((id) => {
       const cert = certs.get(id)
       const fullName = fullNames.get(id) ?? ""
+      const s = stats.get(id)
       return {
         teacherUserId: id,
         fullName: cert?.fullName || certificateDisplayName(fullName),
-        completedTopics: counts.get(id) ?? 0,
+        completedTopics: s?.complete ?? 0,
+        totalTopics: s?.total ?? 0,
+        partCounts: s?.parts ?? { media: 0, presentation: 0, guide: 0, check: 0 },
         certificate: cert ? { issuedAt: cert.issuedAt, issuedBy: cert.issuedBy, revoked: cert.revokedAt !== null } : null,
         haystack: searchText(`${fullName} ${cert?.fullName ?? ""}`),
       }
