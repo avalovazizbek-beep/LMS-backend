@@ -1,7 +1,7 @@
 import fs from "fs"
 import path from "path"
 import jwt from "jsonwebtoken"
-import { Router, Response, NextFunction } from "express"
+import express, { Router, Response, NextFunction } from "express"
 import type { RowDataPacket } from "mysql2"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
@@ -34,6 +34,17 @@ import {
   type PermissionAction,
 } from "../services/permissionsStore"
 import { logAudit, listAuditLog } from "../services/auditLog"
+import {
+  getCertificateConfig,
+  certificateDisplayName,
+  parseParts,
+  sweepCertificates,
+  listCertificatesForAdmin,
+  issueCertificateManually,
+  revokeCertificate,
+  saveCustomTemplate,
+  resetCustomTemplate,
+} from "../services/certificateStore"
 import {
   listEditRequests as listAttendanceEditRequests,
   countPendingEditRequests as countPendingAttendanceEditRequests,
@@ -976,12 +987,30 @@ router.get("/settings", adminOnly, async (_req: AuthRequest, res: Response): Pro
 /* ── PUT /api/admin/settings ────────────────────────────────────────── */
 router.put("/settings", requirePermission("settings", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const updates = req.body as Record<string, unknown>
-  const allowed = new Set(["face_block_threshold", "test_max_attempts", "meeting_attendance_minutes", "attendance_mode"])
+  const allowed = new Set([
+    "face_block_threshold", "test_max_attempts", "meeting_attendance_minutes", "attendance_mode",
+    "certificate_auto", "certificate_topic_goal", "certificate_parts",
+  ])
   const applied: Record<string, string> = {}
 
   for (const [key, val] of Object.entries(updates)) {
     if (!allowed.has(key)) continue
-    const value = String(val ?? "").trim()
+    let value = String(val ?? "").trim()
+    if (key === "certificate_auto") value = value === "0" || value === "false" ? "0" : "1"
+    if (key === "certificate_topic_goal") {
+      const goal = Number(value)
+      if (!Number.isInteger(goal) || goal < 1 || goal > 200) {
+        res.status(400).json({ success: false, message: "Mavzular soni 1 dan 200 gacha bo'lishi kerak" })
+        return
+      }
+    }
+    if (key === "certificate_parts") {
+      value = parseParts(value).join(",")
+      if (!value) {
+        res.status(400).json({ success: false, message: "Kamida bitta qism tanlang" })
+        return
+      }
+    }
     if (!value) continue
     await pool.query(
       "INSERT INTO lms_settings (key_name, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
@@ -990,8 +1019,82 @@ router.put("/settings", requirePermission("settings", "edit"), async (req: AuthR
     applied[key] = value
   }
   void logAudit(req, "settings.update", "settings", null, applied)
+  // Talab yumshatilgan bo'lsa — shartga yetgan o'qituvchilar darhol oladi
+  if (Object.keys(applied).some((k) => k.startsWith("certificate_"))) {
+    sweepCertificates().catch((err) => console.warn("[certificate] tekshiruv xatosi:", (err as Error)?.message ?? err))
+  }
 
   res.json({ success: true, message: "Sozlamalar saqlandi" })
+})
+
+/* ── Tashakkurnomalar ───────────────────────────────────────────────── */
+function adminDisplayName(req: AuthRequest) {
+  return certificateDisplayName(String(req.user?.fullName || req.user?.username || "")) || "Admin"
+}
+
+/* GET /api/admin/certificates?q= — o'qituvchilar: to'liq mavzular soni va tashakkurnoma holati */
+router.get("/certificates", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const q = typeof req.query.q === "string" ? req.query.q.slice(0, 100) : ""
+  const [items, config] = await Promise.all([listCertificatesForAdmin(q), getCertificateConfig()])
+  res.json({ success: true, data: { items, config } })
+})
+
+/* POST /api/admin/certificates/template — yangi shablon rasmi (PNG/JPEG/WEBP, xom tana) */
+router.post(
+  "/certificates/template",
+  express.raw({ type: ["image/*", "application/octet-stream"], limit: "15mb" }),
+  requirePermission("settings", "edit"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    const body = req.body
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+      res.status(400).json({ success: false, message: "Fayl bo'sh yoki noto'g'ri format" })
+      return
+    }
+    if (!(await saveCustomTemplate(body))) {
+      res.status(400).json({ success: false, message: "Faqat PNG, JPEG yoki WEBP rasm qabul qilinadi" })
+      return
+    }
+    void logAudit(req, "certificate.template", "certificate", null, { size: body.length })
+    res.json({ success: true, message: "Shablon yangilandi" })
+  }
+)
+
+/* DELETE /api/admin/certificates/template — standart shablonga qaytarish */
+router.delete("/certificates/template", requirePermission("settings", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  await resetCustomTemplate()
+  void logAudit(req, "certificate.template.reset", "certificate", null, {})
+  res.json({ success: true, message: "Standart shablon tiklandi" })
+})
+
+/* POST /api/admin/certificates/:teacherUserId — qo'lda berish (bekor qilinganini qayta tiklash ham) */
+router.post("/certificates/:teacherUserId", requirePermission("settings", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const teacherUserId = Number(req.params.teacherUserId)
+  if (!Number.isInteger(teacherUserId) || teacherUserId <= 0) {
+    res.status(400).json({ success: false, message: "Noto'g'ri o'qituvchi ID" })
+    return
+  }
+  const result = await issueCertificateManually(teacherUserId, adminDisplayName(req))
+  if (result === "already") {
+    res.status(409).json({ success: false, message: "Bu o'qituvchiga tashakkurnoma allaqachon berilgan" })
+    return
+  }
+  if (result === "no-name") {
+    res.status(400).json({ success: false, message: "O'qituvchining ismi topilmadi" })
+    return
+  }
+  void logAudit(req, "certificate.issue", "certificate", String(teacherUserId), {})
+  res.json({ success: true, message: "Tashakkurnoma berildi" })
+})
+
+/* DELETE /api/admin/certificates/:teacherUserId — bekor qilish (avtomatik qayta berilmaydi) */
+router.delete("/certificates/:teacherUserId", requirePermission("settings", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const teacherUserId = Number(req.params.teacherUserId)
+  if (!Number.isInteger(teacherUserId) || teacherUserId <= 0 || !(await revokeCertificate(teacherUserId))) {
+    res.status(404).json({ success: false, message: "Faol tashakkurnoma topilmadi" })
+    return
+  }
+  void logAudit(req, "certificate.revoke", "certificate", String(teacherUserId), {})
+  res.json({ success: true, message: "Tashakkurnoma bekor qilindi" })
 })
 
 /* ── GET /api/admin/face-requests ──────────────────────────────────── */

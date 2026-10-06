@@ -40,6 +40,7 @@ import {
 import { publicResourcePath } from "./services/localResourceStore"
 import { initDatabase } from "./services/db"
 import { runFullHemisSync } from "./services/hemisSync"
+import { startCertificateSweep } from "./services/certificateStore"
 import * as mediasoupService from "./services/mediasoupService"
 
 process.on("unhandledRejection", (reason) => {
@@ -565,6 +566,8 @@ async function start() {
     console.log("✓ MySQL tayyor")
     // Dars va topshiriq muddati eslatmalari (har daqiqada)
     startNotificationScheduler()
+    // Tashakkurnoma: shartga yetgan o'qituvchilarga orqa fonda beriladi (har 10 daqiqada)
+    startCertificateSweep()
 
     // HEMIS to'liq talaba/xodim/guruh ro'yxati — login blokidan mustaqil
     // admin-token orqali fon rejimida sinxronlanadi (services/hemisSync.ts).

@@ -117,7 +117,7 @@ import { isAdminUser } from "./admin"
 import { isDemoUser } from "../services/demoHemis"
 import { logAudit } from "../services/auditLog"
 import { syncTopicToGroups } from "../services/topicSync"
-import { teacherCertificateStatus } from "../services/certificateStore"
+import { teacherCertificate, certificateDisplayName, getCustomTemplate } from "../services/certificateStore"
 
 const router = Router()
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
@@ -863,25 +863,22 @@ router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
   })
 })
 
-/* Tashakkurnomaga yoziladigan "Familiya Ism". HEMIS ismlarni katta harflarda
-   beradi (MIRZAYEV KULMAMAT DJANZAKOVICH) — otasining ismi qatorga sig'maydi. */
+/* Tashakkurnomaga yoziladigan "Familiya Ism" — token profilidan, bo'lmasa
+   HEMIS xodimlar katalogidan. */
 async function certificateName(user: AuthUser | undefined, tId: number): Promise<string> {
   const profile = user?.employeeProfile ?? {}
-  let words = [textValue(profile.second_name), textValue(profile.first_name)].filter(Boolean)
-  if (words.length < 2) {
-    const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
-      "SELECT full_name FROM hemis_employees_directory WHERE hemis_id = ? LIMIT 1",
-      [tId]
-    )
-    words = (textValue(rows[0]?.full_name) || fullNameOf(user)).split(/\s+/).filter(Boolean).slice(0, 2)
-  }
-  return words
-    .map((w) => w.toLowerCase().replace(/(^|-)(\S)/g, (_m, sep: string, ch: string) => sep + ch.toUpperCase()))
-    .join(" ")
+  const surname = textValue(profile.second_name)
+  const firstName = textValue(profile.first_name)
+  if (surname && firstName) return certificateDisplayName(`${surname} ${firstName}`)
+  const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
+    "SELECT full_name FROM hemis_employees_directory WHERE hemis_id = ? LIMIT 1",
+    [tId]
+  )
+  return certificateDisplayName(textValue(rows[0]?.full_name) || fullNameOf(user))
 }
 
-/* ── GET /certificate — o'qituvchi: tashakkurnoma holati (necha mavzu to'liq,
-   nimasi yetishmaydi). 15 taga yetganda shu so'rovda beriladi. ── */
+/* ── GET /certificate — o'qituvchi: berilgan tashakkurnoma (yoki null).
+   Progress ataylab qaytarilmaydi — tashakkurnoma kutilmaganda chiqishi kerak. ── */
 router.get("/certificate", async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.user?.role !== "employee") {
     res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
@@ -889,12 +886,25 @@ router.get("/certificate", async (req: AuthRequest, res: Response): Promise<void
   }
   try {
     const tId = teacherUserId(req.user)
-    const data = await teacherCertificateStatus(tId, await certificateName(req.user, tId))
-    res.json({ success: true, data })
+    const certificate = await teacherCertificate(tId, await certificateName(req.user, tId))
+    res.json({ success: true, data: { certificate } })
   } catch (err) {
     console.error("[certificate]", err)
-    res.status(500).json({ success: false, message: "Tashakkurnoma holatini olib bo'lmadi" })
+    res.status(500).json({ success: false, message: "Tashakkurnomani olib bo'lmadi" })
   }
+})
+
+/* ── GET /certificate/template — admin yuklagan shablon (yo'q bo'lsa 404 —
+   frontend o'zidagi standart shablonni ishlatadi) ── */
+router.get("/certificate/template", async (_req: AuthRequest, res: Response): Promise<void> => {
+  const template = await getCustomTemplate()
+  if (!template) {
+    res.status(404).json({ success: false, message: "Maxsus shablon yo'q" })
+    return
+  }
+  res.setHeader("Content-Type", template.mimeType)
+  res.setHeader("Cache-Control", "no-store")
+  fs.createReadStream(template.filePath).pipe(res) // nosemgrep
 })
 
 /* ── GET /groups — biriktirilgan guruhlar ─────────────────────────── */

@@ -758,6 +758,9 @@ export async function initDatabase() {
       UNIQUE KEY uq_teacher_certificates_teacher (teacher_user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_teacher_certificates")
+  // issued_by NULL — avtomatik; revoked_at — admin bekor qilgan (avtomatik qayta berilmaydi)
+  await execIgnoreDuplicate(`ALTER TABLE lms_teacher_certificates ADD COLUMN issued_by VARCHAR(255) NULL AFTER issued_at`)
+  await execIgnoreDuplicate(`ALTER TABLE lms_teacher_certificates ADD COLUMN revoked_at TIMESTAMP NULL AFTER issued_by`)
 
   // ── Qayta o'qish (reedu): HEMIS'da fandan umumiy ball 55dan past chiqqan
   // (retraining_status=true) talabani maxsus "reedu" guruhga biriktirib,
@@ -1234,7 +1237,10 @@ export async function initDatabase() {
     INSERT IGNORE INTO lms_settings (key_name, value) VALUES
       ('face_block_threshold', '3'),
       ('test_max_attempts', '1'),
-      ('attendance_mode', 'auto')
+      ('attendance_mode', 'auto'),
+      ('certificate_auto', '1'),
+      ('certificate_topic_goal', '15'),
+      ('certificate_parts', 'media,presentation,guide,check')
   `)
 
   // hemis_users.teacher_user_id ni profile JSON'dagi raqamli ID dan to'ldirish
