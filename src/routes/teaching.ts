@@ -117,6 +117,7 @@ import { isAdminUser } from "./admin"
 import { isDemoUser } from "../services/demoHemis"
 import { logAudit } from "../services/auditLog"
 import { syncTopicToGroups } from "../services/topicSync"
+import { teacherCertificateStatus } from "../services/certificateStore"
 
 const router = Router()
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
@@ -860,6 +861,40 @@ router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
       attendanceMode: raw.attendance_mode === "manual" ? "manual" : "auto",
     },
   })
+})
+
+/* Tashakkurnomaga yoziladigan "Familiya Ism". HEMIS ismlarni katta harflarda
+   beradi (MIRZAYEV KULMAMAT DJANZAKOVICH) — otasining ismi qatorga sig'maydi. */
+async function certificateName(user: AuthUser | undefined, tId: number): Promise<string> {
+  const profile = user?.employeeProfile ?? {}
+  let words = [textValue(profile.second_name), textValue(profile.first_name)].filter(Boolean)
+  if (words.length < 2) {
+    const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
+      "SELECT full_name FROM hemis_employees_directory WHERE hemis_id = ? LIMIT 1",
+      [tId]
+    )
+    words = (textValue(rows[0]?.full_name) || fullNameOf(user)).split(/\s+/).filter(Boolean).slice(0, 2)
+  }
+  return words
+    .map((w) => w.toLowerCase().replace(/(^|-)(\S)/g, (_m, sep: string, ch: string) => sep + ch.toUpperCase()))
+    .join(" ")
+}
+
+/* ── GET /certificate — o'qituvchi: tashakkurnoma holati (necha mavzu to'liq,
+   nimasi yetishmaydi). 15 taga yetganda shu so'rovda beriladi. ── */
+router.get("/certificate", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  try {
+    const tId = teacherUserId(req.user)
+    const data = await teacherCertificateStatus(tId, await certificateName(req.user, tId))
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error("[certificate]", err)
+    res.status(500).json({ success: false, message: "Tashakkurnoma holatini olib bo'lmadi" })
+  }
 })
 
 /* ── GET /groups — biriktirilgan guruhlar ─────────────────────────── */

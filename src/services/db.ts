@@ -745,6 +745,20 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_exam_retake_grants")
 
+  // ── O'qituvchi tashakkurnomasi: 15 ta mavzuni to'liq to'ldirganda bir marta
+  // beriladi (certificateStore.ts). Sana berilgan kunida qotadi — keyin mavzu
+  // o'chirilsa ham tashakkurnoma qaytib olinmaydi. ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_teacher_certificates (
+      id                INT AUTO_INCREMENT PRIMARY KEY,
+      teacher_user_id   INT NOT NULL,
+      full_name         VARCHAR(255) NOT NULL,
+      completed_topics  INT NOT NULL,
+      issued_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_teacher_certificates_teacher (teacher_user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_teacher_certificates")
+
   // ── Qayta o'qish (reedu): HEMIS'da fandan umumiy ball 55dan past chiqqan
   // (retraining_status=true) talabani maxsus "reedu" guruhga biriktirib,
   // jadval/davomat/nazoratni oxirigacha LMS ichida yuritish uchun ──
