@@ -117,7 +117,7 @@ import { isAdminUser } from "./admin"
 import { isDemoUser } from "../services/demoHemis"
 import { logAudit } from "../services/auditLog"
 import { syncTopicToGroups } from "../services/topicSync"
-import { teacherCertificate, certificateDisplayName, getCustomTemplate } from "../services/certificateStore"
+import { teacherCertificate, markCertificateSeen, certificateDisplayName, getCustomTemplate } from "../services/certificateStore"
 
 const router = Router()
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
@@ -891,6 +891,22 @@ router.get("/certificate", async (req: AuthRequest, res: Response): Promise<void
   } catch (err) {
     console.error("[certificate]", err)
     res.status(500).json({ success: false, message: "Tashakkurnomani olib bo'lmadi" })
+  }
+})
+
+/* ── POST /certificate/seen — o'qituvchi tashakkurnomani ko'rdi (avtomatik
+   ochilish faqat birinchi marta bo'lishi uchun) ── */
+router.post("/certificate/seen", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  try {
+    await markCertificateSeen(teacherUserId(req.user))
+    res.json({ success: true })
+  } catch (err) {
+    console.error("[certificate seen]", err)
+    res.status(500).json({ success: false, message: "Saqlab bo'lmadi" })
   }
 })
 

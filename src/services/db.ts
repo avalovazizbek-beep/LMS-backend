@@ -761,6 +761,8 @@ export async function initDatabase() {
   // issued_by NULL — avtomatik; revoked_at — admin bekor qilgan (avtomatik qayta berilmaydi)
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_certificates ADD COLUMN issued_by VARCHAR(255) NULL AFTER issued_at`)
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_certificates ADD COLUMN revoked_at TIMESTAMP NULL AFTER issued_by`)
+  // seen_at NULL — o'qituvchi hali ko'rmagan: saytga kirganda tashakkurnoma o'zi ochiladi
+  await execIgnoreDuplicate(`ALTER TABLE lms_teacher_certificates ADD COLUMN seen_at TIMESTAMP NULL AFTER revoked_at`)
 
   // ── Qayta o'qish (reedu): HEMIS'da fandan umumiy ball 55dan past chiqqan
   // (retraining_status=true) talabani maxsus "reedu" guruhga biriktirib,

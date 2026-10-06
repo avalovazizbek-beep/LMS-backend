@@ -32,6 +32,8 @@ export interface TeacherCertificate {
   fullName: string
   completedTopics: number
   issuedAt: string
+  /** O'qituvchi ochib ko'rganmi — yo'q bo'lsa saytga kirganda o'zi ochiladi */
+  seen: boolean
 }
 
 interface CertificateRow extends TeacherCertificate {
@@ -204,6 +206,7 @@ function mapCertificateRow(row: mysql.RowDataPacket): CertificateRow {
     issuedAt: fromMysqlDate(row.issued_at),
     issuedBy: row.issued_by ?? null,
     revokedAt: row.revoked_at ? fromMysqlDate(row.revoked_at) : null,
+    seen: row.seen_at != null,
   }
 }
 
@@ -258,7 +261,15 @@ export async function teacherCertificate(teacherUserId: number, fullName: string
     await pool.query("UPDATE lms_teacher_certificates SET full_name = ? WHERE teacher_user_id = ?", [fullName, teacherUserId])
     row = { ...row, fullName }
   }
-  return { fullName: row.fullName, completedTopics: row.completedTopics, issuedAt: row.issuedAt }
+  return { fullName: row.fullName, completedTopics: row.completedTopics, issuedAt: row.issuedAt, seen: row.seen }
+}
+
+/** O'qituvchi tashakkurnomani ko'rdi — keyingi kirishlarda o'zi ochilmaydi */
+export async function markCertificateSeen(teacherUserId: number): Promise<void> {
+  await pool.query(
+    "UPDATE lms_teacher_certificates SET seen_at = CURRENT_TIMESTAMP WHERE teacher_user_id = ? AND seen_at IS NULL AND revoked_at IS NULL",
+    [teacherUserId]
+  )
 }
 
 let sweeping = false
@@ -339,7 +350,7 @@ export async function issueCertificateManually(teacherUserId: number, issuedBy: 
     `INSERT INTO lms_teacher_certificates (teacher_user_id, full_name, completed_topics, issued_by)
      VALUES (?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE full_name = VALUES(full_name), completed_topics = VALUES(completed_topics),
-       issued_by = VALUES(issued_by), issued_at = CURRENT_TIMESTAMP, revoked_at = NULL`,
+       issued_by = VALUES(issued_by), issued_at = CURRENT_TIMESTAMP, revoked_at = NULL, seen_at = NULL`,
     [teacherUserId, name, count, issuedBy]
   )
   notifyIssued(teacherUserId)
