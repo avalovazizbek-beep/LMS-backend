@@ -86,21 +86,33 @@ export function certificateDisplayName(raw: string): string {
     .join(" ")
 }
 
-/** O'qituvchi ID'lari bo'yicha ism: avval HEMIS xodimlar katalogi, keyin login keshi */
-async function directoryNames(ids: number[]): Promise<Map<number, string>> {
+/** O'qituvchi ID'lari bo'yicha TO'LIQ ism (otasining ismi bilan): avval
+    login keshi, ustidan HEMIS xodimlar katalogi */
+async function directoryFullNames(ids: number[]): Promise<Map<number, string>> {
   const names = new Map<number, string>()
   if (!ids.length) return names
   const [cached] = await pool.query<mysql.RowDataPacket[]>(
     "SELECT teacher_user_id AS id, full_name FROM hemis_users WHERE role = 'employee' AND teacher_user_id IN (?) AND full_name IS NOT NULL",
     [ids]
   )
-  for (const r of cached) names.set(Number(r.id), certificateDisplayName(String(r.full_name)))
+  for (const r of cached) names.set(Number(r.id), String(r.full_name).trim())
   const [dir] = await pool.query<mysql.RowDataPacket[]>(
     "SELECT hemis_id AS id, full_name FROM hemis_employees_directory WHERE hemis_id IN (?)",
     [ids]
   )
-  for (const r of dir) names.set(Number(r.id), certificateDisplayName(String(r.full_name)))
+  for (const r of dir) names.set(Number(r.id), String(r.full_name).trim())
   return names
+}
+
+/** Tashakkurnomaga yoziladigan qisqa ism (familiya + ism) */
+async function directoryNames(ids: number[]): Promise<Map<number, string>> {
+  const full = await directoryFullNames(ids)
+  return new Map(Array.from(full, ([id, name]) => [id, certificateDisplayName(name)]))
+}
+
+// Qidiruv uchun: kichik harf, apostrof turlari bitta ko'rinishda (O‘G‘LI = O'G'LI)
+function searchText(s: string): string {
+  return s.toLowerCase().replace(/[ʻʼ’‘`´]/g, "'")
 }
 
 /* ── To'liq mavzular hisobi ─────────────────────────────────────────── */
@@ -312,28 +324,34 @@ export async function listCertificatesForAdmin(q: string): Promise<AdminCertific
   const certs = new Map(certRows.map((r) => [Number(r.teacher_user_id), mapCertificateRow(r)]))
 
   const ids = new Set<number>([...counts.keys(), ...certs.keys()])
-  const query = q.trim()
-  if (query) {
+  // Har bir so'z alohida, tartibidan qat'i nazar: "Kudratova Iroda Turdibayevna"
+  // ham, "Iroda Kudratova" ham topadi. Tashakkurnomadagi ism faqat 2 so'z
+  // (familiya + ism) — shuning uchun qidiruv to'liq ism bo'yicha qilinadi.
+  const words = searchText(q.trim()).split(/\s+/).filter(Boolean).slice(0, 5)
+  if (words.length) {
     const [found] = await pool.query<mysql.RowDataPacket[]>(
-      "SELECT hemis_id FROM hemis_employees_directory WHERE is_active = 1 AND full_name LIKE ? LIMIT 50",
-      [`%${query}%`]
+      `SELECT hemis_id FROM hemis_employees_directory
+        WHERE is_active = 1 AND ${words.map(() => "full_name LIKE ?").join(" AND ")} LIMIT 50`,
+      words.map((w) => `%${w.replace(/'/g, "_")}%`)   // _ — bazadagi ‘ yoki ' ham mos keladi
     )
     for (const r of found) ids.add(Number(r.hemis_id))
   }
-  const names = await directoryNames(Array.from(ids))
+  const fullNames = await directoryFullNames(Array.from(ids))
 
-  const needle = query.toLowerCase()
   return Array.from(ids)
     .map((id) => {
       const cert = certs.get(id)
+      const fullName = fullNames.get(id) ?? ""
       return {
         teacherUserId: id,
-        fullName: cert?.fullName || names.get(id) || "",
+        fullName: cert?.fullName || certificateDisplayName(fullName),
         completedTopics: counts.get(id) ?? 0,
         certificate: cert ? { issuedAt: cert.issuedAt, issuedBy: cert.issuedBy, revoked: cert.revokedAt !== null } : null,
+        haystack: searchText(`${fullName} ${cert?.fullName ?? ""}`),
       }
     })
-    .filter((item) => !needle || item.fullName.toLowerCase().includes(needle))
+    .filter((item) => words.every((w) => item.haystack.includes(w)))
+    .map(({ haystack: _haystack, ...item }) => item)
     .sort((a, b) => b.completedTopics - a.completedTopics || a.fullName.localeCompare(b.fullName))
 }
 
