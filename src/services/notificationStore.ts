@@ -96,8 +96,8 @@ export async function bumpGroupedNotification(
   const { title, body } = input.text(n)
   if (existing) {
     await pool.query(
-      `UPDATE lms_notifications SET title = ?, body = ?, i18n_params = ?, link = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?`,
-      [title.slice(0, 255), body, JSON.stringify(params), input.link ?? null, existing.id]
+      `UPDATE lms_notifications SET title = ?, body = ?, i18n_key = ?, i18n_params = ?, link = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [title.slice(0, 255), body, input.i18nKey ?? null, JSON.stringify(params), input.link ?? null, existing.id]
     )
     return
   }

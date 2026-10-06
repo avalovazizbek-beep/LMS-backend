@@ -1325,6 +1325,45 @@ export async function getSubmissionsBulk(
   }))
 }
 
+/* ── Baholanmagan ishlar — o'qituvchi qaysi guruh/fan/topshiriqda yangi
+   ish borligini bir qarashda ko'rishi uchun (yakunlangan topshiriq —
+   baholab bo'lmaydi, hisobga kirmaydi). ─────────────────────────────── */
+export interface PendingGradingItem {
+  contentId: number
+  title: string
+  groupId: number | null
+  groupName: string | null
+  subjectName: string
+  count: number
+  lastStudent: string | null
+  lastAt: string | null
+}
+
+export async function getPendingGrading(teacherUserId: number): Promise<PendingGradingItem[]> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT c.id AS content_id, c.title, c.group_id, c.subject_name, g.name AS group_name,
+            COUNT(*) AS n, MAX(s.submitted_at) AS last_at,
+            SUBSTRING_INDEX(GROUP_CONCAT(s.student_full_name ORDER BY s.submitted_at DESC SEPARATOR '\\n'), '\\n', 1) AS last_student
+     FROM lms_submissions s
+     JOIN lms_teacher_content c ON c.id = s.content_id
+     LEFT JOIN lms_groups g ON g.id = c.group_id
+     WHERE c.teacher_user_id = ? AND c.type = 'assignment' AND c.is_active = 1 AND s.grade IS NULL
+     GROUP BY c.id, c.title, c.group_id, c.subject_name, g.name
+     ORDER BY last_at DESC`,
+    [teacherUserId]
+  )
+  return rows.map(r => ({
+    contentId: Number(r.content_id),
+    title: String(r.title ?? ""),
+    groupId: r.group_id != null ? Number(r.group_id) : null,
+    groupName: r.group_name != null ? String(r.group_name) : null,
+    subjectName: String(r.subject_name ?? ""),
+    count: Number(r.n) || 0,
+    lastStudent: r.last_student ? String(r.last_student) : null,
+    lastAt: r.last_at ? new Date(r.last_at).toISOString() : null,
+  }))
+}
+
 /* ── Davriy baholar (ON, YN) ─────────────────────────────────────────── */
 export async function getPeriodGrades(
   groupId: number,

@@ -63,6 +63,7 @@ import {
   mergeDuplicateTopicsInGroup,
   topicTrainingType,
   NO_TRAINING_TYPE,
+  getPendingGrading,
   type ContentProgress,
   type SubmissionRecord,
 } from "../services/teachingStore"
@@ -1114,6 +1115,17 @@ router.get("/content", async (req: AuthRequest, res: Response): Promise<void> =>
   res.json({ success: true, data: items.map(presentForStudent) })
 })
 
+/* ── GET /grading-pending — o'qituvchining baholanmagan ishlari (guruh/fan/
+   topshiriq bo'yicha) — Baholash sahifasida qaysi guruhda yangi ish
+   borligini darhol ko'rsatish uchun ─────────────────────────────────── */
+router.get("/grading-pending", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  res.json({ success: true, data: await getPendingGrading(teacherUserId(req.user)) })
+})
+
 /* ── GET /content/by-topic — bitta mavzuga tegishli barcha qismlar ─── */
 router.get("/content/by-topic", async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.user?.role !== "employee") {
@@ -1725,18 +1737,29 @@ async function notifyUser(
 }
 
 /** Talaba ish yuborganda o'qituvchiga — har bir ish uchun alohida emas, shu
- *  topshiriq bo'yicha bitta yig'ma xabar: "{title}: N ta ish baholashni kutmoqda". */
-function notifyGradePending(teacherId: number, contentId: number, title: string) {
-  bumpGroupedSafe({
-    role: "employee",
-    userId: teacherId,
-    type: "reminder",
-    groupKey: `grade-pending:${contentId}`,
-    link: "/oqituvchi-kabineti/baholash-page",
-    i18nKey: "gradePending",
-    params: { title },
-    text: (n) => ({ title: "Baholash kutilmoqda", body: `${title}: ${n} ta ish baholashni kutmoqda` }),
-  })
+ *  topshiriq bo'yicha bitta yig'ma xabar. Guruh, fan va oxirgi yuborgan
+ *  talaba ko'rinadi; havola Baholash sahifasida aynan shu topshiriqni ochadi. */
+function notifyGradePending(content: TeacherContentRecord, studentName: string) {
+  void (async () => {
+    const group = content.groupId != null ? await getGroupById(content.groupId) : null
+    const groupName = group?.name ?? "—"
+    const { title, subjectName } = content
+    const query = new URLSearchParams({ subject: subjectName, content: String(content.id) })
+    if (content.groupId != null) query.set("group", String(content.groupId))
+    bumpGroupedSafe({
+      role: "employee",
+      userId: content.teacherUserId,
+      type: "reminder",
+      groupKey: `grade-pending:${content.id}`,
+      link: `/oqituvchi-kabineti/baholash-page?${query.toString()}`,
+      i18nKey: "gradePendingFrom",
+      params: { title, group: groupName, subject: subjectName, student: studentName },
+      text: (n) => ({
+        title: `Baholash kutilmoqda — ${groupName}`,
+        body: `${groupName} · ${subjectName} — ${title}: ${n} ta ish baholashni kutmoqda (oxirgisi: ${studentName})`,
+      }),
+    })
+  })().catch(() => { /* best-effort */ })
 }
 
 /** Guruhdagi (platformadan foydalangan) talabalarga yangi material haqida xabar beradi. */
@@ -2050,7 +2073,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
       file: null,
     })
     res.status(201).json({ success: true, data: submission })
-    notifyGradePending(content.teacherUserId, content.id, content.title)
+    notifyGradePending(content, fullNameOf(req.user))
     return
   }
 
@@ -2119,7 +2142,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
       file,
     })
     res.status(201).json({ success: true, data: submission })
-    notifyGradePending(content.teacherUserId, content.id, content.title)
+    notifyGradePending(content, fullNameOf(req.user))
   })
 
   req.pipe(stream)
