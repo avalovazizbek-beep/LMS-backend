@@ -532,6 +532,10 @@ router.get("/stats", adminOnly, async (_req: AuthRequest, res: Response): Promis
    bo'lsa qismning o'zidan). O'qituvchi sahifasidagi birlashtirish bilan bir
    xil qoida: bir mavzu bir nechta guruhda bo'lsa ham — bitta mavzu. */
 const TOPIC_IDENTITY_SQL = `CONCAT(tc.subject_name, '|', IFNULL(COALESCE(mk.training_type, tc.training_type), ''), '|', LOWER(TRIM(COALESCE(mk.title, tc.title))))`
+// Mavzular mashg'ulot turi bo'yicha (ma'ruza/amaliyot/mustaqil ish) ham
+// sanaladi; turi belgilanmaganlar = jami − shu uchtasi.
+const TOPIC_TYPE_SQL = `COALESCE(mk.training_type, tc.training_type)`
+const TOPIC_PART_SQL = `tc.topic_key IS NOT NULL AND NOT (tc.type='mavzu' AND tc.kind='topic')`
 
 /* ── GET /api/admin/teacher-stats ──────────────────────────────────── */
 router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
@@ -589,6 +593,9 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
     SELECT
       tc.teacher_user_id AS tid,
       COUNT(DISTINCT CASE WHEN tc.topic_key IS NOT NULL AND NOT (tc.type='mavzu' AND tc.kind='topic') THEN ${TOPIC_IDENTITY_SQL} END) AS mavzular,
+      COUNT(DISTINCT CASE WHEN ${TOPIC_PART_SQL} AND ${TOPIC_TYPE_SQL} = 'Ma''ruza'      THEN ${TOPIC_IDENTITY_SQL} END) AS mavzu_maruza,
+      COUNT(DISTINCT CASE WHEN ${TOPIC_PART_SQL} AND ${TOPIC_TYPE_SQL} = 'Amaliyot'     THEN ${TOPIC_IDENTITY_SQL} END) AS mavzu_amaliyot,
+      COUNT(DISTINCT CASE WHEN ${TOPIC_PART_SQL} AND ${TOPIC_TYPE_SQL} = 'Mustaqil ish' THEN ${TOPIC_IDENTITY_SQL} END) AS mavzu_mustaqil,
       COUNT(DISTINCT CASE WHEN tc.kind='video_lesson' THEN ${TOPIC_IDENTITY_SQL} END) AS videolar,
       COUNT(DISTINCT CASE WHEN tc.kind='audio'        THEN ${TOPIC_IDENTITY_SQL} END) AS audiolar,
       COUNT(DISTINCT CASE WHEN tc.kind='theory'       THEN ${TOPIC_IDENTITY_SQL} END) AS taqdimotlar,
@@ -693,6 +700,10 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
       fullName: hu?.fullName || hu?.profileFull || hu?.profileName || psName || `O'qituvchi #${tid}`,
       lastSeen: hu?.updatedAt ?? ps?.login_at ?? null,
       mavzular: Number(r.mavzular ?? 0),
+      mavzuMaruza: Number(r.mavzu_maruza ?? 0),
+      mavzuAmaliyot: Number(r.mavzu_amaliyot ?? 0),
+      mavzuMustaqil: Number(r.mavzu_mustaqil ?? 0),
+      mavzuTurisiz: Math.max(0, Number(r.mavzular ?? 0) - Number(r.mavzu_maruza ?? 0) - Number(r.mavzu_amaliyot ?? 0) - Number(r.mavzu_mustaqil ?? 0)),
       videolar: Number(r.videolar ?? 0),
       audiolar: Number(r.audiolar ?? 0),
       taqdimotlar: Number(r.taqdimotlar ?? 0),
