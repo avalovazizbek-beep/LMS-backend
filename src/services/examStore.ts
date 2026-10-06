@@ -376,6 +376,8 @@ export type ViolationType =
   | "no_face"
   | "multi_face"
   | "liveness"
+  /** Face ID xatoliklari chegaraga yetib, test avtomatik yuborilgan */
+  | "proctor_terminated"
 
 export async function recordExamViolation(input: {
   contentId: number
@@ -419,4 +421,16 @@ export async function getExamViolationsSummary(contentId: number): Promise<Viola
     if (String(r.last_at) > entry.lastAt) entry.lastAt = String(r.last_at)
   }
   return Array.from(map.values()).sort((a, b) => b.total - a.total)
+}
+
+/** Bitta talabaning shu imtihondagi buzilishlari (barcha urinishlar) — tur bo'yicha soni */
+export async function getStudentViolationCounts(contentId: number, studentUserId: number): Promise<Record<string, number>> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT violation_type, COUNT(*) AS cnt FROM lms_exam_violations
+     WHERE content_id = ? AND student_user_id = ? GROUP BY violation_type`,
+    [contentId, studentUserId]
+  )
+  const counts: Record<string, number> = {}
+  for (const r of rows) counts[String(r.violation_type)] = Number(r.cnt)
+  return counts
 }

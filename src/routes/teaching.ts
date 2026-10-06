@@ -86,6 +86,7 @@ import {
   finalizeAdaptiveExam,
   recordExamViolation,
   getExamViolationsSummary,
+  getStudentViolationCounts,
   isExamPassed,
   type ViolationType,
 } from "../services/examStore"
@@ -2159,8 +2160,12 @@ router.get("/content/:id/submissions/me", async (req: AuthRequest, res: Response
     res.status(400).json({ success: false, message: "Noto'g'ri so'rov" })
     return
   }
-  const submission = await getSubmissionForStudent(id, studentUserId(req.user))
-  res.json({ success: true, data: submission })
+  const sId = studentUserId(req.user)
+  const submission = await getSubmissionForStudent(id, sId)
+  // Talaba o'z natijasi yonida imtihon paytidagi qoidabuzarliklarini ko'radi
+  // (masalan "yuz ko'rinmadi" — test nega to'xtaganini tushunishi uchun)
+  const violationCounts = submission ? await getStudentViolationCounts(id, sId) : null
+  res.json({ success: true, data: submission ? { ...submission, violationCounts } : null })
 })
 
 /* ── GET /content/:id/submissions — o'qituvchi uchun ro'yxat ───────── */
@@ -2744,6 +2749,7 @@ router.post("/content/:id/adaptive/answer", async (req: AuthRequest, res: Respon
 /* ── Imtihon paytidagi buzilishlar (proctoring) ─────────────────────── */
 const VALID_VIOLATION_TYPES: ViolationType[] = [
   "fullscreen_exit", "tab_blur", "screenshot_attempt", "face_mismatch", "no_face", "multi_face", "liveness",
+  "proctor_terminated",
 ]
 
 /* POST /content/:id/violation — talaba: fullscreen/tab/Face ID buzilishini xabar qiladi */
@@ -2783,16 +2789,12 @@ router.get("/content/:id/violations", async (req: AuthRequest, res: Response): P
     res.status(404).json({ success: false, message: "Topilmadi" })
     return
   }
-  if (req.user?.role === "employee" && content.teacherUserId !== teacherUserId(req.user)) {
+  // Admin ham HEMIS xodimi sifatida kiradi — kontent egasi bo'lmasa ham
+  // "Qayta urinish" sahifasida qoidabuzarliklarni ko'ra olishi kerak
+  const isOwner = req.user?.role === "employee" && content.teacherUserId === teacherUserId(req.user)
+  if (!isOwner && !(await isAdminUser(req))) {
     res.status(403).json({ success: false, message: "Sizga ruxsat yo'q" })
     return
-  }
-  if (req.user?.role !== "employee") {
-    const ok = await isAdminUser(req)
-    if (!ok) {
-      res.status(403).json({ success: false, message: "Ruxsat yo'q" })
-      return
-    }
   }
   res.json({ success: true, data: await getExamViolationsSummary(content.id) })
 })
