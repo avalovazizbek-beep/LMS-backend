@@ -1001,6 +1001,7 @@ router.put("/settings", requirePermission("settings", "edit"), async (req: AuthR
   const allowed = new Set([
     "face_block_threshold", "test_max_attempts", "meeting_attendance_minutes", "attendance_mode",
     "certificate_auto", "certificate_topic_goal", "certificate_parts",
+    "platform_attendance_minutes", "platform_meeting_percent",
   ])
   const applied: Record<string, string> = {}
 
@@ -1008,6 +1009,16 @@ router.put("/settings", requirePermission("settings", "edit"), async (req: AuthR
     if (!allowed.has(key)) continue
     let value = String(val ?? "").trim()
     if (key === "certificate_auto") value = value === "0" || value === "false" ? "0" : "1"
+    if (key === "platform_attendance_minutes" || key === "platform_meeting_percent") {
+      const n = Number(value)
+      const max = key === "platform_meeting_percent" ? 100 : 600
+      if (!Number.isInteger(n) || n < 1 || n > max) {
+        res.status(400).json({ success: false, message: key === "platform_meeting_percent"
+          ? "Meeting foizi 1 dan 100 gacha bo'lishi kerak"
+          : "Platformadagi vaqt 1 dan 600 daqiqagacha bo'lishi kerak" })
+        return
+      }
+    }
     if (key === "certificate_topic_goal") {
       const goal = Number(value)
       if (!Number.isInteger(goal) || goal < 1 || goal > 200) {
@@ -1812,6 +1823,24 @@ router.post("/topics/:topicKey/close", requirePermission("retake", "edit"), asyn
   res.json({ success: true, message: "Mavzu yopildi" })
 })
 
+/* Platforma asosidagi davomat qoidasi (Sozlamalar): oddiy kun — platformada
+   kamida N daqiqa; meeting kuni — meeting davomiyligining kamida P foizi. */
+const DEFAULT_PLATFORM_ATTENDANCE_MINUTES = 40
+const DEFAULT_PLATFORM_MEETING_PERCENT = 100
+
+async function getPlatformAttendanceRules(): Promise<{ dailyMinutes: number; meetingPercent: number }> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    "SELECT key_name, value FROM lms_settings WHERE key_name IN ('platform_attendance_minutes', 'platform_meeting_percent')"
+  )
+  const raw = Object.fromEntries(rows.map(r => [String(r.key_name), Number(r.value)]))
+  const minutes = raw.platform_attendance_minutes
+  const percent = raw.platform_meeting_percent
+  return {
+    dailyMinutes: Number.isInteger(minutes) && minutes >= 1 ? minutes : DEFAULT_PLATFORM_ATTENDANCE_MINUTES,
+    meetingPercent: Number.isInteger(percent) && percent >= 1 && percent <= 100 ? percent : DEFAULT_PLATFORM_MEETING_PERCENT,
+  }
+}
+
 /* ── GET /api/admin/platform-attendance — platforma asosida davomat ─── */
 router.get("/platform-attendance", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
   const groupId = req.query.groupId ? Number(req.query.groupId) : null
@@ -1906,12 +1935,14 @@ router.get("/platform-attendance", adminOnly, async (req: AuthRequest, res: Resp
   }
 
   // Natija
+  const rules = await getPlatformAttendanceRules()
   const data = schedRows.map(schedRow => {
     const lessonDate = toDateStr(schedRow.lesson_date)
     const subjName   = String(schedRow.subject_name)
     const dayMeetings = meetingByDate.get(lessonDate) ?? []
     const hasMeeting  = dayMeetings.length > 0
     const meetingMin  = hasMeeting ? Math.max(...dayMeetings.map(m => m.durationMin)) : 0
+    const requiredMeetingMin = Math.ceil((meetingMin * rules.meetingPercent) / 100)
 
     const students = studentRows.map(student => {
       const uid = Number(student.user_id)
@@ -1919,10 +1950,10 @@ router.get("/platform-attendance", adminOnly, async (req: AuthRequest, res: Resp
 
       if (hasMeeting) {
         const minsIn = dayMeetings.reduce((acc, m) => acc + (meetingAttMap.get(`${uid}:${m.id}`) ?? 0), 0)
-        if (minsIn >= meetingMin) status = "present"
+        if (minsIn >= requiredMeetingMin) status = "present"
       } else {
         const totalMin = sessionMap.get(`${uid}:${lessonDate}`) ?? 0
-        if (totalMin >= 40) status = "present"
+        if (totalMin >= rules.dailyMinutes) status = "present"
       }
 
       return { studentId: uid, studentName: String(student.full_name ?? ""), status }
