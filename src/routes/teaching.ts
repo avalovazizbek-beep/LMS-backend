@@ -1508,7 +1508,11 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
     let assignmentCompleted = true
     if (assignment) {
       assignmentSubmission = await getSubmissionForStudent(assignment.id, sId)
-      assignmentCompleted = assignmentSubmission != null
+      // Topshiriq ham testdek: faqat yuklash yetmaydi — o'qituvchi baholab,
+      // ball maksimalning 60% idan kam bo'lmasa keyingi mavzu ochiladi
+      const assignmentMax = assignment.maxScore && assignment.maxScore > 0 ? assignment.maxScore : 100
+      assignmentCompleted = !!assignmentSubmission && assignmentSubmission.grade != null &&
+        isExamPassed(normalizeGrade(assignmentSubmission.grade, assignment.maxScore), assignmentMax)
     }
 
     // Barcha mavjud sectionlar ketma-ket zanjir hosil qiladi:
@@ -2061,6 +2065,15 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
   }
 
   const sId = studentUserId(req.user)
+  // Qayta yuklash bahoni o'chiradi — o'tgan topshiriqni qayta yuborish keyingi
+  // mavzularni yana qulflab qo'ymasligi uchun 60% dan o'tgach yopiladi
+  if (content.type === "assignment") {
+    const existing = await getSubmissionForStudent(content.id, sId)
+    if (existing && existing.grade != null && isExamPassed(normalizeGrade(existing.grade, content.maxScore), content.maxScore)) {
+      res.status(409).json({ success: false, message: "Bu topshiriq allaqachon baholangan va siz o'tgansiz" })
+      return
+    }
+  }
   const isJson = (req.headers["content-type"] || "").toString().toLowerCase().includes("application/json")
 
   if (isJson) {
