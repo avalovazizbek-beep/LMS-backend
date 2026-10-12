@@ -51,6 +51,7 @@ import {
   reviewEditRequest as reviewAttendanceEditRequest,
   type AttendanceEditStatus,
 } from "../services/attendanceStore"
+import { normalizeTrainingType } from "../services/trainingType"
 
 const router = Router()
 router.use(authMiddleware)
@@ -1193,8 +1194,13 @@ router.patch("/attendance-edit-requests/:id", requirePermission("attendance", "e
   }
 
   const approved = action === "approve"
-  const params = { group: updated.groupName ?? `#${updated.groupId}`, subject: updated.subjectName, date: updated.lessonDate }
-  const link = `/oqituvchi-kabineti/davomat-jurnali?group=${updated.groupId}&subject=${encodeURIComponent(updated.subjectName)}&date=${updated.lessonDate}`
+  const params = {
+    group: updated.groupName ?? `#${updated.groupId}`,
+    subject: updated.subjectName,
+    date: updated.trainingType ? `${updated.lessonDate} (${updated.trainingType})` : updated.lessonDate,
+  }
+  const link = `/oqituvchi-kabineti/davomat-jurnali?group=${updated.groupId}&subject=${encodeURIComponent(updated.subjectName)}&date=${updated.lessonDate}` +
+    (updated.trainingType ? `&training=${encodeURIComponent(updated.trainingType)}` : "")
   notifySafe({
     role: "employee",
     userId: updated.teacherUserId,
@@ -1206,7 +1212,7 @@ router.patch("/attendance-edit-requests/:id", requirePermission("attendance", "e
     i18nParams: params,
   })
   void logAudit(req, `attendanceEdit.${action}`, "attendance", String(id), {
-    groupId: updated.groupId, subjectName: updated.subjectName, date: updated.lessonDate, note,
+    groupId: updated.groupId, subjectName: updated.subjectName, date: updated.lessonDate, trainingType: updated.trainingType, note,
   })
 
   res.json({ success: true, message: approved ? "Tasdiqlandi" : "Rad etildi", data: updated })
@@ -1227,7 +1233,7 @@ router.get("/attendance", adminOnly, async (req: AuthRequest, res: Response): Pr
   const whereClause = `WHERE ${where.join(" AND ")}`
 
   const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT a.group_id, g.name AS group_name, a.subject_name, a.lesson_date,
+    `SELECT a.group_id, g.name AS group_name, a.subject_name, a.lesson_date, a.training_type,
             COUNT(*) AS total,
             SUM(CASE WHEN a.status='present' THEN 1 ELSE 0 END) AS present,
             SUM(CASE WHEN a.status='absent'  THEN 1 ELSE 0 END) AS absent,
@@ -1236,8 +1242,8 @@ router.get("/attendance", adminOnly, async (req: AuthRequest, res: Response): Pr
      FROM lms_attendance a
      LEFT JOIN lms_groups g ON g.id = a.group_id
      ${whereClause}
-     GROUP BY a.group_id, a.subject_name, a.lesson_date
-     ORDER BY a.lesson_date DESC
+     GROUP BY a.group_id, a.subject_name, a.lesson_date, a.training_type
+     ORDER BY a.lesson_date DESC, a.training_type
      LIMIT 500`,
     params
   )
@@ -1247,6 +1253,7 @@ router.get("/attendance", adminOnly, async (req: AuthRequest, res: Response): Pr
     groupName: r.group_name ? String(r.group_name) : `Guruh ${r.group_id}`,
     subjectName: String(r.subject_name),
     lessonDate: r.lesson_date instanceof Date ? r.lesson_date.toISOString().slice(0, 10) : String(r.lesson_date),
+    trainingType: r.training_type ? String(r.training_type) : null,
     total: Number(r.total),
     present: Number(r.present),
     absent: Number(r.absent),
@@ -1261,6 +1268,8 @@ router.get("/attendance/detail", adminOnly, async (req: AuthRequest, res: Respon
   const groupId = req.query.groupId ? Number(req.query.groupId) : null
   const subject = typeof req.query.subject === "string" ? req.query.subject.trim() : ""
   const date    = typeof req.query.date === "string" ? req.query.date.trim() : ""
+  // Bir kunda ma'ruza va amaliy — alohida varaqlar; tur berilmasa — turi yo'q varaq
+  const trainingType = normalizeTrainingType(req.query.trainingType)
 
   if (!groupId || !subject || !date) {
     res.status(400).json({ success: false, message: "groupId, subject, date majburiy" }); return
@@ -1269,9 +1278,9 @@ router.get("/attendance/detail", adminOnly, async (req: AuthRequest, res: Respon
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT a.student_user_id, a.student_full_name, a.status, a.comment
      FROM lms_attendance a
-     WHERE a.group_id = ? AND LOWER(a.subject_name) = LOWER(?) AND a.lesson_date = ?
+     WHERE a.group_id = ? AND LOWER(a.subject_name) = LOWER(?) AND a.lesson_date = ? AND a.training_type = ?
      ORDER BY a.student_full_name`,
-    [groupId, subject, date]
+    [groupId, subject, date, trainingType]
   )
 
   res.json({ success: true, data: rows.map(r => ({
@@ -1330,15 +1339,16 @@ router.get("/attendance/student-detail", adminOnly, async (req: AuthRequest, res
   }
 
   const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT a.lesson_date, a.status, a.comment
+    `SELECT a.lesson_date, a.training_type, a.status, a.comment
      FROM lms_attendance a
      WHERE a.group_id = ? AND LOWER(a.subject_name) = LOWER(?) AND a.student_user_id = ?
-     ORDER BY a.lesson_date DESC`,
+     ORDER BY a.lesson_date DESC, a.training_type`,
     [groupId, subject, studentId]
   )
 
   res.json({ success: true, data: rows.map(r => ({
     lessonDate: r.lesson_date instanceof Date ? r.lesson_date.toISOString().slice(0, 10) : String(r.lesson_date),
+    trainingType: r.training_type ? String(r.training_type) : null,
     status: String(r.status),
     comment: r.comment ?? null,
   })) })
@@ -1456,11 +1466,11 @@ router.post("/hemis-sync", adminOnly, async (_req: AuthRequest, res: Response): 
     `)
 
     const [attRows] = await pool.query<RowDataPacket[]>(`
-      SELECT group_id, subject_name, lesson_date,
+      SELECT group_id, subject_name, lesson_date, training_type,
         SUM(CASE WHEN status='present' THEN 1 ELSE 0 END) AS present,
         COUNT(*) AS total
       FROM lms_attendance
-      GROUP BY group_id, subject_name, lesson_date
+      GROUP BY group_id, subject_name, lesson_date, training_type
       LIMIT 500
     `)
 

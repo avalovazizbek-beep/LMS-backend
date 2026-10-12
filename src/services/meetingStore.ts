@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken"
 import type mysql from "mysql2/promise"
 import { fromMysqlDate, pool, toMysqlDate } from "./db"
 import { sanitizeFilename } from "./teachingStore"
+import { normalizeTrainingType } from "./trainingType"
 
 export type MeetingRole = "admin" | "teacher" | "student"
 export type MeetingStatus = "scheduled" | "live" | "ended" | "cancelled"
@@ -417,6 +418,24 @@ export async function endMeeting(meeting: MeetingRecord): Promise<MeetingRecord>
   return meeting
 }
 
+/** Meeting mavzu ichidan (Fan resurslari → mavzu → "Meeting") yaratilgan
+ *  bo'lsa — o'sha mavzuning mashg'ulot turi (ma'ruza/amaliy...), aks holda ''
+ *  (turi noma'lum). Davomat varag'i shu tur bo'yicha tanlanadi. */
+async function meetingTrainingType(meetingId: number): Promise<string> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT COALESCE(NULLIF(mk.training_type, ''), NULLIF(c.training_type, '')) AS tt
+     FROM lms_teacher_content c
+     LEFT JOIN lms_teacher_content mk
+       ON mk.topic_key = c.topic_key AND mk.type = 'mavzu' AND mk.kind = 'topic'
+      AND mk.teacher_user_id = c.teacher_user_id AND mk.is_active = 1
+     WHERE c.kind = 'meeting' AND c.meeting_link = ? AND c.is_active = 1
+     ORDER BY tt IS NULL, c.id DESC
+     LIMIT 1`,
+    [String(meetingId)]
+  )
+  return normalizeTrainingType(rows[0]?.tt)
+}
+
 /** Meeting tugaganda barcha kirgan talabalarni (group_id bor) lms_attendance ga yozadi.
  *  "Keldi" faqat kamerada yuzi admin belgilagan chegara (daqiqa,
  *  meeting_attendance_minutes) yoki undan ko'proq vaqt ko'rinib turgan bo'lsa
@@ -429,6 +448,7 @@ async function syncMeetingAttendanceToMain(meeting: MeetingRecord): Promise<void
 
   const lessonDate = new Date(meeting.startTime).toISOString().slice(0, 10)
   const subjectName = meeting.subjectName
+  const trainingType = await meetingTrainingType(meeting.id)
   const durationSeconds = Math.max(60, Math.round((Date.now() - new Date(meeting.startTime).getTime()) / 1000))
   const thresholdSeconds = await getAttendanceThresholdSeconds()
   const requiredSeconds = Math.min(thresholdSeconds, durationSeconds)
@@ -440,15 +460,18 @@ async function syncMeetingAttendanceToMain(meeting: MeetingRecord): Promise<void
     [meeting.id]
   )
 
-  // O'qituvchi shu kunni allaqachon qo'lda saqlagan (qulflangan) guruhlar
+  // O'qituvchi shu varaqni allaqachon qo'lda saqlagan (qulflangan) guruhlar
   // o'tkazib yuboriladi — qulflangan davomat faqat admin ruxsati bilan o'zgaradi.
+  // Meeting turi noma'lum bo'lsa — shu kuni istalgan turdagi varaq saqlangan
+  // bo'lsa ham (qaysi mashg'ulot ekanini bilmaymiz, ikki marta sanalmasin).
   const groupIds = [...new Set(rows.map((r) => Number(r.group_id)))]
   const lockedGroupIds = new Set<number>()
   if (groupIds.length) {
     const [lockedRows] = await pool.query<mysql.RowDataPacket[]>(
       `SELECT DISTINCT group_id FROM lms_attendance
-       WHERE subject_name = ? AND lesson_date = ? AND marked_by_user_id <> 0 AND group_id IN (?)`,
-      [subjectName.trim(), lessonDate, groupIds]
+       WHERE subject_name = ? AND lesson_date = ? AND marked_by_user_id <> 0 AND group_id IN (?)
+       ${trainingType ? "AND training_type = ?" : ""}`,
+      trainingType ? [subjectName.trim(), lessonDate, groupIds, trainingType] : [subjectName.trim(), lessonDate, groupIds]
     )
     for (const r of lockedRows) lockedGroupIds.add(Number(r.group_id))
   }
@@ -462,14 +485,14 @@ async function syncMeetingAttendanceToMain(meeting: MeetingRecord): Promise<void
       : "Meeting'ga kirdi, lekin Face ID orqali davomat tasdiqlanmadi"
     await pool.query(
       `INSERT INTO lms_attendance
-         (group_id, subject_name, lesson_date, student_user_id, student_full_name,
+         (group_id, subject_name, lesson_date, training_type, student_user_id, student_full_name,
           status, comment, marked_by_user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
        ON DUPLICATE KEY UPDATE
          status            = VALUES(status),
          comment           = VALUES(comment),
          student_full_name = VALUES(student_full_name)`,
-      [Number(row.group_id), subjectName, lessonDate, Number(row.user_id), String(row.full_name), status, comment]
+      [Number(row.group_id), subjectName, lessonDate, trainingType, Number(row.user_id), String(row.full_name), status, comment]
     )
   }
 

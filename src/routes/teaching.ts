@@ -97,7 +97,8 @@ import {
   sortByFullName,
   saveAttendance,
   getAttendanceForGroupDate,
-  getTrainingTypeForGroupDate,
+  getSavedTrainingTypes,
+  normalizeTrainingType,
   getGroupAttendanceHistory,
   getStudentAttendance,
   getGroupSessions,
@@ -1508,11 +1509,9 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
     let assignmentCompleted = true
     if (assignment) {
       assignmentSubmission = await getSubmissionForStudent(assignment.id, sId)
-      // Topshiriq ham testdek: faqat yuklash yetmaydi — o'qituvchi baholab,
-      // ball maksimalning 60% idan kam bo'lmasa keyingi mavzu ochiladi
-      const assignmentMax = assignment.maxScore && assignment.maxScore > 0 ? assignment.maxScore : 100
-      assignmentCompleted = !!assignmentSubmission && assignmentSubmission.grade != null &&
-        isExamPassed(normalizeGrade(assignmentSubmission.grade, assignment.maxScore), assignmentMax)
+      // Topshiriqni yuklashning o'zi yetarli — o'qituvchi baholashini kutmasdan
+      // keyingi mavzu ochiladi (test esa 60% bilan o'tiladi)
+      assignmentCompleted = assignmentSubmission != null
     }
 
     // Barcha mavjud sectionlar ketma-ket zanjir hosil qiladi:
@@ -2065,8 +2064,8 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
   }
 
   const sId = studentUserId(req.user)
-  // Qayta yuklash bahoni o'chiradi — o'tgan topshiriqni qayta yuborish keyingi
-  // mavzularni yana qulflab qo'ymasligi uchun 60% dan o'tgach yopiladi
+  // Qayta yuklash bahoni o'chiradi — 60% dan o'tgan topshiriqning bahosi
+  // yo'qolmasligi uchun qayta yuborish yopiladi (pastroq bo'lsa — mumkin)
   if (content.type === "assignment") {
     const existing = await getSubmissionForStudent(content.id, sId)
     if (existing && existing.grade != null && isExamPassed(normalizeGrade(existing.grade, content.maxScore), content.maxScore)) {
@@ -2830,6 +2829,8 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
   const groupId = numberValue(req.query.groupId)
   const subjectName = textValue(req.query.subject)
   const date = textValue(req.query.date)
+  // Bir kunda ma'ruza va amaliy — alohida varaqlar; tur berilmasa — turi yo'q eski varaq
+  const trainingType = normalizeTrainingType(req.query.trainingType)
   if (groupId === null || !subjectName || !isValidDateOnly(date)) {
     res.status(400).json({ success: false, message: "groupId, subject va date (YYYY-MM-DD) majburiy" })
     return
@@ -2842,13 +2843,18 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
     return
   }
 
-  const [hemisRoster, existing, trainingType, saved, editRequest] = await Promise.all([
+  const [hemisRoster, sheetRecords, saved, editRequest, savedTypes] = await Promise.all([
     getGroupRoster(groupId, subjectName).catch(() => [] as import("../services/attendanceStore").RosterStudent[]),
-    getAttendanceForGroupDate(groupId, subjectName, date),
-    getTrainingTypeForGroupDate(groupId, subjectName, date),
-    isAttendanceSheetSaved(groupId, subjectName, date),
-    getLatestEditRequest(groupId, subjectName, date, tId),
+    getAttendanceForGroupDate(groupId, subjectName, date, trainingType),
+    isAttendanceSheetSaved(groupId, subjectName, date, trainingType),
+    getLatestEditRequest(groupId, subjectName, date, trainingType, tId),
+    getSavedTrainingTypes(groupId, subjectName, date),
   ])
+  // Varaq hali bo'sh — turi noma'lum meeting'dan avtomatik (Face ID) yozilgan
+  // belgilar bo'lsa, o'qituvchi ko'rib chiqishi uchun shular bilan to'ldiriladi
+  const existing = !sheetRecords.size && trainingType
+    ? await getAttendanceForGroupDate(groupId, subjectName, date, "", true)
+    : sheetRecords
 
   // If HEMIS roster is empty, fall back to students from attendance history
   let roster = hemisRoster
@@ -2878,7 +2884,7 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
 
   // Saqlangan kun qulflangan: o'zgartirish faqat admin tasdiqlagan so'rov bilan
   const locked = saved && editRequest?.status !== "approved"
-  res.json({ success: true, data, trainingType, saved, locked, editRequest })
+  res.json({ success: true, data, trainingType: trainingType || null, saved, locked, editRequest, savedTypes })
 })
 
 /* ── POST /attendance — davomatni saqlash ──────────────────────────── */
@@ -2891,7 +2897,7 @@ router.post("/attendance", async (req: AuthRequest, res: Response): Promise<void
   const groupId = numberValue(body.groupId)
   const subjectName = textValue(body.subjectName)
   const date = textValue(body.date)
-  const trainingType = textValue(body.trainingType) || null
+  const trainingType = normalizeTrainingType(body.trainingType)
   const records = Array.isArray(body.records) ? body.records : null
 
   if (groupId === null || !subjectName || !isValidDateOnly(date) || !records) {
@@ -2907,6 +2913,13 @@ router.post("/attendance", async (req: AuthRequest, res: Response): Promise<void
   const ownGroupIds = await getTeacherGroupIds(tId)
   if (!ownGroupIds.includes(groupId)) {
     res.status(403).json({ success: false, message: "Bu guruh sizga HEMIS orqali biriktirilmagan" })
+    return
+  }
+  // Yangi varaq faqat mashg'ulot turi bilan — aks holda ma'ruza va amaliy
+  // yana bir varaqqa tushib qoladi. Turi yo'q eski varaqni (admin ruxsati
+  // bilan) qayta saqlash mumkin.
+  if (!trainingType && !(await isAttendanceSheetSaved(groupId, subjectName, date, ""))) {
+    res.status(400).json({ success: false, message: "Mashg'ulot turini tanlang (ma'ruza, amaliy, ...)" })
     return
   }
 
@@ -2927,17 +2940,17 @@ router.post("/attendance", async (req: AuthRequest, res: Response): Promise<void
     })
   }
 
-  const result = await saveAttendance(groupId, subjectName, date, parsed, tId, trainingType)
+  const result = await saveAttendance(groupId, subjectName, date, trainingType, parsed, tId)
   if (!result.ok) {
     res.status(409).json({
       success: false,
       locked: true,
-      message: "Bu kun uchun davomat allaqachon saqlangan. O'zgartirish uchun adminga so'rov yuboring",
+      message: `Bu kun uchun${trainingType ? ` (${trainingType})` : ""} davomat allaqachon saqlangan. O'zgartirish uchun adminga so'rov yuboring`,
     })
     return
   }
   if (result.usedRequestId !== null) {
-    void logAudit(req, "attendance.edit", "attendance", String(result.usedRequestId), { groupId, subjectName, date })
+    void logAudit(req, "attendance.edit", "attendance", String(result.usedRequestId), { groupId, subjectName, date, trainingType })
   }
   res.json({ success: true, message: "Davomat saqlandi" })
 })
@@ -2953,6 +2966,7 @@ router.post("/attendance/edit-requests", async (req: AuthRequest, res: Response)
   const groupId = numberValue(body.groupId)
   const subjectName = textValue(body.subjectName)
   const date = textValue(body.date)
+  const trainingType = normalizeTrainingType(body.trainingType)
   const reason = textValue(body.reason).slice(0, 1000)
   if (groupId === null || !subjectName || !isValidDateOnly(date)) {
     res.status(400).json({ success: false, message: "groupId, subjectName va date majburiy" })
@@ -2969,11 +2983,11 @@ router.post("/attendance/edit-requests", async (req: AuthRequest, res: Response)
     res.status(403).json({ success: false, message: "Bu guruh sizga HEMIS orqali biriktirilmagan" })
     return
   }
-  if (!(await isAttendanceSheetSaved(groupId, subjectName, date))) {
+  if (!(await isAttendanceSheetSaved(groupId, subjectName, date, trainingType))) {
     res.status(400).json({ success: false, message: "Bu kun uchun davomat hali saqlanmagan — so'rovsiz belgilashingiz mumkin" })
     return
   }
-  const latest = await getLatestEditRequest(groupId, subjectName, date, tId)
+  const latest = await getLatestEditRequest(groupId, subjectName, date, trainingType, tId)
   if (latest?.status === "pending") {
     res.status(409).json({ success: false, message: "So'rov allaqachon yuborilgan, admin javobini kuting" })
     return
@@ -2987,6 +3001,7 @@ router.post("/attendance/edit-requests", async (req: AuthRequest, res: Response)
     groupId,
     subjectName,
     lessonDate: date,
+    trainingType,
     teacherUserId: tId,
     teacherName: fullNameOf(req.user),
     reason,

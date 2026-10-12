@@ -1,4 +1,5 @@
 import mysql from "mysql2/promise"
+import { normalizeTrainingType } from "./trainingType"
 
 export const DB_NAME = process.env.DB_NAME || "lms_portal"
 
@@ -359,6 +360,7 @@ export async function initDatabase() {
       group_id          INT NOT NULL,
       subject_name      VARCHAR(255) NOT NULL,
       lesson_date       DATE NOT NULL,
+      training_type     VARCHAR(60) NOT NULL DEFAULT '',
       student_user_id   INT NOT NULL,
       student_full_name VARCHAR(255) NOT NULL,
       status            ENUM('present','absent','excused','late') NOT NULL DEFAULT 'absent',
@@ -366,12 +368,42 @@ export async function initDatabase() {
       marked_by_user_id INT NOT NULL,
       created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uq_attendance (group_id, subject_name, lesson_date, student_user_id),
+      UNIQUE KEY uq_attendance_type (group_id, subject_name, lesson_date, training_type, student_user_id),
       INDEX idx_attendance_group_date (group_id, lesson_date),
       INDEX idx_attendance_student (student_user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
   await execIgnoreDuplicate(`ALTER TABLE lms_attendance ADD COLUMN training_type VARCHAR(60) NULL AFTER lesson_date`)
+  // Bir kunda bitta guruh/fanga ma'ruza ham, amaliy ham bo'lishi mumkin —
+  // har biri alohida davomat varag'i: mashg'ulot turi kalitga kiradi. Avval
+  // kalit (guruh, fan, sana, talaba) edi va amaliy saqlangach o'sha kungi
+  // ma'ruza ham qulflanib qolardi. Turi yo'q eski yozuvlar '' bo'lib qoladi.
+  {
+    const [typeCol] = await pool.query<mysql.RowDataPacket[]>(
+      `SELECT IS_NULLABLE FROM information_schema.columns
+       WHERE table_schema = DATABASE() AND table_name = 'lms_attendance' AND column_name = 'training_type'
+       LIMIT 1`
+    )
+    if (typeCol[0]?.IS_NULLABLE === "YES") {
+      const [typeRows] = await pool.query<mysql.RowDataPacket[]>(
+        "SELECT DISTINCT training_type FROM lms_attendance WHERE training_type IS NOT NULL"
+      )
+      for (const r of typeRows) {
+        const raw = String(r.training_type)
+        const canonical = normalizeTrainingType(raw)
+        if (canonical !== raw) await pool.query("UPDATE lms_attendance SET training_type = ? WHERE training_type = ?", [canonical, raw])
+      }
+      await exec(`UPDATE lms_attendance SET training_type = '' WHERE training_type IS NULL`)
+      await exec(`ALTER TABLE lms_attendance MODIFY training_type VARCHAR(60) NOT NULL DEFAULT ''`)
+    }
+    await execIgnoreDuplicate(`ALTER TABLE lms_attendance ADD UNIQUE KEY uq_attendance_type (group_id, subject_name, lesson_date, training_type, student_user_id)`)
+    const [oldKey] = await pool.query<mysql.RowDataPacket[]>(
+      `SELECT 1 FROM information_schema.statistics
+       WHERE table_schema = DATABASE() AND table_name = 'lms_attendance' AND index_name = 'uq_attendance'
+       LIMIT 1`
+    )
+    if (oldKey.length) await exec(`ALTER TABLE lms_attendance DROP INDEX uq_attendance`)
+  }
 
   // ── Davomatni o'zgartirish so'rovlari: o'qituvchi saqlagan davomat
   // qulflanadi, o'zgartirish uchun adminga so'rov yuboradi. Admin tasdiqlasa
@@ -395,6 +427,7 @@ export async function initDatabase() {
       INDEX idx_att_edit_status (status, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_attendance_edit_requests")
+  await execIgnoreDuplicate(`ALTER TABLE lms_attendance_edit_requests ADD COLUMN training_type VARCHAR(60) NOT NULL DEFAULT '' AFTER lesson_date`)
 
   // ── Zoom integratsiyasi — har bir o'qituvchi o'z Zoom hisobini ulaydi ──
   await exec(`

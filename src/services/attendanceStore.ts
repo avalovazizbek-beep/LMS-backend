@@ -3,6 +3,8 @@ import { pool, withHemisCache } from "./db"
 import { studentUserId } from "./teachingStore"
 import { fetchGroupRoster, type GroupRosterStudent } from "../routes/hemis"
 
+export { normalizeTrainingType } from "./trainingType"
+
 export type AttendanceStatus = "present" | "absent" | "excused" | "late"
 
 /* ── MySQL DATE ustunini "YYYY-MM-DD" ko'rinishiga o'tkazish ─────────── */
@@ -100,48 +102,66 @@ export function todayDateOnly(): string {
   return toDateOnly(new Date())
 }
 
-/** O'qituvchi "Saqlash" bosgan kun (marked_by_user_id <> 0) qulflangan
+/** Davomat varag'i — guruh + fan + sana + mashg'ulot turi. Bir kunda ma'ruza
+ *  va amaliy alohida saqlanadi va alohida qulflanadi. trainingType oldindan
+ *  normalizeTrainingType'dan o'tgan bo'lishi kerak ('' — turi yo'q eski varaq).
+ *
+ *  O'qituvchi "Saqlash" bosgan varaq (marked_by_user_id <> 0) qulflangan
  *  hisoblanadi. Meeting'dan avtomatik (Face ID) yozilgan qatorlar
  *  (marked_by_user_id = 0) qulflamaydi — o'qituvchi ularni bir marta
  *  ko'rib chiqib, o'zi saqlaydi. */
-export async function isAttendanceSheetSaved(groupId: number, subjectName: string, lessonDate: string): Promise<boolean> {
+export async function isAttendanceSheetSaved(groupId: number, subjectName: string, lessonDate: string, trainingType: string): Promise<boolean> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    "SELECT 1 FROM lms_attendance WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND marked_by_user_id <> 0 LIMIT 1",
-    [groupId, subjectName.trim(), lessonDate]
+    "SELECT 1 FROM lms_attendance WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND training_type = ? AND marked_by_user_id <> 0 LIMIT 1",
+    [groupId, subjectName.trim(), lessonDate, trainingType]
   )
   return rows.length > 0
+}
+
+/** Shu kun uchun o'qituvchi saqlagan mashg'ulot turlari (jurnalda "bu kunda
+ *  amaliy uchun ham saqlangan" deb ko'rsatish uchun). */
+export async function getSavedTrainingTypes(groupId: number, subjectName: string, lessonDate: string): Promise<string[]> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT DISTINCT training_type FROM lms_attendance
+     WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND marked_by_user_id <> 0
+     ORDER BY training_type`,
+    [groupId, subjectName.trim(), lessonDate]
+  )
+  return rows.map((r) => String(r.training_type))
 }
 
 export type SaveAttendanceResult =
   | { ok: true; usedRequestId: number | null }
   | { ok: false; reason: "locked" }
 
-/** Davomatni saqlaydi. Kun allaqachon saqlangan bo'lsa — faqat admin
- *  tasdiqlagan (ishlatilmagan) so'rov bo'lgandagina qayta yoziladi va o'sha
- *  so'rov "used" bo'lib qoladi, ya'ni kun yana qulflanadi. */
+/** Davomat varag'ini (shu mashg'ulot turi uchun) saqlaydi. Varaq allaqachon
+ *  saqlangan bo'lsa — faqat admin tasdiqlagan (ishlatilmagan) so'rov
+ *  bo'lgandagina qayta yoziladi va o'sha so'rov "used" bo'lib qoladi, ya'ni
+ *  varaq yana qulflanadi. Boshqa turdagi varaqqa (masalan shu kungi
+ *  ma'ruzaga) bu ta'sir qilmaydi. */
 export async function saveAttendance(
   groupId: number,
   subjectName: string,
   lessonDate: string,
+  trainingType: string,
   records: AttendanceRecordInput[],
-  markedByUserId: number,
-  trainingType?: string | null
+  markedByUserId: number
 ): Promise<SaveAttendanceResult> {
   const subject = subjectName.trim()
   const conn = await pool.getConnection()
   try {
     await conn.beginTransaction()
     const [savedRows] = await conn.query<mysql.RowDataPacket[]>(
-      "SELECT 1 FROM lms_attendance WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND marked_by_user_id <> 0 LIMIT 1",
-      [groupId, subject, lessonDate]
+      "SELECT 1 FROM lms_attendance WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND training_type = ? AND marked_by_user_id <> 0 LIMIT 1",
+      [groupId, subject, lessonDate, trainingType]
     )
     let usedRequestId: number | null = null
     if (savedRows.length) {
       const [grantRows] = await conn.query<mysql.RowDataPacket[]>(
         `SELECT id FROM lms_attendance_edit_requests
-         WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND teacher_user_id = ? AND status = 'approved'
+         WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND training_type = ? AND teacher_user_id = ? AND status = 'approved'
          ORDER BY id DESC LIMIT 1 FOR UPDATE`,
-        [groupId, subject, lessonDate, markedByUserId]
+        [groupId, subject, lessonDate, trainingType, markedByUserId]
       )
       if (!grantRows.length) {
         await conn.rollback()
@@ -156,12 +176,20 @@ export async function saveAttendance(
           (group_id, subject_name, lesson_date, training_type, student_user_id, student_full_name, status, comment, marked_by_user_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
-           training_type      = VALUES(training_type),
            student_full_name = VALUES(student_full_name),
            status            = VALUES(status),
            comment           = VALUES(comment),
            marked_by_user_id = VALUES(marked_by_user_id)`,
-        [groupId, subject, lessonDate, trainingType?.trim() || null, r.studentUserId, r.fullName, r.status, r.comment?.trim() || null, markedByUserId]
+        [groupId, subject, lessonDate, trainingType, r.studentUserId, r.fullName, r.status, r.comment?.trim() || null, markedByUserId]
+      )
+    }
+    // Turi noma'lum meeting'dan avtomatik (Face ID) yozilgan qatorlar jurnalda
+    // shu varaqqa to'ldirib berilgan edi — o'qituvchi ko'rib chiqib saqladi,
+    // endi ular ikkinchi marta sanalmasligi uchun o'chiriladi.
+    if (trainingType) {
+      await conn.query(
+        "DELETE FROM lms_attendance WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND training_type = '' AND marked_by_user_id = 0",
+        [groupId, subject, lessonDate]
       )
     }
     if (usedRequestId !== null) {
@@ -189,6 +217,7 @@ export interface AttendanceEditRequest {
   groupName: string | null
   subjectName: string
   lessonDate: string
+  trainingType: string | null
   teacherUserId: number
   teacherName: string
   reason: string
@@ -213,6 +242,7 @@ function mapEditRequest(row: mysql.RowDataPacket): AttendanceEditRequest {
     groupName: row.group_name ? String(row.group_name) : null,
     subjectName: String(row.subject_name),
     lessonDate: toDateOnly(row.lesson_date),
+    trainingType: row.training_type ? String(row.training_type) : null,
     teacherUserId: Number(row.teacher_user_id),
     teacherName: String(row.teacher_name),
     reason: String(row.reason ?? ""),
@@ -230,18 +260,19 @@ const EDIT_REQUEST_SELECT = `
   FROM lms_attendance_edit_requests r
   LEFT JOIN lms_groups g ON g.id = r.group_id`
 
-/** O'qituvchining shu kun uchun oxirgi so'rovi (jurnalda holatini ko'rsatish uchun). */
+/** O'qituvchining shu varaq uchun oxirgi so'rovi (jurnalda holatini ko'rsatish uchun). */
 export async function getLatestEditRequest(
   groupId: number,
   subjectName: string,
   lessonDate: string,
+  trainingType: string,
   teacherUserId: number
 ): Promise<AttendanceEditRequest | null> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
     `${EDIT_REQUEST_SELECT}
-     WHERE r.group_id = ? AND r.subject_name = ? AND r.lesson_date = ? AND r.teacher_user_id = ?
+     WHERE r.group_id = ? AND r.subject_name = ? AND r.lesson_date = ? AND r.training_type = ? AND r.teacher_user_id = ?
      ORDER BY r.id DESC LIMIT 1`,
-    [groupId, subjectName.trim(), lessonDate, teacherUserId]
+    [groupId, subjectName.trim(), lessonDate, trainingType, teacherUserId]
   )
   return rows[0] ? mapEditRequest(rows[0]) : null
 }
@@ -255,15 +286,16 @@ export async function createEditRequest(input: {
   groupId: number
   subjectName: string
   lessonDate: string
+  trainingType: string
   teacherUserId: number
   teacherName: string
   reason: string
 }): Promise<AttendanceEditRequest> {
   const [result] = await pool.query<mysql.ResultSetHeader>(
     `INSERT INTO lms_attendance_edit_requests
-       (group_id, subject_name, lesson_date, teacher_user_id, teacher_name, reason)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [input.groupId, input.subjectName.trim(), input.lessonDate, input.teacherUserId, input.teacherName, input.reason]
+       (group_id, subject_name, lesson_date, training_type, teacher_user_id, teacher_name, reason)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [input.groupId, input.subjectName.trim(), input.lessonDate, input.trainingType, input.teacherUserId, input.teacherName, input.reason]
   )
   const created = await getEditRequest(result.insertId)
   if (!created) throw new Error("So'rov saqlanmadi")
@@ -309,14 +341,19 @@ export interface AttendanceRecord {
   comment: string | null
 }
 
+/** Bitta varaqning yozuvlari. autoOnly — faqat meeting'dan avtomatik
+ *  (Face ID) yozilgan, o'qituvchi hali saqlamagan qatorlar. */
 export async function getAttendanceForGroupDate(
   groupId: number,
   subjectName: string,
-  lessonDate: string
+  lessonDate: string,
+  trainingType: string,
+  autoOnly = false
 ): Promise<Map<number, AttendanceRecord>> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    "SELECT student_user_id, status, comment FROM lms_attendance WHERE group_id = ? AND subject_name = ? AND lesson_date = ?",
-    [groupId, subjectName.trim(), lessonDate]
+    `SELECT student_user_id, status, comment FROM lms_attendance
+     WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND training_type = ?${autoOnly ? " AND marked_by_user_id = 0" : ""}`,
+    [groupId, subjectName.trim(), lessonDate, trainingType]
   )
   const map = new Map<number, AttendanceRecord>()
   for (const row of rows) {
@@ -327,20 +364,6 @@ export async function getAttendanceForGroupDate(
     })
   }
   return map
-}
-
-/** Shu kun/guruh/fan uchun avval saqlangan mashg'ulot turi (bo'lsa) —
- *  jurnal qayta ochilganda tanlovni eslab qolish uchun. */
-export async function getTrainingTypeForGroupDate(
-  groupId: number,
-  subjectName: string,
-  lessonDate: string
-): Promise<string | null> {
-  const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    "SELECT training_type FROM lms_attendance WHERE group_id = ? AND subject_name = ? AND lesson_date = ? AND training_type IS NOT NULL LIMIT 1",
-    [groupId, subjectName.trim(), lessonDate]
-  )
-  return rows[0]?.training_type ? String(rows[0].training_type) : null
 }
 
 /* ── O'qituvchi uchun tarix/hisobot ─────────────────────────────────── */
@@ -377,14 +400,14 @@ export async function getGroupAttendanceHistory(
     params.push(to)
   }
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    `SELECT * FROM lms_attendance WHERE ${where.join(" AND ")} ORDER BY lesson_date DESC, student_full_name`,
+    `SELECT * FROM lms_attendance WHERE ${where.join(" AND ")} ORDER BY lesson_date DESC, training_type, student_full_name`,
     params
   )
 
   const map = new Map<string, AttendanceHistoryEntry>()
   for (const row of rows) {
     const lessonDate = toDateOnly(row.lesson_date)
-    const key = `${lessonDate}__${row.subject_name}`
+    const key = `${lessonDate}__${row.subject_name}__${row.training_type ?? ""}`
     if (!map.has(key)) {
       map.set(key, { lessonDate, subjectName: String(row.subject_name), trainingType: row.training_type ? String(row.training_type) : null, records: [] })
     }
@@ -402,6 +425,7 @@ export async function getGroupAttendanceHistory(
 export interface StudentAttendanceEntry {
   lessonDate: string
   subjectName: string
+  trainingType: string | null
   status: AttendanceStatus
   comment: string | null
 }
@@ -427,12 +451,13 @@ export async function getStudentAttendance(
     params.push(to)
   }
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    `SELECT * FROM lms_attendance WHERE ${where.join(" AND ")} ORDER BY lesson_date DESC`,
+    `SELECT * FROM lms_attendance WHERE ${where.join(" AND ")} ORDER BY lesson_date DESC, training_type`,
     params
   )
   return rows.map((row) => ({
     lessonDate: toDateOnly(row.lesson_date),
     subjectName: String(row.subject_name),
+    trainingType: row.training_type ? String(row.training_type) : null,
     status: row.status as AttendanceStatus,
     comment: row.comment ?? null,
   }))
