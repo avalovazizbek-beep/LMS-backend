@@ -237,6 +237,34 @@ export async function getValidAccessToken(teacherId: number): Promise<string | n
   }
 }
 
+const lastProfileSync = new Map<number, number>()
+const PROFILE_SYNC_INTERVAL_MS = 60 * 1000
+
+/** Profil sahifasi ochilganda ulangan Zoom hisobini jonli tekshiradi
+ *  (GET /users/me — user:read ruxsati shu yerda ham ishlatiladi): email
+ *  o'zgargan bo'lsa yangilanadi, token Zoom'da bekor qilingan bo'lsa (401)
+ *  ulanish "qayta ulash kerak" holatiga o'tadi. Boshqa xatolarda jim
+ *  o'tadi — status DB'dagi holatdan qaytaveradi. */
+export async function syncZoomProfile(teacherId: number): Promise<void> {
+  if (Date.now() - (lastProfileSync.get(teacherId) ?? 0) < PROFILE_SYNC_INTERVAL_MS) return
+  lastProfileSync.set(teacherId, Date.now())
+
+  const accessToken = await getValidAccessToken(teacherId)
+  if (!accessToken) return
+  try {
+    const user = await fetchZoomUser(accessToken)
+    await pool.query(
+      "UPDATE zoom_connections SET zoom_email = ?, zoom_account_id = COALESCE(?, zoom_account_id) WHERE teacher_id = ? AND status = 'active'",
+      [user.email, user.account_id ?? null, teacherId]
+    )
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.status === 401) {
+      await pool.query("UPDATE zoom_connections SET status = 'expired' WHERE teacher_id = ?", [teacherId])
+    }
+    console.warn("[zoom] teacher %s profilini tekshirishda xato:", teacherId, zoomOAuthErrorMessage(err))
+  }
+}
+
 async function persistTokens(
   teacherId: number,
   tokens: ZoomTokenResponse,

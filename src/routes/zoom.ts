@@ -8,6 +8,7 @@ import {
   completeAuthorization,
   disconnect,
   getConnectionStatus,
+  syncZoomProfile,
   isZoomWebhookConfigured,
   verifyZoomWebhook,
   zoomUrlValidationResponse,
@@ -111,10 +112,13 @@ function requireTeacher(req: AuthRequest, res: Response): number | null {
   return teacherUserId(req.user)
 }
 
-/* ── GET /api/integrations/zoom/status ────────────────────────────────── */
+/* ── GET /api/integrations/zoom/status[?live=1] — live=1 (Profil sahifasi)
+   bo'lsa ulangan hisob Zoom'dan (GET /users/me) jonli tekshiriladi;
+   meeting formalari esa tez ochilishi uchun faqat DB holatini oladi. ── */
 router.get("/status", async (req: AuthRequest, res: Response): Promise<void> => {
   const teacherId = requireTeacher(req, res)
   if (teacherId === null) return
+  if (req.query.live === "1" && isZoomConfigured()) await syncZoomProfile(teacherId)
   const status = await getConnectionStatus(teacherId)
   res.json({ success: true, data: { ...status, configured: isZoomConfigured() } })
 })
