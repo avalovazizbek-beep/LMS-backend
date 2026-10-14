@@ -36,7 +36,9 @@ export async function syncTopicToGroups(
       // Eski xato bilan saqlangan online dars ("#" — dars ID'si yo'q) — nusxalashdan foyda yo'q
       if (item.kind === "meeting" && !/^\d+$/.test(item.meetingLink ?? "")) continue
       if ((item.type === "exam" || item.type === "assignment") && hasGraded) continue
-      const copy = await duplicateTeacherContent(item, { groupId, topicKey: target.topicKey! })
+      // Muddat — nishon guruhdagi mavzuniki: manba guruh muddati bilan kelgan
+      // test u guruhda "muddatsiz" mavzu ichida yopilib qolardi
+      const copy = await duplicateTeacherContent(item, { groupId, topicKey: target.topicKey!, deadline: target.deadline })
       if (item.type === "exam") {
         const questions = await listQuestions(item.id)
         if (questions.length) await replaceQuestions(copy.id, questions)

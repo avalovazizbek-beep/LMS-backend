@@ -5,7 +5,7 @@ import express, { Router, Response, NextFunction } from "express"
 import type { RowDataPacket } from "mysql2"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
-import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, storedFilePath, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen, getTeacherGroupIds } from "../services/teachingStore"
+import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, storedFilePath, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen, getTeacherGroupIds, effectiveTopicDeadline, setTopicDeadline } from "../services/teachingStore"
 import { listQuestions, isExamPassed } from "../services/examStore"
 import { grantRetakesForContent, revokeRetakeGrant } from "../services/retakeStore"
 import {
@@ -1790,11 +1790,13 @@ router.get("/teacher-topics-list", requirePermission("retake", "view"), async (r
       const test = group.find(i => i.type === "exam")
       const assignment = group.find(i => i.type === "assignment")
       if (!marker) return null
-      const deadlinePassed = !!marker.deadline && new Date(marker.deadline).getTime() < Date.now()
+      // Talabaga test/topshiriqning o'z muddati qo'llanadi — shuni ko'rsatamiz
+      const deadline = effectiveTopicDeadline(marker.deadline, group)
+      const deadlinePassed = !!deadline && new Date(deadline).getTime() < Date.now()
       return {
         topicKey,
         title: marker.title,
-        deadline: marker.deadline,
+        deadline,
         deadlinePassed,
         isReopened: marker.isReopened,
         reopenedBy: marker.reopenedBy,
@@ -1821,6 +1823,24 @@ router.post("/topics/:topicKey/reopen", requirePermission("retake", "edit"), asy
   await setTopicReopen(topicKey, true, by)
   void logAudit(req, "topic.reopen", "retake", topicKey)
   res.json({ success: true, message: "Mavzu qayta ochildi" })
+})
+
+/* ── PATCH /admin/topics/:topicKey/deadline — admin mavzu muddatini
+   o'zgartiradi/uzaytiradi yoki olib tashlaydi (deadline: null). Mavzuning
+   test, topshiriq va boshqa qismlariga birdan qo'llanadi. ─────────────── */
+router.patch("/topics/:topicKey/deadline", requirePermission("retake", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const topicKey = textVal(String(req.params.topicKey ?? ""))
+  const marker = topicKey ? await findTopicMarker(topicKey) : null
+  if (!marker) { res.status(404).json({ success: false, message: "Mavzu topilmadi" }); return }
+  const raw = (req.body ?? {}) as { deadline?: unknown }
+  const deadline = typeof raw.deadline === "string" && raw.deadline.trim() ? raw.deadline.trim() : null
+  if (deadline && Number.isNaN(new Date(deadline).getTime())) {
+    res.status(400).json({ success: false, message: "Muddat noto'g'ri sana formatida" })
+    return
+  }
+  const updated = await setTopicDeadline(topicKey, deadline)
+  void logAudit(req, "topic.deadline", "retake", topicKey, { title: marker.title, before: marker.deadline, deadline, updated })
+  res.json({ success: true, message: deadline ? "Muddat saqlandi" : "Muddat olib tashlandi" })
 })
 
 /* ── POST /admin/topics/:topicKey/close — admin yopadi ─────────────────── */

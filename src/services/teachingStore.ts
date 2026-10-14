@@ -817,9 +817,11 @@ async function copyStoredFile(file: ContentFile): Promise<ContentFile | null> {
 }
 
 /** Kontent qatorini (fayllari bilan) boshqa guruh/mavzuga nusxalaydi */
+/** target.deadline berilsa — nusxa shu muddatni oladi (nishon guruhdagi
+    mavzuning muddati), aks holda asl qismning muddati ko'chiriladi. */
 export async function duplicateTeacherContent(
   item: TeacherContentRecord,
-  target: { groupId: number; topicKey: string }
+  target: { groupId: number; topicKey: string; deadline?: string | null }
 ): Promise<TeacherContentRecord> {
   const file = item.file ? await copyStoredFile(item.file) : null
   const created = await createTeacherContent({
@@ -827,7 +829,7 @@ export async function duplicateTeacherContent(
     subjectName: item.subjectName, topicKey: target.topicKey, title: item.title,
     description: item.description, kind: item.kind, trainingType: item.trainingType,
     controlType: item.controlType, resourceType: item.resourceType, meetingLink: item.meetingLink,
-    availableFrom: item.availableFrom, deadline: item.deadline, maxScore: item.maxScore,
+    availableFrom: item.availableFrom, deadline: target.deadline !== undefined ? target.deadline : item.deadline, maxScore: item.maxScore,
     attemptsCount: item.attemptsCount, questionDisplayCount: item.questionDisplayCount,
     language: item.language, isAdaptive: item.isAdaptive, completionPoints: item.completionPoints,
     durationMinutes: item.durationMinutes, trainingLoad: item.trainingLoad,
@@ -941,6 +943,32 @@ export async function updateTopicItems(
   const [result] = await pool.query<mysql.ResultSetHeader>(
     `UPDATE lms_teacher_content SET ${sets.join(", ")} WHERE topic_key = ? AND teacher_user_id = ?`,
     params
+  )
+  return result.affectedRows
+}
+
+/** Talaba qaysi muddatga qarab test/topshiriqni topshira olmay qoladi:
+    test/topshiriqning O'Z muddati (eng ertasi), ular yo'q bo'lsa — mavzuniki.
+    Mavzu markeri va test muddati farq qilishi mumkin (masalan test boshqa
+    guruhdan nusxalanganda manba muddati bilan kelgan) — shunda mavzuda
+    "muddatsiz" ko'rinsa ham test yopilib qolardi. */
+export function effectiveTopicDeadline(markerDeadline: string | null, items: TeacherContentRecord[]): string | null {
+  const graded = items.filter((i) => i.type === "exam" || i.type === "assignment")
+  if (!graded.length) return markerDeadline
+  let earliest: string | null = null
+  for (const item of graded) {
+    if (!item.deadline) continue
+    if (earliest === null || new Date(item.deadline).getTime() < new Date(earliest).getTime()) earliest = item.deadline
+  }
+  return earliest
+}
+
+/** Admin: mavzuning barcha qatorlariga (marker, test, topshiriq, resurslar —
+    qaysi o'qituvchi ID'sida bo'lmasin) bir xil muddat qo'yadi; null — muddatsiz. */
+export async function setTopicDeadline(topicKey: string, deadline: string | null): Promise<number> {
+  const [result] = await pool.query<mysql.ResultSetHeader>(
+    "UPDATE lms_teacher_content SET deadline = ? WHERE topic_key = ?",
+    [deadline ? toMysqlDate(new Date(deadline)) : null, topicKey]
   )
   return result.affectedRows
 }
