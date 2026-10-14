@@ -5,7 +5,7 @@ import express, { Router, Response, NextFunction } from "express"
 import type { RowDataPacket } from "mysql2"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
-import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, storedFilePath, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen, getTeacherGroupIds, effectiveTopicDeadline, setTopicDeadline } from "../services/teachingStore"
+import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, storedFilePath, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen, getTeacherGroupIds, effectiveTopicDeadline, setTopicDeadline, findTopicMarkers } from "../services/teachingStore"
 import { listQuestions, isExamPassed } from "../services/examStore"
 import { grantRetakesForContent, revokeRetakeGrant } from "../services/retakeStore"
 import {
@@ -1827,7 +1827,9 @@ router.post("/topics/:topicKey/reopen", requirePermission("retake", "edit"), asy
 
 /* ── PATCH /admin/topics/:topicKey/deadline — admin mavzu muddatini
    o'zgartiradi/uzaytiradi yoki olib tashlaydi (deadline: null). Mavzuning
-   test, topshiriq va boshqa qismlariga birdan qo'llanadi. ─────────────── */
+   test, topshiriq va boshqa qismlariga birdan qo'llanadi. allGroups — shu
+   o'qituvchining boshqa guruhlaridagi shu nom va turdagi mavzu nusxalariga
+   ham (har guruhda mavzu alohida nusxa, alohida muddat bilan). ────────── */
 router.patch("/topics/:topicKey/deadline", requirePermission("retake", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const topicKey = textVal(String(req.params.topicKey ?? ""))
   const marker = topicKey ? await findTopicMarker(topicKey) : null
@@ -1838,9 +1840,21 @@ router.patch("/topics/:topicKey/deadline", requirePermission("retake", "edit"), 
     res.status(400).json({ success: false, message: "Muddat noto'g'ri sana formatida" })
     return
   }
-  const updated = await setTopicDeadline(topicKey, deadline)
-  void logAudit(req, "topic.deadline", "retake", topicKey, { title: marker.title, before: marker.deadline, deadline, updated })
-  res.json({ success: true, message: deadline ? "Muddat saqlandi" : "Muddat olib tashlandi" })
+  const topicKeys = new Set([topicKey])
+  if ((req.body as { allGroups?: unknown } | undefined)?.allGroups === true) {
+    const copies = await findTopicMarkers(marker.teacherUserId, undefined, marker.subjectName, marker.trainingType, marker.title)
+    for (const copy of copies) if (copy.topicKey) topicKeys.add(copy.topicKey)
+  }
+  let updated = 0
+  for (const key of topicKeys) updated += await setTopicDeadline(key, deadline)
+  void logAudit(req, "topic.deadline", "retake", topicKey, {
+    title: marker.title, before: marker.deadline, deadline, topics: [...topicKeys], updated,
+  })
+  res.json({
+    success: true,
+    message: deadline ? `Muddat saqlandi (${topicKeys.size} ta guruh)` : `Muddat olib tashlandi (${topicKeys.size} ta guruh)`,
+    data: { groups: topicKeys.size },
+  })
 })
 
 /* ── POST /admin/topics/:topicKey/close — admin yopadi ─────────────────── */
