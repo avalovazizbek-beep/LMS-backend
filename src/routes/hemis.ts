@@ -4751,24 +4751,30 @@ async function contractsFromBackendApi(studentId: string, fullName: string) {
           fullName,
         },
         created_at: numberValue(r.created_at) ?? 0,
+        // HEMIS buxgalteriyadan har kuni ertalab yangilaydi — talabaga
+        // "ma'lumot qachongi" ekanini ko'rsatish uchun
+        updated_at: numberValue(r.updated_at) ?? 0,
       }
     }),
     attributes: {},
   }
 }
 
-/* ── GET /api/hemis/contract-list ────────────────────────────────── */
+/* ── GET /api/hemis/contract-list ────────────────────────────────────
+   HEMIS shartnoma/to'lov ma'lumotini buxgalteriyadan kuniga bir marta
+   (ertalab ~05:25) yangilaydi — kesh 1 soat (avval 4 soat edi). */
 router.get("/contract-list", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
   if (isDemoUser(req.user)) { res.json({ success: true, data: mockContractList(req.user), source: "demo" }); return }
 
+  const studentId = textValue(req.user?.id, req.user?.userId)
+
   if (req.user?.studentAuthMode === "oauth") {
-    const studentId = textValue(req.user?.id, req.user?.userId)
     if (!studentId) { res.json({ success: true, data: { items: [], attributes: {} } }); return }
     try {
       const r = await withHemisCache(reqUserId(req), "contract-list",
-        () => contractsFromBackendApi(studentId, textValue(req.user?.fullName) ?? ""), TTL_4H)
+        () => contractsFromBackendApi(studentId, textValue(req.user?.fullName) ?? ""), TTL_1H)
       res.json({ success: true, data: r.data, source: r.source })
     } catch (err) {
       res.status(502).json({ success: false, message: extractMessage(err) })
@@ -4777,8 +4783,19 @@ router.get("/contract-list", async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    const r = await withHemisCache(reqUserId(req), "contract-list",
-      () => hemisGet(HEMIS, "/v1/student/contract-list", hToken), TTL_4H)
+    // Talabaning HEMIS sessiya tokeni eskirgan bo'lsa (parol keshidan
+    // kirganda shunday bo'ladi) Student API rad etadi va avval eski kesh
+    // jim qaytarilardi — "kecha to'ladim, ko'rinmayapti". Endi bunday
+    // holatda admin-token orqali o'sha talabaning yangi ma'lumoti olinadi.
+    const r = await withHemisCache(reqUserId(req), "contract-list", async () => {
+      try {
+        return await hemisGet(HEMIS, "/v1/student/contract-list", hToken)
+      } catch (err) {
+        if (!studentId) throw err
+        console.warn("[contract-list] Student API xato, admin API orqali:", extractMessage(err))
+        return contractsFromBackendApi(studentId, textValue(req.user?.fullName) ?? "")
+      }
+    }, TTL_1H)
     res.json({ success: true, data: (r.data as any)?.data ?? r.data, source: r.source })
   } catch (err) {
     res.status(502).json({ success: false, message: extractMessage(err) })
