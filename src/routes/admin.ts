@@ -52,6 +52,7 @@ import {
   type AttendanceEditStatus,
 } from "../services/attendanceStore"
 import { normalizeTrainingType } from "../services/trainingType"
+import { photoFromProfile } from "../services/photoStore"
 
 const router = Router()
 router.use(authMiddleware)
@@ -65,21 +66,6 @@ function asRecord(v: unknown): Record<string, unknown> {
 function textVal(...args: unknown[]): string {
   for (const a of args) if (typeof a === "string" && a.trim()) return a.trim()
   return ""
-}
-
-/** HEMIS yozuvidagi rasm havolasi (student-list/employee-list `image` —
- *  320px kesilgan surat; OAuth profilida `picture`). Profil LONGTEXT JSON
- *  sifatida saqlangani uchun bu yerda parse qilinadi — SQL'dagi
- *  JSON_EXTRACT bitta buzuq qator bilan butun so'rovni yiqitardi. */
-function photoFromProfile(raw: unknown): string | null {
-  if (!raw) return null
-  let parsed: unknown = raw
-  if (typeof raw === "string") {
-    try { parsed = JSON.parse(raw) } catch { return null }
-  }
-  const r = asRecord(parsed)
-  const url = textVal(r.image, r.picture, r.image_full)
-  return /^https?:\/\//i.test(url) ? url : null
 }
 
 // Yagona, o'zgarmas admin — HEMIS rolidan (super_admin/api) qat'i nazar, faqat

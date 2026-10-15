@@ -24,6 +24,7 @@ import announcementsRoutes from "./routes/announcements"
 import reeduRoutes from "./routes/reedu"
 import plagiarismRoutes from "./routes/plagiarism"
 import supportRoutes from "./routes/support"
+import photosRoutes from "./routes/photos"
 import zoomRoutes, { zoomWebhookHandler } from "./routes/zoom"
 import { startNotificationScheduler } from "./services/notificationScheduler"
 import googleMeetRoutes from "./routes/googleMeet"
@@ -112,6 +113,7 @@ app.use("/api/announcements", announcementsRoutes)
 app.use("/api/reedu", reeduRoutes)
 app.use("/api/plagiarism", plagiarismRoutes)
 app.use("/api/support", supportRoutes)
+app.use("/api/photos", photosRoutes)
 app.use("/api/integrations/zoom", zoomRoutes)
 app.use("/api/integrations/google", googleMeetRoutes)
 
