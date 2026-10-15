@@ -67,6 +67,21 @@ function textVal(...args: unknown[]): string {
   return ""
 }
 
+/** HEMIS yozuvidagi rasm havolasi (student-list/employee-list `image` —
+ *  320px kesilgan surat; OAuth profilida `picture`). Profil LONGTEXT JSON
+ *  sifatida saqlangani uchun bu yerda parse qilinadi — SQL'dagi
+ *  JSON_EXTRACT bitta buzuq qator bilan butun so'rovni yiqitardi. */
+function photoFromProfile(raw: unknown): string | null {
+  if (!raw) return null
+  let parsed: unknown = raw
+  if (typeof raw === "string") {
+    try { parsed = JSON.parse(raw) } catch { return null }
+  }
+  const r = asRecord(parsed)
+  const url = textVal(r.image, r.picture, r.image_full)
+  return /^https?:\/\//i.test(url) ? url : null
+}
+
 // Yagona, o'zgarmas admin — HEMIS rolidan (super_admin/api) qat'i nazar, faqat
 // shu bitta hemis_id doim admin bo'ladi. Boshqa hech kim (super_admin bo'lsa
 // ham) avtomatik admin bo'lmaydi — kerak bo'lsa shu odam ularga "Rol berish"
@@ -325,6 +340,10 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
 
   const whereSql = whereParts.length ? `AND ${whereParts.join(" AND ")}` : ""
 
+  // Katalog join'larida rol sharti shart: talaba va xodim ID'lari HEMIS'da
+  // alohida sanaladi — usiz xodim (masalan 1008) shu raqamli ID'li
+  // talabaning guruhi va rasmini olib qolardi. Xodimning katalog ID'si —
+  // teacher_user_id (u bo'lmasa hemis_id).
   const sql = `
     SELECT
       hu.hemis_id,
@@ -339,12 +358,15 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
       p.granted_at,
       p.note,
       hsd.group_name,
+      hsd.profile AS student_dir_profile,
+      hed.profile AS employee_dir_profile,
       fr.id AS face_registration_id,
       (SELECT COUNT(*) FROM lms_teacher_content tc WHERE CAST(hu.hemis_id AS UNSIGNED) = tc.teacher_user_id) AS content_count,
       (SELECT COUNT(*) FROM lms_platform_sessions ps WHERE ps.user_id = CAST(hu.hemis_id AS UNSIGNED) ORDER BY NULL) AS session_count
     FROM hemis_users hu
     LEFT JOIN lms_permissions p ON p.hemis_id = hu.hemis_id
-    LEFT JOIN hemis_students_directory hsd ON hsd.hemis_id = CAST(hu.hemis_id AS UNSIGNED)
+    LEFT JOIN hemis_students_directory hsd ON hu.role = 'student' AND hsd.hemis_id = CAST(hu.hemis_id AS UNSIGNED)
+    LEFT JOIN hemis_employees_directory hed ON hu.role = 'employee' AND hed.hemis_id = COALESCE(hu.teacher_user_id, CAST(hu.hemis_id AS SIGNED))
     LEFT JOIN face_registrations fr ON fr.username = hsd.student_id_number
     WHERE 1=1 ${whereSql}
     ORDER BY hu.updated_at DESC LIMIT ? OFFSET ?
@@ -356,7 +378,7 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
       `SELECT COUNT(*) AS total
        FROM hemis_users hu
        LEFT JOIN lms_permissions p ON p.hemis_id = hu.hemis_id
-       LEFT JOIN hemis_students_directory hsd ON hsd.hemis_id = CAST(hu.hemis_id AS UNSIGNED)
+       LEFT JOIN hemis_students_directory hsd ON hu.role = 'student' AND hsd.hemis_id = CAST(hu.hemis_id AS UNSIGNED)
        LEFT JOIN face_registrations fr ON fr.username = hsd.student_id_number
        WHERE 1=1 ${whereSql}`,
       whereParams
@@ -376,9 +398,49 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
     ),
   ])
 
+  // Xodim katalogga ID bo'yicha topilmasa (OAuth akkaunt ID'si bilan
+  // kirgan, teacher_user_id katalog ID'si emas) — login profilidagi
+  // employee_id_number / login orqali bitta so'rovda qidiriladi.
+  const employeeDirPhotos = new Map<string, string>()
+  const missingEmployeeKeys = new Set<string>()
+  for (const r of rows) {
+    if (r.hemis_role !== "employee" || photoFromProfile(r.employee_dir_profile)) continue
+    let profile: Record<string, unknown> = {}
+    try { profile = asRecord(JSON.parse(r.profile || "{}")) } catch { /* noop */ }
+    for (const key of [textVal(profile.employee_id_number, profile.university_id), textVal(profile.login)]) {
+      if (key) missingEmployeeKeys.add(key)
+    }
+  }
+  if (missingEmployeeKeys.size) {
+    try {
+      const keys = [...missingEmployeeKeys]
+      const [dirRows] = await pool.query<RowDataPacket[]>(
+        `SELECT employee_id_number, login, profile FROM hemis_employees_directory
+         WHERE employee_id_number IN (?) OR login IN (?)
+         ORDER BY is_active ASC`,
+        [keys, keys]
+      )
+      // is_active ASC — faol yozuv oxirida yozilib, nofaolini bosib ketadi
+      for (const d of dirRows) {
+        const photo = photoFromProfile(d.profile)
+        if (!photo) continue
+        if (d.employee_id_number) employeeDirPhotos.set(String(d.employee_id_number), photo)
+        if (d.login) employeeDirPhotos.set(String(d.login), photo)
+      }
+    } catch { /* rasm ixtiyoriy — ro'yxat baribir qaytadi */ }
+  }
+
   const users = rows.map(r => {
     let profile: Record<string, unknown> = {}
     try { profile = JSON.parse(r.profile || "{}") } catch { /* noop */ }
+    // Avval sinxron katalog (har 6 soatda yangilanadi), keyin login paytidagi profil
+    const photoUrl =
+      photoFromProfile(r.hemis_role === "student" ? r.student_dir_profile : r.employee_dir_profile) ??
+      (r.hemis_role === "employee"
+        ? employeeDirPhotos.get(textVal(profile.employee_id_number, profile.university_id)) ??
+          employeeDirPhotos.get(textVal(profile.login)) ?? null
+        : null) ??
+      photoFromProfile(profile)
     const roles = Array.isArray(profile.roles) ? profile.roles : []
     const roleCodes = roles.map((rr: unknown) =>
       typeof rr === "string" ? rr : textVal(asRecord(rr).code, asRecord(rr).name)
@@ -395,6 +457,7 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
       isAutoAdmin,
       roleIsDefault: !isAutoAdmin && classified.isDefault,
       groupName: r.group_name ?? null,
+      photoUrl,
       faceRegistered: !!r.face_registration_id,
       grantedBy: r.granted_by,
       grantedAt: r.granted_at,
