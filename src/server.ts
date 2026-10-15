@@ -206,8 +206,8 @@ const SNAPSHOT_MIN_INTERVAL_MS = 8_000
    sahifadagi (≤12) talabalar va asosiy ekrandagi talaba — faqat shular
    past sifatli (≈320×180, ~0,2 Mbit/s) kamera yuboradi va uni FAQAT
    o'qituvchi(lar) oladi. Qolganlar videoni umuman yubormaydi. */
-const MAX_WATCH_PER_MANAGER = 20
-const MAX_WATCHED_PER_MEETING = 30
+const MAX_WATCH_PER_MANAGER = 30   // tepadagi qator (≤12) + Kameralar paneli (≤12) + asosiy ekran
+const MAX_WATCHED_PER_MEETING = 40
 const watchersByMeeting = new Map<number, Map<string, number[]>>()
 
 function watchedUserIds(meetingId: number): Set<number> {
