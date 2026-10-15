@@ -29,7 +29,10 @@ import zoomRoutes, { zoomWebhookHandler } from "./routes/zoom"
 import { startNotificationScheduler } from "./services/notificationScheduler"
 import googleMeetRoutes from "./routes/googleMeet"
 import {
+  attendanceElapsedSeconds,
   getAttendance,
+  getAttendanceMode,
+  getAttendanceThresholdSeconds,
   getMeeting,
   getPermissions,
   joinMeeting,
@@ -392,9 +395,20 @@ io.on("connection", async (socket) => {
     if (existing?.size) socket.emit("meeting:snapshots", Array.from(existing.values()))
   }
 
+  // "Avtomatik" davomat: talabaga davomat vaqti qancha qolganini aytamiz —
+  // tugagach klient kamera va mikrofonni o'chiradi (xalaqit bermasligi uchun)
+  const attendanceWindow = user.role === "student" && (await getAttendanceMode()) === "auto"
+    ? await (async () => {
+        const windowSeconds = await getAttendanceThresholdSeconds()
+        const elapsed = await attendanceElapsedSeconds(meetingId, user.id)
+        return { windowSeconds, remainingSeconds: Math.max(0, windowSeconds - elapsed) }
+      })().catch(() => null)
+    : null
+
   const joinedPayload = async () => {
     const response = toMeetingResponse(meeting, user)
     return {
+      attendanceWindow,
       meetingId,
       user,
       meeting: response,

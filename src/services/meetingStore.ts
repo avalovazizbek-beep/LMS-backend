@@ -97,14 +97,18 @@ export interface CreateMeetingInput {
 
 const JWT_SECRET = process.env.MEETING_JWT_SECRET || process.env.JWT_SECRET || "secret"
 
-/** Talaba "keldi" deb hisoblanishi uchun kamerada yuzi kamida shuncha
- *  DAQIQA ko'rinib turishi kerak — admin panelidan (Sozlamalar) o'zgartiriladi,
+/** Davomat vaqti (DAQIQA): talaba meetingga birinchi kirganidan keyin shuncha
+ *  vaqt ichida Face ID orqali davomat olinadi, so'ng ("Avtomatik" rejimda)
+ *  kamera va mikrofoni o'chiriladi. Admin panelidan (Sozlamalar) o'zgartiriladi,
  *  lms_settings jadvalida "meeting_attendance_minutes" kaliti bilan saqlanadi. */
-const DEFAULT_ATTENDANCE_MINUTES = 70
+const DEFAULT_ATTENDANCE_MINUTES = 2
+/** "Keldi" bo'lishi uchun davomat vaqtining kamida shuncha qismida yuz ko'rinishi kerak */
+const ATTENDANCE_FACE_SHARE = 0.5
+const MIN_ATTENDANCE_FACE_SECONDS = 30
 /** Bitta face-ping so'rovida qo'shiladigan maksimal soniya (suiiste'mol/soxta so'rovlardan himoya) */
 const MAX_FACE_PING_SECONDS = 60
 
-async function getAttendanceThresholdSeconds(): Promise<number> {
+export async function getAttendanceThresholdSeconds(): Promise<number> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
     "SELECT value FROM lms_settings WHERE key_name = 'meeting_attendance_minutes' LIMIT 1"
   )
@@ -498,8 +502,14 @@ async function syncMeetingAttendanceToMain(meeting: MeetingRecord): Promise<void
   const subjectName = meeting.subjectName
   const trainingType = await meetingTrainingType(meeting.id)
   const durationSeconds = Math.max(60, Math.round((Date.now() - new Date(meeting.startTime).getTime()) / 1000))
-  const thresholdSeconds = await getAttendanceThresholdSeconds()
-  const requiredSeconds = Math.min(thresholdSeconds, durationSeconds)
+  // Davomat vaqti (masalan 2 daqiqa) ichida yuz kamida yarim vaqt ko'rinishi
+  // kerak (har 15 s tekshiriladi — bitta-ikkita o'tkazib yuborilgan kadr
+  // talabani "kelmadi" qilib qo'ymasin)
+  const windowSeconds = await getAttendanceThresholdSeconds()
+  const requiredSeconds = Math.min(
+    Math.max(MIN_ATTENDANCE_FACE_SECONDS, Math.round(windowSeconds * ATTENDANCE_FACE_SHARE)),
+    durationSeconds
+  )
 
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
     `SELECT user_id, group_id, full_name, face_visible_seconds
@@ -568,6 +578,17 @@ export async function recordFacePresence(
      WHERE meeting_id = ? AND user_id = ?`,
     [seconds, meetingId, userId]
   )
+}
+
+/** Talaba meetingga BIRINCHI kirganidan beri o'tgan soniyalar (qayta
+ *  ulanishda davomat vaqti boshidan boshlanmasin). Vaqt bazada hisoblanadi —
+ *  vaqt zonasi farqi bo'lmasin. */
+export async function attendanceElapsedSeconds(meetingId: number, userId: number): Promise<number> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT TIMESTAMPDIFF(SECOND, created_at, NOW()) AS elapsed FROM lms_meeting_attendance WHERE meeting_id = ? AND user_id = ? LIMIT 1",
+    [meetingId, userId]
+  )
+  return Math.max(0, Number(rows[0]?.elapsed) || 0)
 }
 
 export async function joinMeeting(meeting: MeetingRecord, user: MeetingUser): Promise<AttendanceSummary | null> {
