@@ -1281,8 +1281,12 @@ router.get("/attendance", adminOnly, async (req: AuthRequest, res: Response): Pr
 
   const whereClause = `WHERE ${where.join(" AND ")}`
 
+  // Har bir qator — bitta davomat varag'i (guruh+fan+sana+tur), shuning
+  // uchun bu kichik agregat; ilgari 500 ta bilan cheklangani sababli
+  // filtrlar (guruh/o'qituvchi/sana) eski varaqlarni ko'rmay qolardi.
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT a.group_id, g.name AS group_name, a.subject_name, a.lesson_date, a.training_type,
+            MAX(a.marked_by_user_id) AS teacher_id,
             COUNT(*) AS total,
             SUM(CASE WHEN a.status='present' THEN 1 ELSE 0 END) AS present,
             SUM(CASE WHEN a.status='absent'  THEN 1 ELSE 0 END) AS absent,
@@ -1293,14 +1297,33 @@ router.get("/attendance", adminOnly, async (req: AuthRequest, res: Response): Pr
      ${whereClause}
      GROUP BY a.group_id, a.subject_name, a.lesson_date, a.training_type
      ORDER BY a.lesson_date DESC, a.training_type
-     LIMIT 500`,
+     LIMIT 5000`,
     params
   )
+
+  // Davomatni belgilagan o'qituvchi ismi — katalogdan, bo'lmasa login keshidan
+  const teacherIds = [...new Set(rows.map(r => Number(r.teacher_id)).filter(n => Number.isFinite(n) && n > 0))]
+  const teacherNames = new Map<number, string>()
+  if (teacherIds.length) {
+    const [dirRows] = await pool.query<RowDataPacket[]>(
+      "SELECT hemis_id, full_name FROM hemis_employees_directory WHERE hemis_id IN (?)", [teacherIds]
+    )
+    for (const d of dirRows) teacherNames.set(Number(d.hemis_id), String(d.full_name))
+    const missing = teacherIds.filter(id => !teacherNames.has(id))
+    if (missing.length) {
+      const [huRows] = await pool.query<RowDataPacket[]>(
+        "SELECT teacher_user_id, full_name FROM hemis_users WHERE teacher_user_id IN (?) AND full_name IS NOT NULL", [missing]
+      )
+      for (const h of huRows) if (!teacherNames.has(Number(h.teacher_user_id))) teacherNames.set(Number(h.teacher_user_id), String(h.full_name))
+    }
+  }
 
   res.json({ success: true, data: rows.map(r => ({
     groupId: Number(r.group_id),
     groupName: r.group_name ? String(r.group_name) : `Guruh ${r.group_id}`,
     subjectName: String(r.subject_name),
+    teacherId: r.teacher_id != null ? Number(r.teacher_id) : null,
+    teacherName: teacherNames.get(Number(r.teacher_id)) ?? null,
     lessonDate: r.lesson_date instanceof Date ? r.lesson_date.toISOString().slice(0, 10) : String(r.lesson_date),
     trainingType: r.training_type ? String(r.training_type) : null,
     total: Number(r.total),
@@ -1401,6 +1424,66 @@ router.get("/attendance/student-detail", adminOnly, async (req: AuthRequest, res
     status: String(r.status),
     comment: r.comment ?? null,
   })) })
+})
+
+/* ── GET /api/admin/attendance/matrix — guruh+fan bo'yicha "talaba ×
+   varaq" jadvali (admin Davomatlar sahifasidagi talabalar ro'yxati).
+   Varaq = sana + mashg'ulot turi; har talabaning har varaqdagi holati
+   bitta so'rovda — avval har sana uchun alohida /detail so'ralardi. ─── */
+router.get("/attendance/matrix", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const groupId = req.query.groupId ? Number(req.query.groupId) : null
+  const subject = typeof req.query.subject === "string" ? req.query.subject.trim() : ""
+
+  if (!groupId || !subject) {
+    res.status(400).json({ success: false, message: "groupId, subject majburiy" }); return
+  }
+
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT a.student_user_id, a.student_full_name, a.lesson_date, a.training_type, a.status, a.comment
+     FROM lms_attendance a
+     WHERE a.group_id = ? AND LOWER(a.subject_name) = LOWER(?)
+     ORDER BY a.lesson_date, a.training_type`,
+    [groupId, subject]
+  )
+
+  // /attendance va /detail bilan bir xil ko'rinish — varaq kalitlari mos tushishi uchun
+  const dateText = (v: unknown) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10)
+  const sheetMap = new Map<string, { lessonDate: string; trainingType: string | null }>()
+  const students = new Map<number, { studentId: number; studentName: string; marks: Record<string, string>; comments: Record<string, string> }>()
+  for (const r of rows) {
+    const lessonDate = dateText(r.lesson_date)
+    const trainingType = r.training_type ? String(r.training_type) : null
+    const key = `${lessonDate}|${trainingType ?? ""}`
+    if (!sheetMap.has(key)) sheetMap.set(key, { lessonDate, trainingType })
+    const id = Number(r.student_user_id)
+    let s = students.get(id)
+    if (!s) {
+      s = { studentId: id, studentName: String(r.student_full_name), marks: {}, comments: {} }
+      students.set(id, s)
+    }
+    s.marks[key] = String(r.status)
+    if (r.comment) s.comments[key] = String(r.comment)
+  }
+
+  // Talaba raqami (HEMIS student_id_number) — ism ostida ko'rsatish uchun
+  const ids = [...students.keys()]
+  const numbers = new Map<number, string>()
+  if (ids.length) {
+    const [dirRows] = await pool.query<RowDataPacket[]>(
+      "SELECT hemis_id, student_id_number FROM hemis_students_directory WHERE hemis_id IN (?)", [ids]
+    )
+    for (const d of dirRows) if (d.student_id_number) numbers.set(Number(d.hemis_id), String(d.student_id_number))
+  }
+
+  res.json({
+    success: true,
+    data: {
+      sheets: [...sheetMap.entries()].map(([key, s]) => ({ key, ...s })),
+      students: [...students.values()]
+        .sort((a, b) => a.studentName.localeCompare(b.studentName))
+        .map(s => ({ ...s, studentIdNumber: numbers.get(s.studentId) ?? null })),
+    },
+  })
 })
 
 /* ── GET /api/admin/teacher-journal ─────────────────────────────────── */
