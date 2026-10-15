@@ -37,8 +37,8 @@ import {
 } from "../services/meetingStore"
 import { teacherUserId } from "../services/teachingStore"
 import { notifyMeetingCreated } from "../services/notificationScheduler"
-import { createAndSaveZoomMeeting, getMeetingZoomRow, toPublicZoomInfo } from "../services/zoomService"
-import { createAndSaveGoogleMeetMeeting, getMeetingGoogleMeetRow, toPublicGoogleMeetInfo } from "../services/googleMeetService"
+import { createAndSaveZoomMeeting, getMeetingZoomRow, getMeetingZoomRows, toPublicZoomInfo } from "../services/zoomService"
+import { createAndSaveGoogleMeetMeeting, getMeetingGoogleMeetRow, getMeetingGoogleMeetRows, toPublicGoogleMeetInfo } from "../services/googleMeetService"
 
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
 const MAX_UPLOAD_BYTES = Number(process.env.LOCAL_RESOURCE_MAX_BYTES || 2 * 1024 * 1024 * 1024)
@@ -151,9 +151,18 @@ async function withProviderInfo(meeting: ReturnType<typeof toMeetingResponse>) {
 
 async function groupedMeetings(req: AuthRequest) {
   const user = await resolveMeetingUser(req.user)
-  const meetings = await Promise.all(
-    (await listMeetingsForUser(user)).map((meeting) => withProviderInfo(toMeetingResponse(meeting, user)))
-  )
+  const list = (await listMeetingsForUser(user)).map((meeting) => toMeetingResponse(meeting, user))
+  // Zoom/Google Meet ma'lumoti — har meeting uchun alohida emas, 2 ta so'rovda
+  const ids = list.map((meeting) => meeting.id)
+  const [zoomRows, googleMeetRows] = await Promise.all([getMeetingZoomRows(ids), getMeetingGoogleMeetRows(ids)])
+  const meetings = list.map((meeting) => {
+    const result: Record<string, unknown> & typeof meeting = { ...meeting }
+    const zoomRow = zoomRows.get(meeting.id)
+    const googleMeetRow = googleMeetRows.get(meeting.id)
+    if (zoomRow) result.zoom = toPublicZoomInfo(zoomRow, meeting.permissions.canManageMeeting)
+    if (googleMeetRow) result.googleMeet = toPublicGoogleMeetInfo(googleMeetRow)
+    return result
+  })
 
   return {
     upcoming: meetings.filter(

@@ -182,6 +182,30 @@ function pushChatMessage(message: SocketChatMessage) {
   return message
 }
 
+/* ── Katta darslar (80–120 kishi) uchun ──────────────────────────────────
+   Har kirish/chiqishda butun xonaga to'liq ishtirokchilar ro'yxatini
+   yuborish 120 kishilik xonada ~120² xabar beradi — ro'yxat 1,5 s ichidagi
+   o'zgarishlar yig'ilib bir marta yuboriladi (participant:joined/left
+   hodisalari esa darhol ketadi). */
+const PARTICIPANTS_DEBOUNCE_MS = 1500
+const participantsTimers = new Map<number, ReturnType<typeof setTimeout>>()
+
+/* Talaba kamerasi serverga video sifatida yuborilmaydi (o'z qurilmasida
+   qoladi — Face ID davomati u yerda ishlaydi). O'qituvchi talabalarni
+   ko'rishi uchun har ~20 soniyada kichik JPEG surat keladi (~5–10 KB) va
+   faqat darsni boshqaruvchilarga uzatiladi. Xotirada oxirgisi saqlanadi. */
+type ParticipantSnapshot = { socketId: string; userId: number; fullName: string; groupId: number | null; image: string; at: number }
+const snapshotsByMeeting = new Map<number, Map<string, ParticipantSnapshot>>()
+const SNAPSHOT_MAX_CHARS = 60_000
+const SNAPSHOT_MIN_INTERVAL_MS = 8_000
+
+function dropSnapshot(meetingId: number, socketId: string) {
+  const byMeeting = snapshotsByMeeting.get(meetingId)
+  if (!byMeeting) return
+  byMeeting.delete(socketId)
+  if (!byMeeting.size) snapshotsByMeeting.delete(meetingId)
+}
+
 const httpServer = http.createServer(app)
 const io = new SocketIOServer(httpServer, {
   cors: { origin: FRONTEND_ORIGIN, credentials: true },
@@ -273,6 +297,7 @@ io.on("connection", async (socket) => {
       const otherUser = other.data.user as MeetingUser | undefined
       if (other.id === socket.id || !otherUser || otherUser.id !== user.id || otherUser.role !== user.role) continue
       other.data.replaced = true
+      dropSnapshot(meetingId, other.id)
       for (const producerId of mediasoupService.cleanupPeer(meetingId, other.id)) {
         io.to(room).emit("mediasoup:producerClosed", { producerId, socketId: other.id })
       }
@@ -297,8 +322,24 @@ io.on("connection", async (socket) => {
     groupId: user.groupId,
   })
 
-  const emitParticipants = async () => {
+  const emitParticipantsNow = async () => {
     io.to(room).emit("participants", await participantPayload(meetingId))
+  }
+  const emitParticipants = async () => {
+    if (participantsTimers.has(meetingId)) return
+    participantsTimers.set(meetingId, setTimeout(() => {
+      participantsTimers.delete(meetingId)
+      void emitParticipantsNow().catch(() => undefined)
+    }, PARTICIPANTS_DEBOUNCE_MS))
+  }
+
+  // Darsni boshqaruvchilar (o'qituvchi/admin) — talabalar suratlari faqat ularga
+  const managersRoom = `meeting:${meetingId}:managers`
+  const isManager = toMeetingResponse(meeting, user).permissions.canManageMeeting
+  if (isManager) {
+    socket.join(managersRoom)
+    const existing = snapshotsByMeeting.get(meetingId)
+    if (existing?.size) socket.emit("meeting:snapshots", Array.from(existing.values()))
   }
 
   const joinedPayload = async () => {
@@ -404,6 +445,12 @@ io.on("connection", async (socket) => {
           ? record.source
           : kind === "audio" ? "mic" : "camera"
       if (!transportId || !kind || !record.rtpParameters) throw new Error("transportId/kind/rtpParameters kerak")
+
+      // Ma'ruza rejimi: talaba kamerasi serverga yuborilmaydi — 120 kishilik
+      // darsda har bir talaba videosi boshqa 119 kishiga tarqatilsa server va
+      // talabalar interneti ko'tarmaydi. Kamera talabaning o'z qurilmasida
+      // qoladi (Face ID davomati), o'qituvchi esa suratlarni ko'radi.
+      if (user.role === "student" && source === "camera") throw new Error("Talaba kamerasi serverga yuborilmaydi (ma'ruza rejimi)")
 
       const permissions = getPermissions(user, meeting)
       const denied =
@@ -511,7 +558,24 @@ io.on("connection", async (socket) => {
     })
   })
 
+  socket.on("participant:snapshot", (payload: unknown) => {
+    if (user.role !== "student") return
+    const image = typeof asRecord(payload).image === "string" ? (asRecord(payload).image as string) : ""
+    if (!image.startsWith("data:image/jpeg;base64,") || image.length > SNAPSHOT_MAX_CHARS) return
+    const now = Date.now()
+    if (now - (Number(socket.data.lastSnapshotAt) || 0) < SNAPSHOT_MIN_INTERVAL_MS) return
+    socket.data.lastSnapshotAt = now
+    const snapshot: ParticipantSnapshot = {
+      socketId: socket.id, userId: user.id, fullName: user.fullName, groupId: user.groupId, image, at: now,
+    }
+    let byMeeting = snapshotsByMeeting.get(meetingId)
+    if (!byMeeting) { byMeeting = new Map(); snapshotsByMeeting.set(meetingId, byMeeting) }
+    byMeeting.set(socket.id, snapshot)
+    io.to(managersRoom).emit("participant:snapshot", snapshot)
+  })
+
   const cleanupMediasoupPeer = () => {
+    dropSnapshot(meetingId, socket.id)
     const closedProducerIds = mediasoupService.cleanupPeer(meetingId, socket.id)
     closedProducerIds.forEach((producerId) => {
       socket.to(room).emit("mediasoup:producerClosed", { producerId, socketId: socket.id })

@@ -349,6 +349,18 @@ export async function getMeetingGoogleMeetRow(meetingId: number): Promise<Meetin
   return rows[0] ?? null
 }
 
+/** Bir nechta meeting uchun bitta so'rov (meeting ro'yxati sahifasi) */
+export async function getMeetingGoogleMeetRows(meetingIds: number[]): Promise<Map<number, MeetingGoogleMeetRow>> {
+  const map = new Map<number, MeetingGoogleMeetRow>()
+  if (!meetingIds.length) return map
+  const [rows] = await pool.query<MeetingGoogleMeetRow[]>(
+    "SELECT * FROM lms_meeting_google_meet WHERE meeting_id IN (?)",
+    [meetingIds]
+  )
+  for (const row of rows) if (!map.has(Number(row.meeting_id))) map.set(Number(row.meeting_id), row)
+  return map
+}
+
 export function toPublicGoogleMeetInfo(row: MeetingGoogleMeetRow | null): PublicGoogleMeetInfo | null {
   if (!row) return null
   return {

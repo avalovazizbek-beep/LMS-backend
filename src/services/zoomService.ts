@@ -489,6 +489,18 @@ export async function getMeetingZoomRow(meetingId: number): Promise<MeetingZoomR
   return rows[0] ?? null
 }
 
+/** Bir nechta meeting uchun bitta so'rov (meeting ro'yxati sahifasi) */
+export async function getMeetingZoomRows(meetingIds: number[]): Promise<Map<number, MeetingZoomRow>> {
+  const map = new Map<number, MeetingZoomRow>()
+  if (!meetingIds.length) return map
+  const [rows] = await pool.query<MeetingZoomRow[]>(
+    "SELECT * FROM lms_meeting_zoom WHERE meeting_id IN (?)",
+    [meetingIds]
+  )
+  for (const row of rows) if (!map.has(Number(row.meeting_id))) map.set(Number(row.meeting_id), row)
+  return map
+}
+
 /** Talaba uchun ham, o'qituvchi/admin uchun ham xavfsiz shaklda qaytariladi —
  *  `start_url` (Zoom hostlik tokenini o'z ichiga oladi) faqat `canManage`
  *  true bo'lgandagina qo'shiladi, aks holda hech qachon frontendga chiqmaydi. */

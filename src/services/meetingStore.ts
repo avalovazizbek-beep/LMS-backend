@@ -209,6 +209,11 @@ async function meetingGroupNames(meetingId: number): Promise<string[]> {
 async function mapMeeting(row: mysql.RowDataPacket): Promise<MeetingRecord> {
   const id = Number(row.id)
   const [gids, gnames] = await Promise.all([meetingGroupIds(id), meetingGroupNames(id)])
+  return buildMeeting(row, gids, gnames)
+}
+
+function buildMeeting(row: mysql.RowDataPacket, gids: number[], gnames: string[]): MeetingRecord {
+  const id = Number(row.id)
   return {
     id,
     title:           String(row.title),
@@ -344,16 +349,59 @@ export function toMeetingResponse(meeting: MeetingRecord, user: MeetingUser): Me
 }
 
 /* ── CRUD ──────────────────────────────────────────────────────────── */
+/* Avval BARCHA meeting'lar yuklanib, har biriga 2 ta so'rov (guruh ID/nom)
+   yuborilib, keyin JS'da filtrlanardi — 500 ta meeting bo'lsa bitta sahifa
+   ochilishi ~1000 so'rov edi; dars boshida 2000+ talaba bir vaqtda kirsa
+   baza tiqilib qolardi. Endi rol bo'yicha SQL'da filtrlanadi, guruhlar esa
+   bitta so'rov bilan olinadi (natija avvalgisi bilan bir xil). */
 export async function listMeetingsForUser(user: MeetingUser): Promise<MeetingRecord[]> {
-  const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    "SELECT * FROM lms_meetings WHERE status <> 'cancelled' ORDER BY start_time DESC"
-  )
-  const meetings: MeetingRecord[] = []
-  for (const row of rows) {
-    const meeting = await mapMeeting(row)
-    if (canViewMeeting(user, meeting)) meetings.push(meeting)
+  let rows: mysql.RowDataPacket[]
+  if (user.role === "student") {
+    if (user.groupId === null) return []
+    ;[rows] = await pool.query<mysql.RowDataPacket[]>(
+      `SELECT m.* FROM lms_meetings m
+         JOIN lms_meeting_groups mg ON mg.meeting_id = m.id
+        WHERE mg.group_id = ? AND m.status <> 'cancelled'
+        ORDER BY m.start_time DESC`,
+      [user.groupId]
+    )
+  } else if (user.role === "teacher") {
+    ;[rows] = await pool.query<mysql.RowDataPacket[]>(
+      "SELECT * FROM lms_meetings WHERE status <> 'cancelled' AND created_by_user_id = ? ORDER BY start_time DESC",
+      [user.id]
+    )
+  } else {
+    ;[rows] = await pool.query<mysql.RowDataPacket[]>(
+      "SELECT * FROM lms_meetings WHERE status <> 'cancelled' ORDER BY start_time DESC"
+    )
   }
-  return meetings
+  if (!rows.length) return []
+
+  const ids = rows.map(r => Number(r.id))
+  const [groupRows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT mg.meeting_id, mg.group_id, g.name FROM lms_meeting_groups mg
+       LEFT JOIN lms_groups g ON g.id = mg.group_id
+      WHERE mg.meeting_id IN (?)`,
+    [ids]
+  )
+  const groupsByMeeting = new Map<number, { id: number; name: string | null }[]>()
+  for (const g of groupRows) {
+    const list = groupsByMeeting.get(Number(g.meeting_id)) ?? []
+    list.push({ id: Number(g.group_id), name: g.name ? String(g.name) : null })
+    groupsByMeeting.set(Number(g.meeting_id), list)
+  }
+
+  return rows
+    .map(row => {
+      const groups = groupsByMeeting.get(Number(row.id)) ?? []
+      // mapMeeting bilan bir xil tartib: ID'lar raqam bo'yicha, nomlar nom (yo'q bo'lsa ID) bo'yicha
+      const gids = groups.map(g => g.id).sort((a, b) => a - b)
+      const gnames = [...groups]
+        .sort((a, b) => (a.name ?? String(a.id)).localeCompare(b.name ?? String(b.id)))
+        .map(g => g.name ?? `Guruh ${g.id}`)
+      return buildMeeting(row, gids, gnames)
+    })
+    .filter(meeting => canViewMeeting(user, meeting))
 }
 
 export async function getMeeting(id: number): Promise<MeetingRecord | null> {
