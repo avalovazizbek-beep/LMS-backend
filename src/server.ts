@@ -199,6 +199,32 @@ const snapshotsByMeeting = new Map<number, Map<string, ParticipantSnapshot>>()
 const SNAPSHOT_MAX_CHARS = 60_000
 const SNAPSHOT_MIN_INTERVAL_MS = 8_000
 
+/* O'qituvchi talabalarni jonli ko'rishi: "Kameralar" panelida ko'rinib turgan
+   sahifadagi (≤12) talabalar va asosiy ekrandagi talaba — faqat shular
+   past sifatli (≈320×180, ~0,2 Mbit/s) kamera yuboradi va uni FAQAT
+   o'qituvchi(lar) oladi. Qolganlar videoni umuman yubormaydi. */
+const MAX_WATCH_PER_MANAGER = 20
+const MAX_WATCHED_PER_MEETING = 30
+const watchersByMeeting = new Map<number, Map<string, number[]>>()
+
+function watchedUserIds(meetingId: number): Set<number> {
+  const union = new Set<number>()
+  for (const ids of watchersByMeeting.get(meetingId)?.values() ?? []) {
+    for (const id of ids) {
+      if (union.size >= MAX_WATCHED_PER_MEETING) return union
+      union.add(id)
+    }
+  }
+  return union
+}
+
+function dropWatcher(meetingId: number, socketId: string) {
+  const byMeeting = watchersByMeeting.get(meetingId)
+  if (!byMeeting?.delete(socketId)) return false
+  if (!byMeeting.size) watchersByMeeting.delete(meetingId)
+  return true
+}
+
 function dropSnapshot(meetingId: number, socketId: string) {
   const byMeeting = snapshotsByMeeting.get(meetingId)
   if (!byMeeting) return
@@ -211,6 +237,27 @@ const io = new SocketIOServer(httpServer, {
   cors: { origin: FRONTEND_ORIGIN, credentials: true },
 })
 setSocketIO(io)
+
+/** Har bir talabaga "kamerangizni jonli yuboring / to'xtating" deydi —
+ *  o'qituvchilarning ko'rish ro'yxatiga qarab. To'xtatilganda server ham
+ *  producer'ni yopadi (klient kechiksa ham o'qituvchiga trafik ketmasin). */
+function syncLiveCameras(meetingId: number) {
+  const watched = watchedUserIds(meetingId)
+  for (const socketId of io.sockets.adapter.rooms.get(`meeting:${meetingId}`) ?? []) {
+    const peerSocket = io.sockets.sockets.get(socketId)
+    const peerUser = peerSocket?.data.user as MeetingUser | undefined
+    if (!peerSocket || !peerUser || peerUser.role !== "student") continue
+    const on = watched.has(peerUser.id)
+    if (Boolean(peerSocket.data.liveCamera) === on) continue
+    peerSocket.data.liveCamera = on
+    peerSocket.emit("meeting:liveCamera", { on })
+    if (!on) {
+      for (const producerId of mediasoupService.closeProducersBySource(meetingId, socketId, "camera")) {
+        io.to(`meeting:${meetingId}:managers`).emit("mediasoup:producerClosed", { producerId, socketId })
+      }
+    }
+  }
+}
 
 function socketPeerPayload(room: string, excludeSocketId?: string) {
   const socketIds = io.sockets.adapter.rooms.get(room) ?? new Set<string>()
@@ -298,6 +345,7 @@ io.on("connection", async (socket) => {
       if (other.id === socket.id || !otherUser || otherUser.id !== user.id || otherUser.role !== user.role) continue
       other.data.replaced = true
       dropSnapshot(meetingId, other.id)
+      dropWatcher(meetingId, other.id)
       for (const producerId of mediasoupService.cleanupPeer(meetingId, other.id)) {
         io.to(room).emit("mediasoup:producerClosed", { producerId, socketId: other.id })
       }
@@ -321,6 +369,8 @@ io.on("connection", async (socket) => {
     role: user.role,
     groupId: user.groupId,
   })
+  // O'qituvchi bu talabani allaqachon ko'rmoqchi bo'lsa (qayta ulanish)
+  if (user.role === "student") syncLiveCameras(meetingId)
 
   const emitParticipantsNow = async () => {
     io.to(room).emit("participants", await participantPayload(meetingId))
@@ -353,7 +403,9 @@ io.on("connection", async (socket) => {
       peers: socketPeerPayload(room, socket.id),
       messages: getChatMessages(meetingId),
       rtpCapabilities: await mediasoupService.getRouterRtpCapabilities(meetingId),
-      producers: mediasoupService.listExistingProducers(meetingId, socket.id),
+      // Talabalarning jonli kamerasi faqat o'qituvchiga ko'rinadi
+      producers: mediasoupService.listExistingProducers(meetingId, socket.id)
+        .filter((p) => isManager || !(p.role === "student" && p.kind === "video" && p.source === "camera")),
     }
   }
 
@@ -450,7 +502,9 @@ io.on("connection", async (socket) => {
       // darsda har bir talaba videosi boshqa 119 kishiga tarqatilsa server va
       // talabalar interneti ko'tarmaydi. Kamera talabaning o'z qurilmasida
       // qoladi (Face ID davomati), o'qituvchi esa suratlarni ko'radi.
-      if (user.role === "student" && source === "camera") throw new Error("Talaba kamerasi serverga yuborilmaydi (ma'ruza rejimi)")
+      if (user.role === "student" && source === "camera" && !socket.data.liveCamera) {
+        throw new Error("Talaba kamerasi faqat o'qituvchi ko'rayotganda yuboriladi (ma'ruza rejimi)")
+      }
 
       const permissions = getPermissions(user, meeting)
       const denied =
@@ -466,7 +520,8 @@ io.on("connection", async (socket) => {
         source,
       })
       ack({ success: true, data: { id: producerId } })
-      socket.to(room).emit("mediasoup:newProducer", {
+      const studentCamera = user.role === "student" && source === "camera"
+      socket.to(studentCamera ? managersRoom : room).emit("mediasoup:newProducer", {
         producerId,
         socketId: socket.id,
         userId: user.id,
@@ -488,12 +543,18 @@ io.on("connection", async (socket) => {
       const transportId = typeof record.transportId === "string" ? record.transportId : null
       const producerId = typeof record.producerId === "string" ? record.producerId : null
       if (!transportId || !producerId || !record.rtpCapabilities) throw new Error("transportId/producerId/rtpCapabilities kerak")
+      const owner = mediasoupService.getProducerSummary(meetingId, producerId)
+      if (!isManager && owner && owner.role === "student" && owner.kind === "video" && owner.source === "camera") {
+        throw new Error("Talaba kamerasini faqat o'qituvchi ko'radi")
+      }
 
-      const data = await mediasoupService.consume(meetingId, socket.id, {
-        transportId,
-        producerId,
-        rtpCapabilities: record.rtpCapabilities as MediasoupTypes.RtpCapabilities,
-      })
+      const data = await mediasoupService.consume(
+        meetingId,
+        socket.id,
+        { transportId, producerId, rtpCapabilities: record.rtpCapabilities as MediasoupTypes.RtpCapabilities },
+        // Producer yopilsa (ko'rish to'xtatildi / egasi chiqdi) — shu klientga aniq xabar
+        () => { if (owner) socket.emit("mediasoup:producerClosed", { producerId, socketId: owner.socketId }) }
+      )
       ack({ success: true, data })
     } catch (issue) {
       ack({ success: false, error: issue instanceof Error ? issue.message : "Media qabul qilishda xatolik" })
@@ -524,11 +585,34 @@ io.on("connection", async (socket) => {
     }
   })
 
+  // Klient o'z producer'ini yopadi (talaba: kamera ⇄ ekran almashinuvi yoki
+  // o'qituvchi ko'rishni to'xtatganda)
+  socket.on("mediasoup:closeProducer", (payload: unknown, ack?: unknown) => {
+    if (typeof ack !== "function") return
+    try {
+      const producerId = typeof asRecord(payload).producerId === "string" ? (asRecord(payload).producerId as string) : null
+      if (!producerId) throw new Error("producerId kerak")
+      const owner = mediasoupService.getProducerSummary(meetingId, producerId)
+      if (owner && owner.socketId === socket.id) {
+        mediasoupService.closeProducer(meetingId, socket.id, producerId)
+        const studentCamera = user.role === "student" && owner.source === "camera"
+        io.to(studentCamera ? managersRoom : room).except(socket.id).emit("mediasoup:producerClosed", { producerId, socketId: socket.id })
+      }
+      ack({ success: true })
+    } catch (issue) {
+      ack({ success: false, error: issue instanceof Error ? issue.message : "Xatolik" })
+    }
+  })
+
   socket.on("mediasoup:resumeProducer", async (payload: unknown, ack?: unknown) => {
     if (typeof ack !== "function") return
     try {
       const producerId = typeof asRecord(payload).producerId === "string" ? (asRecord(payload).producerId as string) : null
       if (!producerId) throw new Error("producerId kerak")
+      if (user.role === "student" && !socket.data.liveCamera) {
+        const owner = mediasoupService.getProducerSummary(meetingId, producerId)
+        if (owner?.source === "camera") throw new Error("Talaba kamerasi faqat o'qituvchi ko'rayotganda yuboriladi")
+      }
       await mediasoupService.resumeProducer(meetingId, socket.id, producerId)
       ack({ success: true })
     } catch (issue) {
@@ -558,6 +642,16 @@ io.on("connection", async (socket) => {
     })
   })
 
+  socket.on("meeting:watch", (payload: unknown) => {
+    if (!isManager) return
+    const raw = Array.isArray(asRecord(payload).userIds) ? (asRecord(payload).userIds as unknown[]) : []
+    const ids = [...new Set(raw.map(Number).filter((n) => Number.isInteger(n) && n > 0))].slice(0, MAX_WATCH_PER_MANAGER)
+    let byMeeting = watchersByMeeting.get(meetingId)
+    if (!byMeeting) { byMeeting = new Map(); watchersByMeeting.set(meetingId, byMeeting) }
+    byMeeting.set(socket.id, ids)
+    syncLiveCameras(meetingId)
+  })
+
   socket.on("participant:snapshot", (payload: unknown) => {
     if (user.role !== "student") return
     const image = typeof asRecord(payload).image === "string" ? (asRecord(payload).image as string) : ""
@@ -576,6 +670,7 @@ io.on("connection", async (socket) => {
 
   const cleanupMediasoupPeer = () => {
     dropSnapshot(meetingId, socket.id)
+    if (dropWatcher(meetingId, socket.id)) syncLiveCameras(meetingId)
     const closedProducerIds = mediasoupService.cleanupPeer(meetingId, socket.id)
     closedProducerIds.forEach((producerId) => {
       socket.to(room).emit("mediasoup:producerClosed", { producerId, socketId: socket.id })

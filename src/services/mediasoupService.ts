@@ -145,6 +145,44 @@ export function listExistingProducers(meetingId: number, excludeSocketId?: strin
   return result
 }
 
+/** Producer egasi va turi (consume ruxsatini tekshirish uchun) */
+export function getProducerSummary(meetingId: number, producerId: string): ProducerSummary | null {
+  const state = meetings.get(meetingId)
+  if (!state) return null
+  for (const peer of state.peers.values()) {
+    const producer = peer.producers.get(producerId)
+    if (producer) {
+      return {
+        producerId,
+        socketId: peer.socketId,
+        userId: peer.userId,
+        fullName: peer.fullName,
+        role: peer.role,
+        groupId: peer.groupId,
+        kind: producer.kind,
+        source: (producer.appData.source as ProducerSource) ?? "camera",
+      }
+    }
+  }
+  return null
+}
+
+/** Berilgan manbadagi barcha producer'larni yopadi (masalan o'qituvchi
+ *  talabani ko'rishni to'xtatganda — klient o'zi to'xtatmasa ham trafik
+ *  ketmasin). Yopilgan producer ID'larini qaytaradi. */
+export function closeProducersBySource(meetingId: number, socketId: string, source: ProducerSource): string[] {
+  const peer = meetings.get(meetingId)?.peers.get(socketId)
+  if (!peer) return []
+  const closed: string[] = []
+  for (const [producerId, producer] of peer.producers) {
+    if ((producer.appData.source as ProducerSource) !== source) continue
+    producer.close()
+    peer.producers.delete(producerId)
+    closed.push(producerId)
+  }
+  return closed
+}
+
 export async function createWebRtcTransport(meetingId: number, socketId: string) {
   const { state, peer } = requirePeer(meetingId, socketId)
   if (!ANNOUNCED_IP) throw new Error("MEDIASOUP_ANNOUNCED_IP sozlanmagan — .env ga qo'shing")
@@ -199,7 +237,9 @@ export async function produce(
 export async function consume(
   meetingId: number,
   socketId: string,
-  params: { transportId: string; producerId: string; rtpCapabilities: mediasoup.types.RtpCapabilities }
+  params: { transportId: string; producerId: string; rtpCapabilities: mediasoup.types.RtpCapabilities },
+  /** Producer yopilganda (egasi chiqdi yoki o'qituvchi ko'rishni to'xtatdi) */
+  onProducerClose?: () => void
 ) {
   const { state, peer } = requirePeer(meetingId, socketId)
   const transport = peer.transports.get(params.transportId)
@@ -214,6 +254,11 @@ export async function consume(
     paused: true,
   })
   peer.consumers.set(consumer.id, consumer)
+  consumer.on("producerclose", () => {
+    peer.consumers.delete(consumer.id)
+    onProducerClose?.()
+  })
+  consumer.on("transportclose", () => peer.consumers.delete(consumer.id))
 
   return {
     id: consumer.id,
