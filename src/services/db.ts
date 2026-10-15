@@ -353,6 +353,23 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
 
+  // ── Video fayllarni telefonlarga mos MP4 ga keltirish (services/videoTranscode.ts) ──
+  // Har bir tekshirilgan fayl yo'li bir marta yoziladi: ok — o'zgartirish
+  // shart emas, converted — output_path'ga almashtirildi, failed — xato.
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_video_transcode (
+      relative_path  VARCHAR(500) NOT NULL PRIMARY KEY,
+      status         ENUM('ok','converted','failed') NOT NULL,
+      action         VARCHAR(20) NULL,
+      output_path    VARCHAR(500) NULL,
+      fingerprint    CHAR(40) NULL,
+      attempts       INT NOT NULL DEFAULT 0,
+      error          TEXT NULL,
+      updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_video_transcode_fp (fingerprint)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_video_transcode")
+
   // ── Davomat (qo'lda, o'qituvchi tomonidan belgilanadi) ──
   await exec(`
     CREATE TABLE IF NOT EXISTS lms_attendance (

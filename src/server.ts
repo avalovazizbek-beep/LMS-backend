@@ -42,6 +42,7 @@ import { publicResourcePath } from "./services/localResourceStore"
 import { initDatabase } from "./services/db"
 import { runFullHemisSync } from "./services/hemisSync"
 import { startCertificateSweep } from "./services/certificateStore"
+import { startVideoTranscoder } from "./services/videoTranscode"
 import * as mediasoupService from "./services/mediasoupService"
 
 process.on("unhandledRejection", (reason) => {
@@ -570,6 +571,8 @@ async function start() {
     startNotificationScheduler()
     // Tashakkurnoma: shartga yetgan o'qituvchilarga orqa fonda beriladi (har 10 daqiqada)
     startCertificateSweep()
+    // Yuklangan videolarni telefonlarda ochiladigan MP4 ga keltirish (ffmpeg, fonda)
+    startVideoTranscoder()
 
     // HEMIS to'liq talaba/xodim/guruh ro'yxati — login blokidan mustaqil
     // admin-token orqali fon rejimida sinxronlanadi (services/hemisSync.ts).

@@ -372,9 +372,17 @@ export function streamPrivateFile(req: AuthRequest, res: Response, relativePath:
     res.status(416).setHeader("Content-Range", `bytes */${fileSize}`).end()
     return
   }
-  const start = match[1] ? parseInt(match[1], 10) : 0
-  const end = match[2] ? parseInt(match[2], 10) : fileSize - 1
-  if (Number.isNaN(start) || Number.isNaN(end) || start > end || end >= fileSize) {
+  // "bytes=-500" — oxirgi 500 bayt (suffix); oxiri fayldan katta so'ralsa
+  // (ba'zi Android/WebView pleerlari shunday so'raydi) — RFC 7233 bo'yicha
+  // fayl oxirigacha qisqartiriladi, 416 qaytarilmaydi.
+  let start = match[1] ? parseInt(match[1], 10) : 0
+  let end = match[2] ? parseInt(match[2], 10) : fileSize - 1
+  if (!match[1] && match[2]) {
+    start = Math.max(0, fileSize - parseInt(match[2], 10))
+    end = fileSize - 1
+  }
+  if (end >= fileSize) end = fileSize - 1
+  if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= fileSize) {
     res.status(416).setHeader("Content-Range", `bytes */${fileSize}`).end()
     return
   }

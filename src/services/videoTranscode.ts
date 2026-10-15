@@ -1,0 +1,342 @@
+import fs from "fs"
+import path from "path"
+import crypto from "crypto"
+import { spawn } from "child_process"
+import type { RowDataPacket } from "mysql2"
+import { pool } from "./db"
+import { privateStorageRoot, storedFilePath } from "./teachingStore"
+
+/* ── O'qituvchi yuklagan videolarni har qanday telefon o'ynata oladigan
+   MP4 ga keltirish ──────────────────────────────────────────────────────
+   Muammo: ba'zi talabalarda video telefonda ochilmasdi (qora ekran, 0:00).
+   Sabablar — yuklangan faylning o'zida:
+     • kodek/konteyner: HEVC (H.265), .mov/.mkv/.avi, 10-bit — ko'p mobil
+       brauzerlar o'ynatmaydi (kompyuterdagi pleer esa o'ynatadi);
+     • o'lcham: masalan 2284×1324 ekran yozuvi — telefonlarning apparat
+       dekoderi odatda 1920×1080 dan kattasini o'qiy olmaydi;
+     • "moov" bloki fayl oxirida — telefon avval fayl oxirini yuklab olishi
+       kerak, sekin internetda 0:00 da qotib qoladi.
+   Yechim: fon rejimida (navbat bilan, bittadan, past ustuvorlikda) har bir
+   videoni tekshiradi:
+     ok      — allaqachon mos (H.264 ≤1080p yuv420p, AAC/MP3, faststart .mp4);
+     remux   — kodek mos, faqat konteyner/faststart — `-c copy`, soniyalarda,
+               sifat o'zgarmaydi;
+     encode  — H.264/AAC ga qayta kodlash (≤1920×1080).
+   Mavzu boshqa guruhlarga nusxalanganda fayl ham nusxalanadi — bir xil
+   fayllar (fingerprint) bir marta kodlanadi, qolganiga natija nusxalanadi.
+   Serverda ffmpeg bo'lmasa xizmat o'chiq qoladi (log'da ogohlantirish). */
+
+const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg"
+const FFPROBE = process.env.FFPROBE_PATH || "ffprobe"
+const MAX_LONG_SIDE = 1920
+const MAX_SHORT_SIDE = 1080
+const SCAN_INTERVAL_MS = Number(process.env.VIDEO_SCAN_INTERVAL_MS) || 2 * 60_000
+const FIRST_SCAN_DELAY_MS = 60_000
+const MAX_ATTEMPTS = 3
+const ENCODE_TIMEOUT_MS = 4 * 60 * 60_000
+const LOG = "[video]"
+
+type RunResult = { code: number | null; stdout: string; stderr: string }
+
+let niceOk = false
+
+function run(cmd: string, args: string[], timeoutMs: number, lowPriority = false): Promise<RunResult> {
+  return new Promise((resolve, reject) => {
+    // Linux'da `nice` — meeting (mediasoup) va API'dan protsessor tortib olmasin
+    const useNice = lowPriority && niceOk
+    const child = spawn(useNice ? "nice" : cmd, useNice ? ["-n", "15", cmd, ...args] : args, { windowsHide: true })
+    let stdout = ""
+    let stderr = ""
+    child.stdout.on("data", (d) => { if (stdout.length < 2_000_000) stdout += d })
+    child.stderr.on("data", (d) => { stderr = (stderr + d).slice(-8000) })
+    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs)
+    child.on("error", (err) => { clearTimeout(timer); reject(err) })
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }) })
+  })
+}
+
+interface ProbeStream {
+  codec_type?: string
+  codec_name?: string
+  pix_fmt?: string
+  width?: number
+  height?: number
+}
+interface Probe {
+  streams: ProbeStream[]
+  format: { format_name?: string; duration?: string }
+}
+
+async function probe(file: string): Promise<Probe | null> {
+  try {
+    const r = await run(FFPROBE, ["-v", "error", "-print_format", "json", "-show_streams", "-show_format", file], 60_000)
+    if (r.code !== 0) return null
+    const parsed = JSON.parse(r.stdout) as Probe
+    return { streams: parsed.streams ?? [], format: parsed.format ?? {} }
+  } catch {
+    return null
+  }
+}
+
+/** MP4/MOV yuqori darajadagi bloklar: "moov" "mdat"dan oldinmi (faststart) */
+function moovBeforeMdat(file: string): boolean {
+  let fd: number | null = null
+  try {
+    fd = fs.openSync(file, "r")
+    const size = fs.fstatSync(fd).size
+    const head = Buffer.alloc(16)
+    let pos = 0
+    for (let i = 0; i < 64 && pos + 8 <= size; i++) {
+      fs.readSync(fd, head, 0, 16, pos)
+      let boxSize = head.readUInt32BE(0)
+      const type = head.toString("latin1", 4, 8)
+      if (type === "moov") return true
+      if (type === "mdat") return false
+      if (boxSize === 1) boxSize = Number(head.readBigUInt64BE(8))
+      else if (boxSize === 0) return false
+      if (boxSize < 8) return false
+      pos += boxSize
+    }
+    return false
+  } catch {
+    return false
+  } finally {
+    if (fd !== null) fs.closeSync(fd)
+  }
+}
+
+/** Tez barmoq izi: hajm + boshidagi va oxiridagi 1 MB — bir xil nusxalarni tanish uchun */
+function fingerprint(file: string): string {
+  const fd = fs.openSync(file, "r")
+  try {
+    const size = fs.fstatSync(fd).size
+    const hash = crypto.createHash("sha1").update(String(size))
+    const chunk = Buffer.alloc(Math.min(1_048_576, size))
+    fs.readSync(fd, chunk, 0, chunk.length, 0)
+    hash.update(chunk)
+    fs.readSync(fd, chunk, 0, chunk.length, Math.max(0, size - chunk.length))
+    hash.update(chunk)
+    return hash.digest("hex")
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
+type Plan = { action: "ok" | "remux" | "encode"; audioCopy: boolean; reason: string }
+
+function plan(p: Probe, ext: string, faststart: boolean): Plan | null {
+  const v = p.streams.find(s => s.codec_type === "video")
+  if (!v) return null
+  const a = p.streams.find(s => s.codec_type === "audio")
+  const long = Math.max(v.width ?? 0, v.height ?? 0)
+  const short = Math.min(v.width ?? 0, v.height ?? 0)
+  const videoOk = v.codec_name === "h264" &&
+    (v.pix_fmt === "yuv420p" || v.pix_fmt === "yuvj420p") &&
+    long <= MAX_LONG_SIDE && short <= MAX_SHORT_SIDE
+  const audioOk = !a || a.codec_name === "aac" || a.codec_name === "mp3"
+  const mp4Family = (p.format.format_name ?? "").includes("mp4")
+
+  if (!videoOk) {
+    return { action: "encode", audioCopy: false, reason: `${v.codec_name}/${v.pix_fmt} ${v.width}x${v.height}` }
+  }
+  if (audioOk && mp4Family && ext === ".mp4" && faststart) return { action: "ok", audioCopy: true, reason: "mos" }
+  return { action: "remux", audioCopy: audioOk, reason: !audioOk ? `audio ${a?.codec_name}` : !faststart ? "faststart yo'q" : `konteyner ${ext}` }
+}
+
+// Uzun tomoni ≤1920, qisqasi ≤1080 (portret videoda ham), juft o'lcham.
+// Bitta qo'shtirnoq — vergullar filtrlar ajratuvchisi deb o'qilmasin.
+const SCALE = "scale='trunc(iw*min(1,min(1920/max(iw,ih),1080/min(iw,ih)))/2)*2':'trunc(ih*min(1,min(1920/max(iw,ih),1080/min(iw,ih)))/2)*2'"
+
+function ffmpegArgs(input: string, output: string, p: Plan): string[] {
+  const head = ["-hide_banner", "-nostdin", "-y", "-i", input, "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn"]
+  const audio = p.audioCopy ? ["-c:a", "copy"] : ["-c:a", "aac", "-b:a", "128k", "-ac", "2"]
+  const video = p.action === "remux"
+    ? ["-c:v", "copy"]
+    : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-profile:v", "high", "-pix_fmt", "yuv420p", "-vf", SCALE, "-threads", "2"]
+  return [...head, ...video, ...audio, "-movflags", "+faststart", "-f", "mp4", output]
+}
+
+function durationOf(p: Probe | null): number {
+  return Number(p?.format.duration) || 0
+}
+
+async function mark(relativePath: string, status: "ok" | "converted" | "failed", extra: { action?: string; output?: string | null; fp?: string | null; error?: string | null; bumpAttempt?: boolean }) {
+  await pool.query(
+    `INSERT INTO lms_video_transcode (relative_path, status, action, output_path, fingerprint, attempts, error)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE status = VALUES(status), action = VALUES(action), output_path = VALUES(output_path),
+       fingerprint = COALESCE(VALUES(fingerprint), fingerprint), attempts = attempts + ?, error = VALUES(error)`,
+    [relativePath, status, extra.action ?? null, extra.output ?? null, extra.fp ?? null, extra.bumpAttempt ? 1 : 0, extra.error ?? null, extra.bumpAttempt ? 1 : 0]
+  )
+}
+
+/** Kontent qatorlarini yangi faylga o'tkazadi (bir yo'lga bir nechta qator ishora qilishi mumkin) */
+async function swapFile(oldRel: string, newRel: string, newName: string, size: number) {
+  const [rows] = await pool.query<RowDataPacket[]>("SELECT id, original_name FROM lms_teacher_content WHERE relative_path = ?", [oldRel])
+  for (const r of rows) {
+    const original = String(r.original_name || "video").replace(/\.[^.]+$/, "") + ".mp4"
+    await pool.query(
+      "UPDATE lms_teacher_content SET file_name = ?, original_name = ?, mime_type = 'video/mp4', file_size = ?, relative_path = ? WHERE id = ?",
+      [newName, original, size, newRel, r.id]
+    )
+  }
+}
+
+let currentJob: { relativePath: string; action: string; startedAt: number } | null = null
+
+async function processOne(relativePath: string): Promise<void> {
+  const root = privateStorageRoot()
+  const input = storedFilePath(root, relativePath)
+  if (!input || !fs.existsSync(input)) { // nosemgrep
+    await mark(relativePath, "failed", { error: "fayl topilmadi", bumpAttempt: true })
+    return
+  }
+  const ext = path.extname(input).toLowerCase()
+  const fp = fingerprint(input)
+
+  // Bir xil nusxa avval konvertatsiya qilingan bo'lsa — natijani nusxalaymiz
+  const [done] = await pool.query<RowDataPacket[]>(
+    "SELECT output_path FROM lms_video_transcode WHERE fingerprint = ? AND status = 'converted' AND output_path IS NOT NULL LIMIT 5", [fp]
+  )
+  for (const d of done) {
+    const prev = storedFilePath(root, String(d.output_path))
+    if (!prev || !fs.existsSync(prev)) continue // nosemgrep
+    const name = `${path.basename(input, ext).slice(0, 80)}-web.mp4`
+    const outRel = `${path.posix.dirname(relativePath)}/${name}`
+    const out = storedFilePath(root, outRel)
+    if (!out) break
+    await fs.promises.copyFile(prev, out) // nosemgrep
+    await swapFile(relativePath, outRel, name, fs.statSync(out).size) // nosemgrep
+    await mark(relativePath, "converted", { action: "copy", output: outRel, fp })
+    await mark(outRel, "ok", { action: "ok", fp: null })
+    fs.rm(input, { force: true }, () => undefined) // nosemgrep
+    console.log(`${LOG} ${relativePath} → ${outRel} (avvalgi natijadan nusxa)`)
+    return
+  }
+
+  const info = await probe(input)
+  if (!info) {
+    await mark(relativePath, "failed", { error: "ffprobe o'qiy olmadi", fp, bumpAttempt: true })
+    return
+  }
+  const p = plan(info, ext, moovBeforeMdat(input))
+  if (!p) {
+    await mark(relativePath, "failed", { error: "video oqimi yo'q", fp, bumpAttempt: true })
+    return
+  }
+  if (p.action === "ok") {
+    await mark(relativePath, "ok", { action: "ok", fp })
+    return
+  }
+
+  const name = `${path.basename(input, ext).slice(0, 80)}-web.mp4`
+  const outRel = `${path.posix.dirname(relativePath)}/${name}`
+  const out = storedFilePath(root, outRel)
+  if (!out) {
+    await mark(relativePath, "failed", { error: "chiqish yo'li noto'g'ri", fp, bumpAttempt: true })
+    return
+  }
+  const tmp = `${out}.part`
+  currentJob = { relativePath, action: p.action, startedAt: Date.now() }
+  console.log(`${LOG} ${relativePath}: ${p.action} (${p.reason})`)
+  try {
+    const r = await run(FFMPEG, ffmpegArgs(input, tmp, p), ENCODE_TIMEOUT_MS, p.action === "encode")
+    if (r.code !== 0) throw new Error(r.stderr.split("\n").filter(Boolean).slice(-3).join(" | ") || `ffmpeg kodi ${r.code}`)
+    // Natija butunligini tekshiramiz: davomiyligi aslidan sezilarli farq qilmasin
+    const before = durationOf(info)
+    const after = durationOf(await probe(tmp))
+    if (!after || (before && Math.abs(before - after) > Math.max(2, before * 0.02))) {
+      throw new Error(`davomiylik mos emas: ${before} → ${after}`)
+    }
+    fs.renameSync(tmp, out) // nosemgrep
+    await swapFile(relativePath, outRel, name, fs.statSync(out).size) // nosemgrep
+    await mark(relativePath, "converted", { action: p.action, output: outRel, fp })
+    await mark(outRel, "ok", { action: "ok" })
+    fs.rm(input, { force: true }, () => undefined) // nosemgrep
+    console.log(`${LOG} tayyor: ${outRel} (${Math.round((Date.now() - currentJob.startedAt) / 1000)}s)`)
+  } catch (err) {
+    fs.rm(tmp, { force: true }, () => undefined) // nosemgrep
+    const message = err instanceof Error ? err.message : String(err)
+    console.warn(`${LOG} xato ${relativePath}: ${message}`)
+    await mark(relativePath, "failed", { action: p.action, error: message.slice(0, 2000), fp, bumpAttempt: true })
+  } finally {
+    currentJob = null
+  }
+}
+
+let available: boolean | null = null
+let scanning = false
+
+async function ffmpegAvailable(): Promise<boolean> {
+  if (available !== null) return available
+  try {
+    const [a, b] = await Promise.all([run(FFMPEG, ["-version"], 15_000), run(FFPROBE, ["-version"], 15_000)])
+    available = a.code === 0 && b.code === 0
+  } catch {
+    available = false
+  }
+  if (available && process.platform !== "win32") {
+    niceOk = await run("nice", ["-n", "15", FFMPEG, "-version"], 15_000).then(r => r.code === 0).catch(() => false)
+  }
+  if (!available) console.warn(`${LOG} ffmpeg/ffprobe topilmadi — videolar telefonlarga moslashtirilmaydi (o'rnatish: sudo apt install -y ffmpeg)`)
+  return available
+}
+
+/** Hali tekshirilmagan (yoki xato bilan qolgan) videolarni navbat bilan ishlaydi */
+export async function scanVideos(): Promise<void> {
+  if (scanning) return
+  if (!(await ffmpegAvailable())) return
+  scanning = true
+  try {
+    for (;;) {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT DISTINCT c.relative_path
+           FROM lms_teacher_content c
+           LEFT JOIN lms_video_transcode v ON v.relative_path = c.relative_path
+          WHERE c.relative_path IS NOT NULL AND c.relative_path <> ''
+            AND (c.mime_type LIKE 'video/%' OR c.kind = 'video_lesson')
+            AND (v.relative_path IS NULL
+                 OR (v.status = 'failed' AND v.attempts < ? AND v.updated_at < NOW() - INTERVAL 30 MINUTE))
+          LIMIT 10`,
+        [MAX_ATTEMPTS]
+      )
+      if (!rows.length) break
+      for (const r of rows) {
+        const rel = String(r.relative_path)
+        try {
+          await processOne(rel)
+        } catch (err) {
+          // Kutilmagan xato (masalan fayl o'qilmadi) — navbat to'xtab qolmasin
+          const message = err instanceof Error ? err.message : String(err)
+          console.warn(`${LOG} xato ${rel}: ${message}`)
+          await mark(rel, "failed", { error: message.slice(0, 2000), bumpAttempt: true }).catch(() => {})
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`${LOG} skan xatosi:`, err instanceof Error ? err.message : err)
+  } finally {
+    scanning = false
+  }
+}
+
+export function startVideoTranscoder() {
+  setTimeout(() => { void scanVideos() }, FIRST_SCAN_DELAY_MS)
+  setInterval(() => { void scanVideos() }, SCAN_INTERVAL_MS)
+}
+
+/** Admin uchun holat: nechta video tekshirilgan/o'zgartirilgan/xato, hozir nima ishlanmoqda */
+export async function getVideoTranscodeStatus() {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    "SELECT status, action, COUNT(*) AS n FROM lms_video_transcode GROUP BY status, action"
+  )
+  const [failed] = await pool.query<RowDataPacket[]>(
+    "SELECT relative_path, attempts, error, updated_at FROM lms_video_transcode WHERE status = 'failed' ORDER BY updated_at DESC LIMIT 20"
+  )
+  return {
+    ffmpeg: available,
+    running: currentJob ? { ...currentJob, seconds: Math.round((Date.now() - currentJob.startedAt) / 1000) } : null,
+    counts: rows.map(r => ({ status: String(r.status), action: r.action ? String(r.action) : null, n: Number(r.n) })),
+    failed: failed.map(f => ({ path: String(f.relative_path), attempts: Number(f.attempts), error: f.error ? String(f.error) : null, at: f.updated_at })),
+  }
+}

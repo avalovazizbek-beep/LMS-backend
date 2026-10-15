@@ -53,6 +53,7 @@ import {
 } from "../services/attendanceStore"
 import { normalizeTrainingType } from "../services/trainingType"
 import { photoFromProfile } from "../services/photoStore"
+import { getVideoTranscodeStatus } from "../services/videoTranscode"
 
 const router = Router()
 router.use(authMiddleware)
@@ -1883,6 +1884,12 @@ router.get("/locked-assignments", adminOnly, async (_req: AuthRequest, res: Resp
       teacherName: teacherNames.get(i.teacherUserId) ?? null,
     })),
   })
+})
+
+/* ── GET /api/admin/video-transcode/status — videolarni telefonlarga
+   moslashtirish holati (services/videoTranscode.ts) ─────────────────── */
+router.get("/video-transcode/status", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
+  res.json({ success: true, data: await getVideoTranscodeStatus() })
 })
 
 /* ── GET /api/admin/teacher-info — o'qituvchi guruhlari va fanlari ─── */
