@@ -1267,6 +1267,26 @@ router.patch("/attendance-edit-requests/:id", requirePermission("attendance", "e
   res.json({ success: true, message: approved ? "Tasdiqlandi" : "Rad etildi", data: updated })
 })
 
+/** O'qituvchi ID'lari (teacher_user_id) → F.I.Sh.: avval HEMIS xodimlar
+ *  katalogidan, bo'lmasa login keshidan (hemis_users) */
+async function teacherNamesByIds(rawIds: number[]): Promise<Map<number, string>> {
+  const ids = [...new Set(rawIds.filter(n => Number.isFinite(n) && n > 0))]
+  const names = new Map<number, string>()
+  if (!ids.length) return names
+  const [dirRows] = await pool.query<RowDataPacket[]>(
+    "SELECT hemis_id, full_name FROM hemis_employees_directory WHERE hemis_id IN (?)", [ids]
+  )
+  for (const d of dirRows) names.set(Number(d.hemis_id), String(d.full_name))
+  const missing = ids.filter(id => !names.has(id))
+  if (missing.length) {
+    const [huRows] = await pool.query<RowDataPacket[]>(
+      "SELECT teacher_user_id, full_name FROM hemis_users WHERE teacher_user_id IN (?) AND full_name IS NOT NULL", [missing]
+    )
+    for (const h of huRows) if (!names.has(Number(h.teacher_user_id))) names.set(Number(h.teacher_user_id), String(h.full_name))
+  }
+  return names
+}
+
 /* ── GET /api/admin/attendance ──────────────────────────────────────── */
 router.get("/attendance", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
   const groupId = req.query.groupId ? Number(req.query.groupId) : null
@@ -1301,22 +1321,8 @@ router.get("/attendance", adminOnly, async (req: AuthRequest, res: Response): Pr
     params
   )
 
-  // Davomatni belgilagan o'qituvchi ismi — katalogdan, bo'lmasa login keshidan
-  const teacherIds = [...new Set(rows.map(r => Number(r.teacher_id)).filter(n => Number.isFinite(n) && n > 0))]
-  const teacherNames = new Map<number, string>()
-  if (teacherIds.length) {
-    const [dirRows] = await pool.query<RowDataPacket[]>(
-      "SELECT hemis_id, full_name FROM hemis_employees_directory WHERE hemis_id IN (?)", [teacherIds]
-    )
-    for (const d of dirRows) teacherNames.set(Number(d.hemis_id), String(d.full_name))
-    const missing = teacherIds.filter(id => !teacherNames.has(id))
-    if (missing.length) {
-      const [huRows] = await pool.query<RowDataPacket[]>(
-        "SELECT teacher_user_id, full_name FROM hemis_users WHERE teacher_user_id IN (?) AND full_name IS NOT NULL", [missing]
-      )
-      for (const h of huRows) if (!teacherNames.has(Number(h.teacher_user_id))) teacherNames.set(Number(h.teacher_user_id), String(h.full_name))
-    }
-  }
+  // Davomatni belgilagan o'qituvchi ismi
+  const teacherNames = await teacherNamesByIds(rows.map(r => Number(r.teacher_id)))
 
   res.json({ success: true, data: rows.map(r => ({
     groupId: Number(r.group_id),
@@ -1860,7 +1866,23 @@ router.get("/hemis-directory-sync/log", adminOnly, async (req: AuthRequest, res:
 /* ── GET /api/admin/locked-assignments — yakunlangan amaliylar ─────── */
 router.get("/locked-assignments", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
   const items = await listTeacherContent({ type: "assignment", isActive: false })
-  res.json({ success: true, data: items })
+  // Bir mavzu har guruhda alohida nusxa — ro'yxatda qaysi guruh va kimniki
+  // ekani ko'rinmasa, bir xil nomli qatorlarni ajratib bo'lmaydi
+  const groupIds = [...new Set(items.map(i => i.groupId).filter(Boolean))]
+  const groupNames = new Map<number, string>()
+  if (groupIds.length) {
+    const [gRows] = await pool.query<RowDataPacket[]>("SELECT id, name FROM lms_groups WHERE id IN (?)", [groupIds])
+    for (const g of gRows) groupNames.set(Number(g.id), String(g.name))
+  }
+  const teacherNames = await teacherNamesByIds(items.map(i => i.teacherUserId))
+  res.json({
+    success: true,
+    data: items.map(i => ({
+      ...i,
+      groupName: groupNames.get(i.groupId) ?? null,
+      teacherName: teacherNames.get(i.teacherUserId) ?? null,
+    })),
+  })
 })
 
 /* ── GET /api/admin/teacher-info — o'qituvchi guruhlari va fanlari ─── */
