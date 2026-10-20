@@ -1865,18 +1865,27 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
     if (!meta.attemptsCount || meta.attemptsCount < 1) meta.attemptsCount = 1
   }
   if (meta.type === "exam" && meta.controlType === "oraliq") {
-    if (!(ORALIQ_SLOTS as readonly string[]).includes(meta.kind)) {
-      res.status(400).json({ success: false, message: "Oraliq nazorat qaysi ekanini tanlang: ON1 yoki ON2" })
-      return
-    }
     if (!(await teachesLecture(tId, meta.groupId, meta.subjectName))) {
       res.status(403).json({ success: false, message: LECTURE_ONLY_MESSAGE })
       return
     }
-    const taken = await oraliqSlotTaken(meta.groupId, meta.subjectName, meta.kind)
-    if (taken) {
-      res.status(409).json({ success: false, message: `Bu guruhda ${meta.kind} allaqachon bor ("${taken.title}") — o'shani tahrirlang yoki o'chiring` })
-      return
+    if ((ORALIQ_SLOTS as readonly string[]).includes(meta.kind)) {
+      const taken = await oraliqSlotTaken(meta.groupId, meta.subjectName, meta.kind)
+      if (taken) {
+        res.status(409).json({ success: false, message: `Bu guruhda ${meta.kind} allaqachon bor ("${taken.title}") — o'shani tahrirlang yoki o'chiring` })
+        return
+      }
+    } else {
+      // ON tanlovisiz so'rov (masalan yangilanmagan eski forma) — birinchi bo'sh o'rin
+      let free: string | null = null
+      for (const slot of ORALIQ_SLOTS) {
+        if (!(await oraliqSlotTaken(meta.groupId, meta.subjectName, slot))) { free = slot; break }
+      }
+      if (!free) {
+        res.status(409).json({ success: false, message: "Bu guruhda ON1 va ON2 allaqachon bor — mavjudini tahrirlang yoki o'chiring" })
+        return
+      }
+      meta.kind = free
     }
   }
 
