@@ -46,7 +46,6 @@ import {
   getSubmissionById,
   getProgressBulk,
   getSubmissionsBulk,
-  getPeriodGrades,
   upsertPeriodGrade,
   gradeSubmission,
   getContentProgress,
@@ -64,9 +63,13 @@ import {
   topicTrainingType,
   NO_TRAINING_TYPE,
   getPendingGrading,
+  isControlExam,
+  ORALIQ_SLOTS,
+  teacherTrainingTypes,
   type ContentProgress,
   type SubmissionRecord,
 } from "../services/teachingStore"
+import { computePeriodCells, normalizeGrade, type PeriodKey } from "../services/periodGrades"
 import {
   listQuestions,
   replaceQuestions,
@@ -115,7 +118,7 @@ import {
   getGradeForGroupDate,
   getGroupGradeHistory,
 } from "../services/gradeStore"
-import { getActiveRetakeGrant, consumeRetakeGrant, grantRetakesForContent, revokeRetakeGrant } from "../services/retakeStore"
+import { getActiveRetakeGrant, getActiveGrantKeys, consumeRetakeGrant, grantRetakesForContent, revokeRetakeGrant } from "../services/retakeStore"
 import { isAdminUser } from "./admin"
 import { isDemoUser } from "../services/demoHemis"
 import { logAudit } from "../services/auditLog"
@@ -162,13 +165,19 @@ function toScaleBall(pct: number, max: number): number {
   return Math.round((Math.min(100, Math.max(0, pct)) * max) / 100)
 }
 
-// Old submissions stored grade as 0-100 percentage; new ones are scaled to contentMaxScore.
-// If grade > maxScore (and maxScore > 0 && maxScore < 100), it's old format — convert it.
-function normalizeGrade(grade: number | null | undefined, maxScore: number | null | undefined): number {
-  if (!grade) return 0
-  const ms = maxScore ?? 0
-  if (ms > 0 && ms < 100 && grade > ms) return Math.round((grade / 100) * ms)
-  return grade
+/* Oraliq nazoratni faqat shu fandan ma'ruza o'qiydigan o'qituvchi o'tkazadi.
+   Turi HEMIS jadvali va o'qituvchining mavzularidan aniqlanadi; hech narsa
+   topilmasa (jadval hali sinxronlanmagan) — to'xtatilmaydi. */
+async function teachesLecture(tId: number, groupId: number, subjectName: string): Promise<boolean> {
+  const types = await teacherTrainingTypes(tId, groupId, subjectName)
+  return types.size === 0 || types.has("Ma'ruza")
+}
+const LECTURE_ONLY_MESSAGE = "Oraliq nazoratni faqat shu guruhga bu fandan ma'ruza o'qiydigan o'qituvchi o'tkazadi"
+
+/** Shu guruh+fanda shu o'rindagi (ON1/ON2) boshqa faol oraliq bormi */
+async function oraliqSlotTaken(groupId: number, subjectName: string, slot: string, exceptId?: number): Promise<TeacherContentRecord | null> {
+  const items = await listTeacherContent({ type: "exam", groupId, subjectName, isActive: true })
+  return items.find((c) => c.controlType === "oraliq" && c.kind === slot && c.id !== exceptId) ?? null
 }
 
 function safeContentType(value: string): ContentType | null {
@@ -255,6 +264,17 @@ function presentForStudent(item: TeacherContentRecord): TeacherContentRecord {
   if (item.status !== "locked") return item
   // Dedline ochilmaguncha talaba kontent tafsilotini va faylini ko'ra olmaydi
   return { ...item, description: null, file: null }
+}
+
+/** Admin bergan faol qayta urinish ruxsati imtihon yozuvining o'ziga
+    belgilanadi — topshirmagan talaba ham (masalan oraliqqa kelmagan)
+    muddati o'tgan imtihonni "Boshlash" tugmasi bilan ocha olsin. */
+async function applyMyRetakeGrants(items: TeacherContentRecord[], sId: number): Promise<(TeacherContentRecord & { retakeGranted?: boolean })[]> {
+  const examIds = items.filter((i) => i.type === "exam").map((i) => i.id)
+  if (!examIds.length) return items
+  const keys = await getActiveGrantKeys(examIds, sId)
+  if (!keys.size) return items
+  return items.map((i) => (keys.has(`${i.id}:${sId}`) ? { ...i, retakeGranted: true } : i))
 }
 
 /* ── token-tekshiruvchi fayl endpointlari (authMiddleware'dan OLDIN) ──
@@ -1121,7 +1141,10 @@ router.get("/content", async (req: AuthRequest, res: Response): Promise<void> =>
     res.json({ success: true, data: [] })
     return
   }
-  const items = await applyTopicReopen(await listTeacherContent({ type, groupId, subjectName }))
+  const items = await applyMyRetakeGrants(
+    await applyTopicReopen(await listTeacherContent({ type, groupId, subjectName })),
+    studentUserId(req.user)
+  )
   res.json({ success: true, data: items.map(presentForStudent) })
 })
 
@@ -1602,18 +1625,16 @@ router.get("/my-topic-scores", async (req: AuthRequest, res: Response): Promise<
   const topicKeys = Array.from(topicMap.keys()).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
 
   const contentIds = items.filter(c => c.topicKey).map(c => c.id)
-  const [progressList, submissionList, periodGradeList] = await Promise.all([
+  const [progressList, submissionList, periodCells] = await Promise.all([
     getProgressBulk(contentIds, [sId]),
     getSubmissionsBulk(contentIds, [sId]),
-    getPeriodGrades(groupId, subjectName),
+    computePeriodCells(groupId, subjectName, items, [sId]),
   ])
 
   const progressMap = new Map<number, boolean>()
   for (const p of progressList) progressMap.set(p.contentId, p.completed)
   const subMap = new Map<number, number | null>()
   for (const s of submissionList) subMap.set(s.contentId, s.grade)
-  const periodMap = new Map<string, number | null>()
-  for (const g of periodGradeList) periodMap.set(`${g.studentUserId}:${g.gradeType}`, g.grade)
 
   const topicsOut = topicKeys.map((key, i) => {
     const group = topicMap.get(key)!
@@ -1632,9 +1653,11 @@ router.get("/my-topic-scores", async (req: AuthRequest, res: Response): Promise<
     return { key, idx: i + 1, title: mavzuItem?.title ?? key, maxScore, score: hasActivity ? earned : null }
   })
 
-  const on1 = periodMap.get(`${sId}:ON1`) ?? null
-  const on2 = periodMap.get(`${sId}:ON2`) ?? null
-  const yn  = periodMap.get(`${sId}:YN`)  ?? null
+  // Jurnal bilan bir xil manba (test / qo'lda / topshirmagan) — 0-100 foiz
+  const cells = periodCells.get(sId)
+  const on1 = cells?.ON1.pct ?? null
+  const on2 = cells?.ON2.pct ?? null
+  const yn  = cells?.YN.pct  ?? null
 
   res.json({ success: true, data: { topics: topicsOut, on1, on2, yn } })
 })
@@ -1722,7 +1745,7 @@ router.get("/content/:id", async (req: AuthRequest, res: Response): Promise<void
     res.status(403).json({ success: false, message: "Sizga ruxsat yo'q" })
     return
   }
-  const [withReopen] = await applyTopicReopen([content])
+  const [withReopen] = await applyMyRetakeGrants(await applyTopicReopen([content]), studentUserId(req.user))
   res.json({ success: true, data: presentForStudent(withReopen) })
 })
 
@@ -1827,6 +1850,32 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
     const allowed = meta.type === "kurs-topshiriq" && (await employeeTeachesGroup(meta.groupId, req.user))
     if (!allowed) {
       res.status(403).json({ success: false, message: "Bu guruh sizga HEMIS orqali biriktirilmagan" })
+      return
+    }
+  }
+
+  // Oraliq/yakuniy nazorat: tugash vaqti majburiy, urinishlar cheksiz bo'lmaydi
+  // (o'qituvchi son qo'ymasa — 1 ta); oraliqda ON1/ON2 o'rni tanlanadi va uni
+  // faqat ma'ruza o'qituvchisi yaratadi
+  if (meta.type === "exam" && isControlExam(meta.controlType)) {
+    if (!meta.deadline || new Date(meta.deadline).getTime() <= new Date(meta.availableFrom).getTime()) {
+      res.status(400).json({ success: false, message: "Nazorat uchun tugash vaqti majburiy va ochilish vaqtidan keyin bo'lishi kerak" })
+      return
+    }
+    if (!meta.attemptsCount || meta.attemptsCount < 1) meta.attemptsCount = 1
+  }
+  if (meta.type === "exam" && meta.controlType === "oraliq") {
+    if (!(ORALIQ_SLOTS as readonly string[]).includes(meta.kind)) {
+      res.status(400).json({ success: false, message: "Oraliq nazorat qaysi ekanini tanlang: ON1 yoki ON2" })
+      return
+    }
+    if (!(await teachesLecture(tId, meta.groupId, meta.subjectName))) {
+      res.status(403).json({ success: false, message: LECTURE_ONLY_MESSAGE })
+      return
+    }
+    const taken = await oraliqSlotTaken(meta.groupId, meta.subjectName, meta.kind)
+    if (taken) {
+      res.status(409).json({ success: false, message: `Bu guruhda ${meta.kind} allaqachon bor ("${taken.title}") — o'shani tahrirlang yoki o'chiring` })
       return
     }
   }
@@ -1995,6 +2044,25 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
   if ("delivered" in body) patch.delivered = boolValue(body.delivered)
   if ("isActive" in body) patch.isActive = boolValue(body.isActive)
 
+  if (existing.type === "exam" && isControlExam(existing.controlType)) {
+    if ("attemptsCount" in body && !(patch.attemptsCount && patch.attemptsCount > 0)) patch.attemptsCount = 1
+    if ("deadline" in body && !patch.deadline) {
+      res.status(400).json({ success: false, message: "Nazorat uchun tugash vaqti majburiy" })
+      return
+    }
+  }
+  if (existing.type === "exam" && existing.controlType === "oraliq" && patch.kind !== undefined && patch.kind !== existing.kind) {
+    if (!(ORALIQ_SLOTS as readonly string[]).includes(patch.kind ?? "")) {
+      res.status(400).json({ success: false, message: "Oraliq nazorat qaysi ekanini tanlang: ON1 yoki ON2" })
+      return
+    }
+    const taken = await oraliqSlotTaken(existing.groupId, existing.subjectName, patch.kind!, existing.id)
+    if (taken) {
+      res.status(409).json({ success: false, message: `Bu guruhda ${patch.kind} allaqachon bor ("${taken.title}")` })
+      return
+    }
+  }
+
   const updated = await updateTeacherContent(id!, patch)
   // Marker'ning deadline/turi mavzuning barcha qismlari uchun amal qiladi
   if (isTopicMarker && existing.topicKey && (patch.deadline !== undefined || patch.trainingType !== undefined)) {
@@ -2017,6 +2085,14 @@ router.patch("/content/:id/toggle", async (req: AuthRequest, res: Response): Pro
   if (!existing || existing.teacherUserId !== teacherUserId(req.user)) {
     res.status(404).json({ success: false, message: "Topilmadi" })
     return
+  }
+  // Nofaol oraliqni qayta yoqishda — shu ON o'rnida boshqa faol oraliq bo'lmasin
+  if (!existing.isActive && existing.type === "exam" && existing.controlType === "oraliq" && existing.kind) {
+    const taken = await oraliqSlotTaken(existing.groupId, existing.subjectName, existing.kind, existing.id)
+    if (taken) {
+      res.status(409).json({ success: false, message: `Bu guruhda faol ${existing.kind} allaqachon bor ("${taken.title}")` })
+      return
+    }
   }
   const updated = await updateTeacherContent(id!, { isActive: !existing.isActive })
   res.json({ success: true, data: updated })
@@ -2218,6 +2294,10 @@ router.post("/content/:id/retake-grants", async (req: AuthRequest, res: Response
     res.status(404).json({ success: false, message: "Test topilmadi" })
     return
   }
+  if (content.controlType === "oraliq") {
+    res.status(403).json({ success: false, message: "Oraliq nazoratni qayta ochishni admin \"Oraliqlar\" bo'limidan qiladi" })
+    return
+  }
   const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
   const ids = Array.isArray(body.studentUserIds)
     ? body.studentUserIds.map((v) => numberValue(v)).filter((n): n is number => n !== null)
@@ -2228,6 +2308,86 @@ router.post("/content/:id/retake-grants", async (req: AuthRequest, res: Response
   }
   const granted = await grantRetakesForContent(content, ids, fullNameOf(req.user) || null, textValue(body.reason) || null)
   res.json({ success: true, data: { granted }, message: `${granted} ta talabaga qayta urinish ruxsati berildi` })
+})
+
+/* ── POST /content/:id/copy-to-groups — oraliq/yakuniy nazoratni savollari
+   bilan o'qituvchining boshqa guruhlariga tarqatish. Nishon guruhda shu
+   o'qituvchining shu nazorati (oraliqda — shu ON o'rni, yakuniyda — shu nom)
+   bo'lsa, hali hech kim boshlamagan bo'lsagina sozlamasi va savollari
+   yangilanadi; aks holda tegilmaydi. ─────────────────────────────────── */
+router.post("/content/:id/copy-to-groups", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  const id = numberValue(req.params.id)
+  const source = id !== null ? await getTeacherContent(id) : null
+  const tId = teacherUserId(req.user)
+  if (!source || source.teacherUserId !== tId || source.type !== "exam" || !isControlExam(source.controlType)) {
+    res.status(404).json({ success: false, message: "Nazorat topilmadi" })
+    return
+  }
+  if (source.controlType === "oraliq" && !(ORALIQ_SLOTS as readonly string[]).includes(source.kind ?? "")) {
+    res.status(400).json({ success: false, message: "Avval tahrirlab, bu oraliq ON1 yoki ON2 ekanini tanlang" })
+    return
+  }
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
+  const groupIds = Array.isArray(body.groupIds)
+    ? [...new Set(body.groupIds.map((v) => numberValue(v)).filter((n): n is number => n !== null && n !== source.groupId))]
+    : []
+  if (!groupIds.length) {
+    res.status(400).json({ success: false, message: "Guruh tanlanmagan" })
+    return
+  }
+
+  const ownGroupIds = await getTeacherGroupIds(tId)
+  const questions = await listQuestions(source.id)
+  const settings = {
+    title: source.title, description: source.description,
+    availableFrom: source.availableFrom, deadline: source.deadline,
+    maxScore: source.maxScore, attemptsCount: source.attemptsCount,
+    questionDisplayCount: source.questionDisplayCount, isAdaptive: source.isAdaptive,
+    durationMinutes: source.durationMinutes,
+  }
+  let created = 0
+  let updated = 0
+  const skipped: { groupId: number; reason: string }[] = []
+
+  for (const gid of groupIds) {
+    if (!ownGroupIds.includes(gid)) { skipped.push({ groupId: gid, reason: "Guruh sizga biriktirilmagan" }); continue }
+    if (source.controlType === "oraliq" && !(await teachesLecture(tId, gid, source.subjectName))) {
+      skipped.push({ groupId: gid, reason: LECTURE_ONLY_MESSAGE }); continue
+    }
+    const target = source.controlType === "oraliq"
+      ? await oraliqSlotTaken(gid, source.subjectName, source.kind ?? "")
+      : (await listTeacherContent({ type: "exam", teacherUserId: tId, groupId: gid, subjectName: source.subjectName, isActive: true }))
+          .find((c) => c.controlType === source.controlType && c.title.trim().toLowerCase() === source.title.trim().toLowerCase()) ?? null
+
+    if (!target) {
+      const copy = await duplicateTeacherContent(source, { groupId: gid, topicKey: "" })
+      if (questions.length) await replaceQuestions(copy.id, questions)
+      created++
+      continue
+    }
+    if (target.teacherUserId !== tId) {
+      skipped.push({ groupId: gid, reason: `Bu guruhda ${source.kind ?? ""} boshqa o'qituvchida bor` }); continue
+    }
+    const [[started]] = await pool.query<import("mysql2").RowDataPacket[]>(
+      `SELECT (SELECT COUNT(*) FROM lms_submissions WHERE content_id = ?) +
+              (SELECT COUNT(*) FROM lms_exam_sessions WHERE content_id = ?) AS n`,
+      [target.id, target.id]
+    )
+    if (Number(started?.n ?? 0) > 0) {
+      skipped.push({ groupId: gid, reason: "Talabalar topshirishni boshlagan — o'zgartirilmadi" }); continue
+    }
+    await updateTeacherContent(target.id, settings)
+    if (questions.length) await replaceQuestions(target.id, questions)
+    updated++
+  }
+
+  const parts = [`${created} ta guruhga qo'shildi`, `${updated} ta guruhda yangilandi`]
+  if (skipped.length) parts.push(`${skipped.length} ta o'tkazib yuborildi`)
+  res.json({ success: true, data: { created, updated, skipped }, message: parts.join(", ") })
 })
 
 /* ── DELETE /content/:id/retake-grants/:studentUserId — ruxsatni bekor qilish ── */
@@ -3252,28 +3412,15 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
     return
   }
 
-  // "Oraliq nazorat" / "Yakuniy nazorat" — standalone MCQ exams (no topicKey,
-  // so invisible to the topic columns above) whose scores should feed
-  // ON1/ON2/YN automatically instead of requiring a duplicate manual entry.
-  // Ordered by availableFrom: 1st oraliq exam -> ON1, 2nd -> ON2, 1st yakuniy -> YN.
-  const oraliqContent = allContent
-    .filter(c => c.controlType === "oraliq")
-    .sort((a, b) => new Date(a.availableFrom).getTime() - new Date(b.availableFrom).getTime())
-  const yakuniyContent = allContent
-    .filter(c => c.controlType === "yakuniy")
-    .sort((a, b) => new Date(a.availableFrom).getTime() - new Date(b.availableFrom).getTime())
-  const periodExamContent = [...oraliqContent, ...yakuniyContent]
-
-  const contentIds = Array.from(new Set([
-    ...journalTopics.flatMap(tp => tp.graded.map(c => c.id)),
-    ...periodExamContent.map(c => c.id),
-  ]))
+  const contentIds = Array.from(new Set(journalTopics.flatMap(tp => tp.graded.map(c => c.id))))
   const studentIds = roster.map(s => s.studentUserId)
 
-  const [progressList, submissionList, periodGradeList, attList] = await Promise.all([
+  // ON1/ON2/YN — oraliq/yakuniy nazorat testlari (mavzusiz) va qo'lda
+  // kiritilgan baholardan, services/periodGrades.ts qoidalari bo'yicha
+  const [progressList, submissionList, periodCells, attList] = await Promise.all([
     getProgressBulk(contentIds, studentIds),
     getSubmissionsBulk(contentIds, studentIds),
-    getPeriodGrades(groupId, subjectName),
+    computePeriodCells(groupId, subjectName, allContent, studentIds),
     getAttendanceSummary(groupId, subjectName),
   ])
 
@@ -3283,19 +3430,6 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
 
   const subMap = new Map<string, number | null>()
   for (const s of submissionList) subMap.set(`${s.contentId}:${s.studentUserId}`, s.grade)
-
-  const periodMap = new Map<string, number | null>()
-  for (const g of periodGradeList) periodMap.set(`${g.studentUserId}:${g.gradeType}`, g.grade)
-
-  // Manual ON/YN entries are the fallback; a real submitted exam always wins.
-  // Result is a 0-100 percentage, matching how ON1/ON2/YN are already entered/displayed.
-  function periodScoreFromExam(exam: TeacherContentRecord, studentUserId: number): number | null {
-    const grade = subMap.get(`${exam.id}:${studentUserId}`)
-    if (grade == null) return null
-    const earned = normalizeGrade(grade, exam.maxScore)
-    const max = exam.maxScore && exam.maxScore > 0 ? exam.maxScore : 100
-    return Math.min(100, Math.round((earned / max) * 100 * 10) / 10)
-  }
 
   const attMap = new Map<number, number>()
   for (const a of attList) {
@@ -3331,12 +3465,11 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
     }
     const jn = counted > 0 ? toScaleBall(pctSum / counted, GRADE_SCALE.jn) : null
 
-    const on1 = (oraliqContent[0] ? periodScoreFromExam(oraliqContent[0], s.studentUserId) : null)
-      ?? periodMap.get(`${s.studentUserId}:ON1`) ?? null
-    const on2 = (oraliqContent[1] ? periodScoreFromExam(oraliqContent[1], s.studentUserId) : null)
-      ?? periodMap.get(`${s.studentUserId}:ON2`) ?? null
-    const yn  = (yakuniyContent[0] ? periodScoreFromExam(yakuniyContent[0], s.studentUserId) : null)
-      ?? periodMap.get(`${s.studentUserId}:YN`)  ?? null
+    const cells = periodCells.get(s.studentUserId)
+    const ball = (key: PeriodKey, max: number) => {
+      const pct = cells?.[key].pct
+      return pct == null ? null : toScaleBall(pct, max)
+    }
 
     return {
       userId: s.studentUserId,
@@ -3344,9 +3477,15 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
       studentIdNumber: s.studentIdNumber ?? null,
       topicScores,
       jn,
-      on1: on1 == null ? null : toScaleBall(on1, GRADE_SCALE.on1),
-      on2: on2 == null ? null : toScaleBall(on2, GRADE_SCALE.on2),
-      yn:  yn  == null ? null : toScaleBall(yn,  GRADE_SCALE.yn),
+      on1: ball("ON1", GRADE_SCALE.on1),
+      on2: ball("ON2", GRADE_SCALE.on2),
+      yn:  ball("YN", GRADE_SCALE.yn),
+      // Katak qayerdan kelgani: test / qo'lda / topshirmagan (0)
+      periodSource: {
+        on1: cells?.ON1.source ?? null,
+        on2: cells?.ON2.source ?? null,
+        yn:  cells?.YN.source ?? null,
+      },
       attendancePct: attMap.get(s.studentUserId) ?? null,
     }
   })
@@ -3381,6 +3520,14 @@ router.post("/period-grade", async (req: AuthRequest, res: Response): Promise<vo
   const ownGroupIds = await getTeacherGroupIds(tId)
   if (!ownGroupIds.includes(groupId)) {
     res.status(403).json({ success: false, message: "Bu guruh sizga HEMIS orqali biriktirilmagan" })
+    return
+  }
+  if ((gradeType === "ON1" || gradeType === "ON2") && !(await teachesLecture(tId, groupId, subjectName))) {
+    res.status(403).json({ success: false, message: LECTURE_ONLY_MESSAGE })
+    return
+  }
+  if (grade != null && (grade < 0 || grade > 100)) {
+    res.status(400).json({ success: false, message: "Baho 0-100 foiz oralig'ida bo'lishi kerak" })
     return
   }
 

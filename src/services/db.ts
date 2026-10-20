@@ -1295,6 +1295,33 @@ export async function initDatabase() {
       ('certificate_parts', 'media,presentation,guide,check')
   `)
 
+  // Oraliq nazoratning jurnaldagi o'rni (ON1/ON2) 2026-10-20 dan `kind`da
+  // saqlanadi. Undan oldingi oraliqlarga jurnal avval qanday taxmin qilgan
+  // bo'lsa (guruh+fan bo'yicha: faoli oldin, so'ng ochilish vaqti) — shu o'rin
+  // bir marta yoziladi, natijalar o'zgarmaydi. Uchinchi va keyingilari tegilmaydi.
+  {
+    const [rows] = await pool.query<mysql.RowDataPacket[]>(
+      `SELECT id, group_id, LOWER(subject_name) AS subj, kind FROM lms_teacher_content
+       WHERE type = 'exam' AND control_type = 'oraliq'
+       ORDER BY is_active DESC, available_from ASC, id ASC`
+    )
+    const used = new Map<string, Set<string>>()
+    const slotsOf = (r: mysql.RowDataPacket) => {
+      const key = `${r.group_id}:${r.subj}`
+      if (!used.has(key)) used.set(key, new Set())
+      return used.get(key)!
+    }
+    for (const r of rows) if (r.kind === "ON1" || r.kind === "ON2") slotsOf(r).add(String(r.kind))
+    for (const r of rows) {
+      if (r.kind === "ON1" || r.kind === "ON2") continue
+      const slots = slotsOf(r)
+      const slot = !slots.has("ON1") ? "ON1" : !slots.has("ON2") ? "ON2" : null
+      if (!slot) continue
+      slots.add(slot)
+      await pool.query("UPDATE lms_teacher_content SET kind = ? WHERE id = ?", [slot, r.id])
+    }
+  }
+
   // hemis_users.teacher_user_id ni profile JSON'dagi raqamli ID dan to'ldirish
   // (OAuth orqali kirgan o'qituvchilar uchun retroaktiv backfill)
   await pool.query(`

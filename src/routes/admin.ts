@@ -5,9 +5,10 @@ import express, { Router, Response, NextFunction } from "express"
 import type { RowDataPacket } from "mysql2"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { pool } from "../services/db"
-import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, storedFilePath, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen, getTeacherGroupIds, effectiveTopicDeadline, setTopicDeadline, findTopicMarkers } from "../services/teachingStore"
-import { listQuestions, isExamPassed } from "../services/examStore"
-import { grantRetakesForContent, revokeRetakeGrant } from "../services/retakeStore"
+import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, storedFilePath, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen, getTeacherGroupIds, effectiveTopicDeadline, setTopicDeadline, findTopicMarkers, isControlExam } from "../services/teachingStore"
+import { listQuestions, isExamPassed, getExamViolationsSummary } from "../services/examStore"
+import { grantRetakesForContent, revokeRetakeGrant, getActiveGrantKeys } from "../services/retakeStore"
+import { computePeriodCells, pickPeriodExams, type PeriodKey } from "../services/periodGrades"
 import {
   listAllForAdmin as listAllAnnouncements,
   createTextOnly as createTextOnlyAnnouncement,
@@ -49,6 +50,8 @@ import {
   listEditRequests as listAttendanceEditRequests,
   countPendingEditRequests as countPendingAttendanceEditRequests,
   reviewEditRequest as reviewAttendanceEditRequest,
+  getGroupRoster,
+  sortByFullName,
   type AttendanceEditStatus,
 } from "../services/attendanceStore"
 import { normalizeTrainingType } from "../services/trainingType"
@@ -2203,10 +2206,11 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
   else if (controlType) { where.push("tc.control_type = ?"); params.push(controlType) }
 
   const [rows] = await pool.query<RowDataPacket[]>(`
-    SELECT tc.id, tc.title, tc.subject_name, tc.group_id, g.name AS group_name, tc.control_type,
+    SELECT tc.id, tc.title, tc.subject_name, tc.group_id, g.name AS group_name, tc.control_type, tc.kind,
            tc.teacher_user_id, tc.max_score, tc.available_from, tc.deadline,
            COALESCE(NULLIF(TRIM(hu.full_name),''), CONCAT('O\\'qituvchi #', tc.teacher_user_id)) AS teacher_name,
-           (SELECT COUNT(*) FROM lms_submissions s WHERE s.content_id = tc.id) AS submission_count
+           (SELECT COUNT(*) FROM lms_submissions s WHERE s.content_id = tc.id) AS submission_count,
+           (SELECT COUNT(*) FROM lms_exam_retake_grants rg WHERE rg.content_id = tc.id AND rg.status = 'active') AS grant_count
     FROM lms_teacher_content tc
     LEFT JOIN lms_groups g ON g.id = tc.group_id
     LEFT JOIN hemis_users hu ON hu.teacher_user_id = tc.teacher_user_id
@@ -2219,10 +2223,76 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
     id: Number(r.id), title: String(r.title), subjectName: String(r.subject_name),
     groupId: Number(r.group_id), groupName: r.group_name ? String(r.group_name) : `Guruh ${r.group_id}`,
     controlType: r.control_type ?? null, teacherName: String(r.teacher_name),
+    // Oraliqning jurnaldagi o'rni (ON1/ON2) — `kind` ustunida
+    slot: r.control_type === "oraliq" && (r.kind === "ON1" || r.kind === "ON2") ? String(r.kind) : null,
     maxScore: r.max_score == null ? null : Number(r.max_score),
     availableFrom: r.available_from, deadline: r.deadline,
     submissionCount: Number(r.submission_count ?? 0),
+    grantCount: Number(r.grant_count ?? 0),
   })) })
+})
+
+/* ── GET /api/admin/oraliq/:id/students — oraliq nazorat bo'yicha guruhning
+   to'liq ro'yxati: topshirgan / topshirmagan (muddat o'tgach 0) / qayta
+   ochilgan. Qayta ochish o'zi /content/:id/retake-grants orqali. ── */
+router.get("/oraliq/:id/students", requirePermission("retake", "view"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  const exam = Number.isFinite(id) ? await getTeacherContent(id) : null
+  if (!exam || exam.type !== "exam" || !isControlExam(exam.controlType)) {
+    res.status(404).json({ success: false, message: "Nazorat topilmadi" })
+    return
+  }
+  const [roster, submissions, violations, allContent] = await Promise.all([
+    getGroupRoster(exam.groupId, exam.subjectName).catch(() => []),
+    listSubmissions(exam.id),
+    getExamViolationsSummary(exam.id),
+    listTeacherContent({ groupId: exam.groupId, subjectName: exam.subjectName }),
+  ])
+  // Ro'yxatdan tushib qolgan, lekin topshirgan talaba ham ko'rinsin
+  const people = new Map<number, string>()
+  for (const s of roster) people.set(s.studentUserId, s.fullName)
+  for (const s of submissions) if (!people.has(s.studentUserId)) people.set(s.studentUserId, s.studentFullName)
+  const ids = [...people.keys()]
+  const [grants, cells] = await Promise.all([
+    getActiveGrantKeys([exam.id]),
+    computePeriodCells(exam.groupId, exam.subjectName, allContent, ids),
+  ])
+  const slot = (["ON1", "ON2", "YN"] as PeriodKey[]).find((k) => pickPeriodExams(allContent)[k]?.id === exam.id) ?? null
+  const subBy = new Map(submissions.map((s) => [s.studentUserId, s]))
+  const violBy = new Map(violations.map((v) => [v.studentUserId, v.counts]))
+
+  const students = sortByFullName(ids.map((userId) => {
+    const sub = subBy.get(userId)
+    const cell = slot ? cells.get(userId)?.[slot] ?? null : null
+    return {
+      userId,
+      fullName: people.get(userId) ?? "",
+      grade: sub?.grade ?? null,
+      attemptsUsed: sub?.attemptsUsed ?? 0,
+      submittedAt: sub?.submittedAt ?? null,
+      passed: sub ? isExamPassed(sub.grade, exam.maxScore) : false,
+      retakeGranted: grants.has(`${exam.id}:${userId}`),
+      // Jurnaldagi qiymat (foiz) va manbasi — qo'lda yozilgan bo'lishi ham mumkin
+      journalPct: cell?.pct ?? null,
+      journalSource: cell?.source ?? null,
+      violations: violBy.get(userId) ?? null,
+    }
+  }))
+
+  const [[groupRow]] = await pool.query<RowDataPacket[]>("SELECT name FROM lms_groups WHERE id = ?", [exam.groupId])
+  res.json({
+    success: true,
+    data: {
+      exam: {
+        id: exam.id, title: exam.title, subjectName: exam.subjectName,
+        groupId: exam.groupId, groupName: groupRow?.name ? String(groupRow.name) : `Guruh ${exam.groupId}`,
+        controlType: exam.controlType, slot, maxScore: exam.maxScore, attemptsCount: exam.attemptsCount,
+        availableFrom: exam.availableFrom, deadline: exam.deadline, status: exam.status,
+        questionCount: exam.questionCount, isActive: exam.isActive,
+      },
+      students,
+    },
+  })
 })
 
 /* ── GET /api/admin/content/:id/submissions — pass/fail bilan barcha natijalar ── */

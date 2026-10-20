@@ -40,6 +40,17 @@ export async function getActiveRetakeGrant(contentId: number, studentUserId: num
   return rows.length ? mapRow(rows[0]) : null
 }
 
+/** Berilgan imtihonlardagi faol ruxsatlar — `${contentId}:${studentUserId}` to'plami */
+export async function getActiveGrantKeys(contentIds: number[], studentUserId?: number): Promise<Set<string>> {
+  if (!contentIds.length) return new Set()
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT content_id, student_user_id FROM lms_exam_retake_grants
+     WHERE status = 'active' AND content_id IN (?)${studentUserId != null ? " AND student_user_id = ?" : ""}`,
+    studentUserId != null ? [contentIds, studentUserId] : [contentIds]
+  )
+  return new Set(rows.map((r) => `${Number(r.content_id)}:${Number(r.student_user_id)}`))
+}
+
 /** Idempotent: agar shu talaba uchun faol ruxsat allaqachon bo'lsa, mavjudini qaytaradi. */
 export async function grantRetake(contentId: number, studentUserId: number, grantedBy: string | null, reason?: string | null): Promise<RetakeGrantRecord> {
   const existing = await getActiveRetakeGrant(contentId, studentUserId)

@@ -4,6 +4,7 @@ import { randomUUID, randomBytes } from "crypto"
 import type mysql from "mysql2/promise"
 import { pool, toMysqlDate, fromMysqlDate } from "./db"
 import { stableNumericId } from "./meetingStore"
+import { normalizeTrainingType } from "./trainingType"
 
 export type ContentType =
   | "lesson"
@@ -150,6 +151,37 @@ const SAFE_MIME_BY_EXT: Record<string, string> = {
 export function safeMimeType(filename: string, fallback = "application/octet-stream"): string {
   const ext = path.extname(filename || "").toLowerCase()
   return SAFE_MIME_BY_EXT[ext] || fallback
+}
+
+/* ── Oraliq / yakuniy nazorat ──────────────────────────────────────── */
+export const CONTROL_TYPES = ["oraliq", "yakuniy"] as const
+/** Oraliq nazorat imtihonining jurnaldagi o'rni — `kind` ustunida saqlanadi */
+export const ORALIQ_SLOTS = ["ON1", "ON2"] as const
+
+export function isControlExam(controlType: string | null | undefined): boolean {
+  return (CONTROL_TYPES as readonly string[]).includes(controlType ?? "")
+}
+
+/** O'qituvchining shu guruh+fandagi mashg'ulot turlari (normalizeTrainingType
+    ko'rinishida): HEMIS dars jadvali (lms_teacher_schedule.raw_json) va o'zi
+    yaratgan mavzular. Hech narsa topilmasa — bo'sh to'plam (aniqlab bo'lmadi). */
+export async function teacherTrainingTypes(teacherUserId: number, groupId: number, subjectName: string): Promise<Set<string>> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.trainingType.name')) AS tt
+       FROM lms_teacher_schedule
+      WHERE teacher_user_id = ? AND group_id = ? AND LOWER(subject_name) = LOWER(?)
+     UNION
+     SELECT training_type AS tt FROM lms_teacher_content
+      WHERE teacher_user_id = ? AND group_id = ? AND LOWER(subject_name) = LOWER(?)
+        AND type = 'mavzu' AND kind = 'topic' AND is_active = 1 AND training_type IS NOT NULL`,
+    [teacherUserId, groupId, subjectName, teacherUserId, groupId, subjectName]
+  )
+  const out = new Set<string>()
+  for (const r of rows) {
+    const tt = normalizeTrainingType(r.tt === "null" ? "" : r.tt)
+    if (tt) out.add(tt)
+  }
+  return out
 }
 
 /* ── Dedline holati ────────────────────────────────────────────────── */
@@ -452,7 +484,10 @@ async function mapContentRow(row: mysql.RowDataPacket): Promise<TeacherContentRe
     availableFrom,
     deadline,
     maxScore: row.max_score == null ? null : Number(row.max_score),
-    attemptsCount: row.attempts_count == null ? null : Number(row.attempts_count),
+    // Oraliq/yakuniy nazorat cheksiz bo'lmaydi: son qo'yilmagan (eski) bo'lsa — 1 ta urinish
+    attemptsCount: Number(row.attempts_count) > 0
+      ? Number(row.attempts_count)
+      : isControlExam(row.control_type) ? 1 : row.attempts_count == null ? null : Number(row.attempts_count),
     questionDisplayCount: row.question_display_count == null ? null : Number(row.question_display_count),
     language: row.language ?? null,
     isAdaptive: Boolean(row.is_adaptive),
@@ -1338,11 +1373,11 @@ export async function getProgressBulk(
 export async function getSubmissionsBulk(
   contentIds: number[],
   studentIds: number[]
-): Promise<{ contentId: number; studentUserId: number; grade: number | null }[]> {
+): Promise<{ contentId: number; studentUserId: number; grade: number | null; submittedAt: number }[]> {
   if (!contentIds.length || !studentIds.length) return []
   const ph = (arr: number[]) => arr.map(() => "?").join(",")
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    `SELECT content_id, student_user_id, grade FROM lms_submissions
+    `SELECT content_id, student_user_id, grade, submitted_at FROM lms_submissions
      WHERE content_id IN (${ph(contentIds)}) AND student_user_id IN (${ph(studentIds)})`,
     [...contentIds, ...studentIds]
   )
@@ -1350,6 +1385,7 @@ export async function getSubmissionsBulk(
     contentId: Number(r.content_id),
     studentUserId: Number(r.student_user_id),
     grade: r.grade !== null && r.grade !== undefined ? Number(r.grade) : null,
+    submittedAt: r.submitted_at ? new Date(r.submitted_at).getTime() : 0,
   }))
 }
 
@@ -1396,9 +1432,9 @@ export async function getPendingGrading(teacherUserId: number): Promise<PendingG
 export async function getPeriodGrades(
   groupId: number,
   subjectName: string
-): Promise<{ studentUserId: number; gradeType: string; grade: number | null }[]> {
+): Promise<{ studentUserId: number; gradeType: string; grade: number | null; updatedAt: number }[]> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    `SELECT student_user_id, grade_type, grade FROM lms_period_grades
+    `SELECT student_user_id, grade_type, grade, updated_at FROM lms_period_grades
      WHERE group_id = ? AND LOWER(subject_name) = LOWER(?)`,
     [groupId, subjectName]
   )
@@ -1406,6 +1442,7 @@ export async function getPeriodGrades(
     studentUserId: Number(r.student_user_id),
     gradeType: String(r.grade_type),
     grade: r.grade !== null && r.grade !== undefined ? Number(r.grade) : null,
+    updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : 0,
   }))
 }
 
