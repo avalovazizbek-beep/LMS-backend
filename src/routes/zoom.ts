@@ -51,7 +51,15 @@ router.get("/callback", async (req, res: Response): Promise<void> => {
     await completeAuthorization(decoded.teacherId, code, decoded.codeVerifier)
     redirectToProfile(res, { zoom: "connected" })
   } catch (err) {
-    console.warn("[zoom callback] xato:", err instanceof Error ? err.message : err)
+    // Zoom javobining tanasini ham yozamiz — qaysi qadam (token / users/me)
+    // va qanday sabab bilan (masalan, scope yetishmasligi) yiqilgani ko'rinsin.
+    const ax = err as { config?: { url?: string }; response?: { status?: number; data?: unknown } }
+    console.warn(
+      "[zoom callback] xato:",
+      ax?.config?.url ?? "",
+      ax?.response?.status ?? "",
+      ax?.response?.data !== undefined ? JSON.stringify(ax.response.data) : err instanceof Error ? err.message : err
+    )
     redirectToProfile(res, { zoom: "error", message: "Zoom account ulanmadi. Qaytadan urinib ko'ring." })
   }
 })
