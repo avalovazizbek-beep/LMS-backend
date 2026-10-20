@@ -55,11 +55,19 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+// Navbatdagi bo'sh "slot" UXLASHDAN OLDIN band qilinadi — sinxronizatsiya
+// sikli bilan login paytidagi bitta-talaba tekshiruvi (refreshStudentFromHemis)
+// bir vaqtda chaqirilsa ham ikkalasi bitta vaqtga tushib qolmaydi.
+// maxWaitMs: slot shundan uzoqda bo'lsa band qilinmaydi, false qaytadi
+// (login so'rovini sinxronizatsiya navbati ortida uzoq kutdirmaslik uchun).
 let lastRequestAt = 0
-async function throttle() {
-  const wait = lastRequestAt + REQUEST_INTERVAL_MS - Date.now()
+async function throttle(maxWaitMs = Infinity): Promise<boolean> {
+  const slot = Math.max(Date.now(), lastRequestAt + REQUEST_INTERVAL_MS)
+  if (slot - Date.now() > maxWaitMs) return false
+  lastRequestAt = slot
+  const wait = slot - Date.now()
   if (wait > 0) await sleep(wait)
-  lastRequestAt = Date.now()
+  return true
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -168,6 +176,34 @@ async function fetchAllPages(path: string, baseParams: Record<string, string> = 
 }
 
 /* ── Talabalar ─────────────────────────────────────────────────────── */
+function studentRowFromHemis(raw: unknown): StudentDirectoryRow {
+  const r = asRecord(raw)
+  const group = asRecord(r.group)
+  const faculty = asRecord(r.faculty)
+  // Talabaning o'zida to'g'ridan-to'g'ri bor — guruh/curriculum orqali
+  // aylanib o'tish shart emas (production'da tekshirildi). `faculty`dan
+  // farqli o'laroq bu maydonlar bo'sh kelmaydi.
+  const educationForm = asRecord(r.educationForm)
+  const educationType = asRecord(r.educationType)
+  const level = asRecord(r.level)
+  return {
+    hemis_id: numberValue(r.id) ?? 0,
+    full_name: textValue(r.full_name) || "Talaba",
+    student_id_number: textValue(r.student_id_number) ?? null,
+    login: textValue(r.login) ?? null,
+    group_id: numberValue(group.id),
+    group_name: textValue(group.name) ?? null,
+    department: textValue(faculty.name) ?? null,
+    education_form_code: textValue(educationForm.code) ?? null,
+    education_form_name: textValue(educationForm.name) ?? null,
+    education_type_code: textValue(educationType.code) ?? null,
+    education_type_name: textValue(educationType.name) ?? null,
+    level_code: textValue(level.code) ?? null,
+    level_name: textValue(level.name) ?? null,
+    profile: raw,
+  }
+}
+
 export async function syncStudentDirectory(): Promise<number> {
   // _student_status berilmasa HEMIS o'zi default 11 (faol talaba) qo'yadi —
   // aynan shu bizga kerak, chiqarib yuborilgan/bitirgan talabalar LMS
@@ -176,38 +212,43 @@ export async function syncStudentDirectory(): Promise<number> {
   // tarixiy ma'lumotlar hemis_id orqali bog'langanicha qoladi).
   const runStartedAt = new Date()
   const items = await fetchAllPages("/v1/data/student-list")
-  const rows: StudentDirectoryRow[] = items.map((raw) => {
-    const r = asRecord(raw)
-    const group = asRecord(r.group)
-    const faculty = asRecord(r.faculty)
-    // Talabaning o'zida to'g'ridan-to'g'ri bor — guruh/curriculum orqali
-    // aylanib o'tish shart emas (production'da tekshirildi). `faculty`dan
-    // farqli o'laroq bu maydonlar bo'sh kelmaydi.
-    const educationForm = asRecord(r.educationForm)
-    const educationType = asRecord(r.educationType)
-    const level = asRecord(r.level)
-    return {
-      hemis_id: numberValue(r.id) ?? 0,
-      full_name: textValue(r.full_name) || "Talaba",
-      student_id_number: textValue(r.student_id_number) ?? null,
-      login: textValue(r.login) ?? null,
-      group_id: numberValue(group.id),
-      group_name: textValue(group.name) ?? null,
-      department: textValue(faculty.name) ?? null,
-      education_form_code: textValue(educationForm.code) ?? null,
-      education_form_name: textValue(educationForm.name) ?? null,
-      education_type_code: textValue(educationType.code) ?? null,
-      education_type_name: textValue(educationType.name) ?? null,
-      level_code: textValue(level.code) ?? null,
-      level_name: textValue(level.name) ?? null,
-      profile: raw,
-    }
-  }).filter((r) => r.hemis_id > 0)
+  const rows: StudentDirectoryRow[] = items.map(studentRowFromHemis).filter((r) => r.hemis_id > 0)
 
   await upsertStudentDirectory(rows)
   const deactivated = await deactivateStaleStudents(runStartedAt)
   if (deactivated > 0) console.log(`[hemisSync] ${deactivated} talaba endi HEMIS faol ro'yxatida yo'q — inactive qilindi`)
   return rows.length
+}
+
+// Login so'rovi sinxronizatsiya navbati ortida shundan uzoq kutmaydi
+const LIVE_LOOKUP_MAX_WAIT_MS = 15_000
+
+/** Bitta talabani HEMIS'dan (admin token, /v1/data/student-list?search=)
+ *  jonli o'qib, katalogdagi qatorini darhol yangilaydi. To'liq
+ *  sinxronizatsiya HEMIS_SYNC_INTERVAL_MS'da (6 soat) bir yuradi — shu
+ *  oraliqda HEMIS'da ta'lim shakli o'zgargan talaba (masalan 2026-10-20:
+ *  43 ta Kunduzgi/Sirtqi/Kechki → Masofaviy ko'chirilgan, hemis_id va
+ *  student_id_number o'zgarmagan, faqat yangi meta_id) katalogda eski
+ *  shakli bilan qolib, login'da rad etilardi. Faol ro'yxatda topilmasa
+ *  null qaytaradi; navbat band yoki HEMIS xato bersa — xato otadi. */
+export async function refreshStudentFromHemis(studentIdNumber: string): Promise<StudentDirectoryRow | null> {
+  if (!HEMIS_TOKEN) return null
+  if (!(await throttle(LIVE_LOOKUP_MAX_WAIT_MS))) throw new Error("HEMIS so'rovlar navbati band")
+
+  const url = new URL(`${HEMIS_BASE}/v1/data/student-list`)
+  url.searchParams.set("search", studentIdNumber)
+  url.searchParams.set("limit", "50")
+  const { data } = await axios.get(url.toString(), {
+    headers: { Authorization: `Bearer ${HEMIS_TOKEN}`, Accept: "application/json" },
+    timeout: HEMIS_TIMEOUT_MS,
+  })
+  // search qisman moslikni ham qaytarishi mumkin — faqat aynan shu raqam
+  const raw = normalizeItems(unwrapData(data)).find((it) => textValue(asRecord(it).student_id_number) === studentIdNumber)
+  if (!raw) return null
+
+  const row = studentRowFromHemis(raw)
+  if (row.hemis_id > 0) await upsertStudentDirectory([row])
+  return row
 }
 
 /* ── Xodimlar ──────────────────────────────────────────────────────── */

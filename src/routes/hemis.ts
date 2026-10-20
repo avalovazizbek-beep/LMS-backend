@@ -12,6 +12,7 @@ import { localResourcesAsHemisResources } from "../services/localResourceStore"
 import { withHemisCache, upsertHemisUser, pool, clearUserCache, getHemisUser, getHemisUserByLogin, clearHemisPassword } from "../services/db"
 import { encryptSecret, decryptSecret } from "../services/credentialCrypto"
 import { recordPlatformSession } from "../services/attendanceStore"
+import { refreshStudentFromHemis } from "../services/hemisSync"
 import {
   isDemoUser, mockStudentMe, mockEmployeeMe, mockSchedule, mockAttendance,
   mockGrades, mockPerformance, mockDocuments, mockCertificates, mockContractList,
@@ -1458,13 +1459,40 @@ async function hemisOAuthUser(oauthBase: string, accessToken: string, role: OAut
 // matnsiz, o'ziga xos aniq va chiroyli xabar ko'rsatadi.
 class NotMasofaviyError extends Error {}
 
+// HEMIS'da jonli tekshirilib masofaviy emasligi tasdiqlangan talabalar —
+// rad etilgan kunduzgi talaba qayta-qayta urinsa HEMIS'ga har safar
+// so'rov ketmasligi uchun shu muddat davomida qayta tekshirilmaydi.
+const LIVE_NOT_MASOFAVIY_TTL_MS = 5 * 60 * 1000
+const liveNotMasofaviyUntil = new Map<string, number>()
+
 async function isMasofaviyStudent(studentIdNumber?: string): Promise<boolean> {
   if (!studentIdNumber) return false
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
     "SELECT education_form_code FROM hemis_students_directory WHERE student_id_number = ? AND is_active = 1 LIMIT 1",
     [studentIdNumber]
   )
-  return rows[0]?.education_form_code === "16"
+  if (rows[0]?.education_form_code === "16") return true
+
+  // Katalog 6 soatda bir yangilanadi — HEMIS'da endigina Masofaviyga
+  // ko'chirilgan (yoki yangi qabul qilingan) talaba shu yerda hali eski
+  // shakli bilan / umuman yo'q bo'lishi mumkin. Rad etishdan oldin
+  // HEMIS'ning o'zidan so'raymiz (refreshStudentFromHemis katalogni ham
+  // yangilaydi — admin ro'yxatlari ham darhol to'g'ri ko'rsatadi).
+  const until = liveNotMasofaviyUntil.get(studentIdNumber)
+  if (until && until > Date.now()) return false
+  try {
+    const fresh = await refreshStudentFromHemis(studentIdNumber)
+    if (fresh?.education_form_code === "16") {
+      liveNotMasofaviyUntil.delete(studentIdNumber)
+      console.log(`[HEMIS student oauth] ${studentIdNumber}: katalogda masofaviy emas edi, HEMIS'da Masofaviy — katalog yangilandi`)
+      return true
+    }
+  } catch (err) {
+    console.warn("[HEMIS student oauth] ta'lim shaklini HEMIS'dan tekshirib bo'lmadi:", extractMessage(err))
+    return false
+  }
+  liveNotMasofaviyUntil.set(studentIdNumber, Date.now() + LIVE_NOT_MASOFAVIY_TTL_MS)
+  return false
 }
 
 async function createOAuthSession(requestedRole: OAuthRole, code: string, redirectUri: string, expectedLogin?: string) {
