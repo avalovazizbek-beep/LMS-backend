@@ -3,7 +3,7 @@ import path from "path"
 import { randomUUID, randomBytes } from "crypto"
 import type mysql from "mysql2/promise"
 import { pool, toMysqlDate, fromMysqlDate } from "./db"
-import { stableNumericId } from "./meetingStore"
+import { deleteMeetingsForContent, stableNumericId } from "./meetingStore"
 import { normalizeTrainingType } from "./trainingType"
 
 export type ContentType =
@@ -834,6 +834,8 @@ export async function deleteTeacherContent(id: number): Promise<boolean> {
   // Topshiriqlar, savollar, progress va h.k. FK CASCADE bilan o'chadi; test
   // sessiyalari jadvalida FK yo'q — bazada hech narsa qolib ketmasin.
   await pool.query("DELETE FROM lms_exam_sessions WHERE content_id = ?", [id])
+  // Sanali uchrashuv havolasi — Meeting bo'limi va dars jadvalidagi darsi ham o'chadi
+  if (content.kind === "uchrashuv") await deleteMeetingsForContent(id)
   removeStoredFile(content.file?.relativePath)
   content.files.forEach((file) => removeStoredFile(file.relativePath))
   return true

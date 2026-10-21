@@ -40,6 +40,10 @@ export interface MeetingRecord {
   groupIds: number[]
   groupNames: string[]
   settings: MeetingSettings
+  /** Dars tashqi havola (Zoom/Meet) orqali o'tadi — talabalar shu havoladan kiradi */
+  externalUrl: string | null
+  /** Havolani yaratgan mavzu qatori (lms_teacher_content.id) */
+  contentId: number | null
 }
 
 export interface MeetingResponse extends MeetingRecord {
@@ -93,6 +97,8 @@ export interface CreateMeetingInput {
   endTime: string
   groupIds: Array<number | string>
   settings?: Partial<MeetingSettings>
+  externalUrl?: string | null
+  contentId?: number | null
 }
 
 const JWT_SECRET = process.env.MEETING_JWT_SECRET || process.env.JWT_SECRET || "secret"
@@ -230,6 +236,8 @@ function buildMeeting(row: mysql.RowDataPacket, gids: number[], gnames: string[]
     groupIds:        gids,
     groupNames:      gnames,
     settings:        normalizeSettings(row.settings_json),
+    externalUrl:     row.external_url ? String(row.external_url) : null,
+    contentId:       row.content_id == null ? null : Number(row.content_id),
   }
 }
 
@@ -419,8 +427,8 @@ export async function createMeeting(input: CreateMeetingInput, user: MeetingUser
   const groupIds = input.groupIds.map(parseNumber).filter((n): n is number => n !== null)
   const settings = { ...defaultSettings, ...(input.settings ?? {}) }
   const [result] = await pool.query<mysql.ResultSetHeader>(
-    `INSERT INTO lms_meetings (title, description, subject_name, created_by_user_id, start_time, end_time, status, settings_json)
-     VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?)`,
+    `INSERT INTO lms_meetings (title, description, subject_name, created_by_user_id, start_time, end_time, status, settings_json, external_url, content_id)
+     VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?)`,
     [
       input.title.trim(),
       input.description?.trim() || null,
@@ -429,6 +437,8 @@ export async function createMeeting(input: CreateMeetingInput, user: MeetingUser
       toMysqlDate(new Date(input.startTime)),
       toMysqlDate(new Date(input.endTime)),
       JSON.stringify(settings),
+      input.externalUrl?.trim() || null,
+      input.contentId ?? null,
     ]
   )
   for (const gid of groupIds) {
@@ -686,6 +696,12 @@ export async function getAttendance(meetingId: number): Promise<AttendanceSummar
 
 export async function deleteMeeting(id: number): Promise<void> {
   await pool.query("DELETE FROM lms_meetings WHERE id = ?", [id])
+}
+
+/** Mavzudagi havola qatori o'chirilganda unga bog'langan dars ham o'chadi
+    (talabaning Meeting bo'limi va dars jadvalida qolib ketmasin) */
+export async function deleteMeetingsForContent(contentId: number): Promise<void> {
+  await pool.query("DELETE FROM lms_meetings WHERE content_id = ?", [contentId])
 }
 
 export async function markAttendanceSynced(): Promise<number> {

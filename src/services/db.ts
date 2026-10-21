@@ -332,6 +332,12 @@ export async function initDatabase() {
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD INDEX idx_teacher_content_topic_key (topic_key)`)
   // Admin "O'qituvchi hisoboti": meetinglar o'qituvchi bo'yicha sanaladi
   await execIgnoreDuplicate(`ALTER TABLE lms_meetings ADD INDEX idx_meetings_creator (created_by_user_id)`)
+  // Tashqi havola (Zoom/Meet) orqali o'tiladigan dars — mavzudagi "Havola qo'shish"
+  // sana bilan yaratadi: talabaning Meeting bo'limi va dars jadvalida shu havola
+  // chiqadi. content_id — uni yaratgan mavzu qatori (havola o'chsa meeting ham o'chadi).
+  await execIgnoreDuplicate(`ALTER TABLE lms_meetings ADD COLUMN external_url VARCHAR(1000) NULL`)
+  await execIgnoreDuplicate(`ALTER TABLE lms_meetings ADD COLUMN content_id INT NULL`)
+  await execIgnoreDuplicate(`ALTER TABLE lms_meetings ADD INDEX idx_meetings_content (content_id)`)
   // Mavzuni "qayta ochish" — deadline'dan keyin ham shu mavzudagi test/topshiriqni
   // qayta topshirishga ruxsat berish (o'qituvchi: faqat deadline'gacha, admin: istalgan vaqt)
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN is_reopened TINYINT(1) NOT NULL DEFAULT 0 AFTER is_active`)

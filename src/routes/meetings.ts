@@ -35,7 +35,7 @@ import {
   toMeetingResponse,
   type CreateMeetingInput,
 } from "../services/meetingStore"
-import { teacherUserId } from "../services/teachingStore"
+import { getTeacherContent, teacherUserId } from "../services/teachingStore"
 import { notifyMeetingCreated } from "../services/notificationScheduler"
 import { createAndSaveZoomMeeting, getMeetingZoomRow, getMeetingZoomRows, toPublicZoomInfo } from "../services/zoomService"
 import { createAndSaveGoogleMeetMeeting, getMeetingGoogleMeetRow, getMeetingGoogleMeetRows, toPublicGoogleMeetInfo } from "../services/googleMeetService"
@@ -174,6 +174,29 @@ async function groupedMeetings(req: AuthRequest) {
   }
 }
 
+/* Tashqi havola (mavzudagi "Havola qo'shish" sana bilan) — faqat http(s);
+   contentId o'qituvchining o'z havola qatori bo'lishi shart (havola o'chsa
+   shu dars ham o'chadi). Xato bo'lsa — xabar matni qaytadi. */
+async function externalLinkFields(req: AuthRequest): Promise<{ externalUrl: string | null; contentId: number | null } | string> {
+  const raw = textValue(req.body?.externalUrl)
+  if (!raw) return { externalUrl: null, contentId: null }
+  if (raw.length > 1000) return "Havola juda uzun"
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    return "Havola noto'g'ri"
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return "Havola http:// yoki https:// bilan boshlanishi kerak"
+  const contentId = Number(req.body?.contentId)
+  if (!Number.isInteger(contentId) || contentId <= 0) return { externalUrl: raw, contentId: null }
+  const content = await getTeacherContent(contentId)
+  if (!content || content.teacherUserId !== teacherUserId(req.user) || content.kind !== "uchrashuv") {
+    return "Havola qatori topilmadi"
+  }
+  return { externalUrl: raw, contentId }
+}
+
 function validateCreateBody(body: Partial<CreateMeetingInput>) {
   if (!body.title?.trim()) return "title majburiy"
   if (!body.startTime) return "startTime majburiy"
@@ -214,9 +237,15 @@ router.post("/", async (req: AuthRequest, res: Response): Promise<void> => {
     return
   }
 
+  const link = await externalLinkFields(req)
+  if (typeof link === "string") {
+    res.status(400).json({ success: false, message: link })
+    return
+  }
+
   const wantsZoom = req.body?.createZoomMeeting === true
   const meeting = await createMeeting(
-    { ...req.body, subjectName: textValue(req.body.subjectName) || null },
+    { ...req.body, subjectName: textValue(req.body.subjectName) || null, ...link },
     user
   )
   // Guruh talabalariga "yangi dars rejalashtirildi" (javobni kutdirmaydi)
