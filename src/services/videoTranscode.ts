@@ -146,18 +146,19 @@ function moovBeforeMdat(file: string): boolean {
   }
 }
 
-/** Tez barmoq izi: hajm + boshidagi va oxiridagi 1 MB — bir xil nusxalarni tanish uchun */
+/** Tez barmoq izi: hajm + boshidagi va oxiridagi 1 MB — bir xil nusxalarni tanish uchun.
+    SHA-256, ustun CHAR(40) bo'lgani uchun birinchi 40 hex belgisi saqlanadi. */
 function fingerprint(file: string): string {
   const fd = fs.openSync(file, "r")
   try {
     const size = fs.fstatSync(fd).size
-    const hash = crypto.createHash("sha1").update(String(size))
+    const hash = crypto.createHash("sha256").update(String(size))
     const chunk = Buffer.alloc(Math.min(1_048_576, size))
     fs.readSync(fd, chunk, 0, chunk.length, 0)
     hash.update(chunk)
     fs.readSync(fd, chunk, 0, chunk.length, Math.max(0, size - chunk.length))
     hash.update(chunk)
-    return hash.digest("hex")
+    return hash.digest("hex").slice(0, 40)
   } finally {
     fs.closeSync(fd)
   }
