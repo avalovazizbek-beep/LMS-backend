@@ -59,7 +59,10 @@ router.get("/me", async (req: AuthRequest, res: Response): Promise<void> => {
   } catch (err) {
     console.warn("[photos/me]", err instanceof Error ? err.message : err)
   }
-  res.set("Cache-Control", "private, max-age=600")
+  // Manzil hamma uchun bir xil (/api/photos/me) — brauzer keshi tokenni
+  // hisobga olmaydi: boshqa akkauntga kirilganda oldingi odamning surati
+  // chiqib turardi. Frontend sessiya ichida o'zi keshlaydi (lib/photos).
+  res.set("Cache-Control", "private, no-store")
   res.json({ success: true, url })
 })
 
@@ -82,7 +85,9 @@ router.get("/", async (req: AuthRequest, res: Response): Promise<void> => {
       employees.length ? employeePhotos(employees) : Promise.resolve<PhotoMap>(new Map()),
       logins.length ? loginPhotos(logins) : Promise.resolve<PhotoMap>(new Map()),
     ])
+    // Javob kimligiga bog'liq (talaba faqat o'zinikini oladi) — kesh token bo'yicha ajratilsin
     res.set("Cache-Control", "private, max-age=600")
+    res.vary("Authorization")
     res.json({ success: true, students: toObject(s), employees: toObject(e), logins: toObject(l) })
   } catch (err) {
     console.warn("[photos]", err instanceof Error ? err.message : err)

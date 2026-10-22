@@ -697,6 +697,9 @@ export async function initDatabase() {
       INDEX idx_pses_group_date (group_id, login_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `)
+  // "Kirish tarixi" sahifasi uchun — qayerdan va qaysi qurilmadan kirilgan
+  await ensureColumn("lms_platform_sessions", "ip_address", "VARCHAR(64) NULL")
+  await ensureColumn("lms_platform_sessions", "user_agent", "VARCHAR(300) NULL")
 
   await execSafe(`
     CREATE TABLE IF NOT EXISTS lms_hemis_task_submissions (

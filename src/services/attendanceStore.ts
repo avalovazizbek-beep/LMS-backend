@@ -486,18 +486,38 @@ export async function getAttendanceSummary(
 
 /* ── Platform sessiyalari ───────────────────────────────────────────── */
 
+export interface LoginMeta {
+  ip?: string | null
+  userAgent?: string | null
+}
+
 export async function recordPlatformSession(
   userId: number,
   fullName: string,
   groupId: number | null,
-  role: string
+  role: string,
+  meta?: LoginMeta
 ): Promise<number> {
   const [result] = await pool.query<mysql.ResultSetHeader>(
-    `INSERT INTO lms_platform_sessions (user_id, full_name, group_id, role)
-     VALUES (?, ?, ?, ?)`,
-    [userId, fullName, groupId, role]
+    `INSERT INTO lms_platform_sessions (user_id, full_name, group_id, role, ip_address, user_agent)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [userId, fullName, groupId, role, meta?.ip?.slice(0, 64) || null, meta?.userAgent?.slice(0, 300) || null]
   )
   return result.insertId
+}
+
+/** Foydalanuvchining o'z kirishlari ("Kirish tarixi" sahifasi), yangisi birinchi */
+export async function listUserSessions(userId: number, role: string, limit = 50) {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT login_at, ip_address, user_agent FROM lms_platform_sessions
+     WHERE user_id = ? AND role = ? ORDER BY login_at DESC LIMIT ?`,
+    [userId, role, limit]
+  )
+  return rows.map(r => ({
+    loginAt: new Date(r.login_at).toISOString(),
+    ip: r.ip_address ? String(r.ip_address) : null,
+    userAgent: r.user_agent ? String(r.user_agent) : null,
+  }))
 }
 
 export async function updateLastSeen(sessionId: number): Promise<void> {

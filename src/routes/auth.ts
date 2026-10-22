@@ -2,8 +2,29 @@ import { Router, Request, Response } from "express"
 import bcrypt from "bcryptjs"
 import jwt from "jsonwebtoken"
 import { users } from "../db/data"
+import { authMiddleware, AuthRequest } from "../middleware/auth"
+import { listUserSessions } from "../services/attendanceStore"
+import { studentUserId, teacherUserId } from "../services/teachingStore"
 
 const router = Router()
+
+/* GET /api/auth/login-history — joriy foydalanuvchining so'nggi 50 ta kirishi
+   ("Kirish tarixi" sahifasi). Talaba va xodim ID'lari bir-biriga to'g'ri
+   kelishi mumkin — shuning uchun rol bo'yicha ham ajratiladi. */
+router.get("/login-history", authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
+  const user = req.user
+  if (!user) { res.status(401).json({ success: false }); return }
+  const isStudent = user.role === "student"
+  const id = isStudent ? studentUserId(user) : teacherUserId(user)
+  try {
+    const data = await listUserSessions(id, isStudent ? "student" : "employee")
+    res.set("Cache-Control", "private, no-store")
+    res.json({ success: true, data })
+  } catch (err) {
+    console.warn("[login-history]", err instanceof Error ? err.message : err)
+    res.status(500).json({ success: false, message: "Kirish tarixini olishda xatolik" })
+  }
+})
 
 // POST /api/auth/login
 router.post("/login", (req: Request, res: Response): void => {

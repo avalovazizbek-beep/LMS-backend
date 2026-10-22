@@ -1,4 +1,4 @@
-import { Router, Response } from "express"
+import { Router, Response, type Request as ExpressRequest } from "express"
 import type mysql from "mysql2/promise"
 import axios, { AxiosError } from "axios"
 import jwt from "jsonwebtoken"
@@ -11,7 +11,7 @@ import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { localResourcesAsHemisResources } from "../services/localResourceStore"
 import { withHemisCache, upsertHemisUser, pool, clearUserCache, getHemisUser, getHemisUserByLogin, clearHemisPassword } from "../services/db"
 import { encryptSecret, decryptSecret } from "../services/credentialCrypto"
-import { recordPlatformSession } from "../services/attendanceStore"
+import { recordPlatformSession, type LoginMeta } from "../services/attendanceStore"
 import { refreshStudentFromHemis } from "../services/hemisSync"
 import {
   isDemoUser, mockStudentMe, mockEmployeeMe, mockSchedule, mockAttendance,
@@ -444,7 +444,28 @@ export async function fetchTeacherGroupsFromSchedule(
  * so'rov bilan olib, o'z bazamizga yozadi (login paytida + qo'lda "yangilash").
  * Bu yerdan boshqa hech qanday HEMIS resursi (fan resurslari va h.k.) tortib olinmaydi.
  */
-export async function syncTeacherFromHemis(token: string) {
+/** Kirish qayerdan va qaysi qurilmadan bo'lgani ("Kirish tarixi" uchun) */
+function loginMeta(req: ExpressRequest): LoginMeta {
+  const fwd = req.headers["x-forwarded-for"]
+  const ip = (typeof fwd === "string" && fwd.split(",")[0].trim()) || req.ip || null
+  const ua = req.headers["user-agent"]
+  return { ip, userAgent: typeof ua === "string" ? ua : null }
+}
+
+/** Talabaning kirishini lms_platform_sessions'ga yozadi (xodimniki —
+    syncTeacherFromHemis ichida). Yozilmasa ham kirish to'xtamaydi. */
+function recordStudentLogin(token: string, meta: LoginMeta, fallbackName = "") {
+  try {
+    const decoded = jwt.decode(token)
+    if (!decoded || typeof decoded !== "object" || decoded.role !== "student") return
+    const uid = Number(decoded.userId ?? decoded.id ?? 0)
+    const gid = decoded.groupId ? Number(decoded.groupId) : null
+    if (uid) void recordPlatformSession(uid, String(decoded.fullName ?? fallbackName), gid, "student", meta)
+      .catch((err) => console.warn("[session] talaba kirishi yozilmadi:", extractMessage(err)))
+  } catch { /* sessiya yozishda xato — login ishlayversin */ }
+}
+
+export async function syncTeacherFromHemis(token: string, meta?: LoginMeta) {
   try {
     const decoded = jwt.decode(token)
     if (!decoded || typeof decoded !== "object") return
@@ -489,7 +510,7 @@ export async function syncTeacherFromHemis(token: string) {
     const fullName = textValue(user.fullName, (user as unknown as Record<string, unknown>).name as string)
     if (fullName && userId > 0) {
       try {
-        await recordPlatformSession(userId, fullName, null, "employee")
+        await recordPlatformSession(userId, fullName, null, "employee", meta)
         await pool.query(
           `UPDATE lms_platform_sessions SET full_name = ?
            WHERE user_id = ? AND role = 'employee' AND (full_name IS NULL OR full_name = '' OR full_name NOT LIKE '% %')`,
@@ -3258,12 +3279,7 @@ router.post("/login", async (req, res: Response) => {
       ? { success: true as const, token: local.token, role: "student" as const, source: "cache" }
       : await createStudentPasswordSession(String(login).trim(), String(password))
     if (!local) void saveUserToDb(result.token, "student", String(password))
-    try {
-      const decoded = JSON.parse(Buffer.from(result.token.split(".")[1], "base64").toString())
-      const uid = Number(decoded.userId ?? decoded.id ?? 0)
-      const gid = decoded.groupId ? Number(decoded.groupId) : null
-      if (uid) void recordPlatformSession(uid, String(decoded.fullName ?? login), gid, "student")
-    } catch { /* session yozishda xato — login ishlayversin */ }
+    recordStudentLogin(result.token, loginMeta(req), String(login))
     res.json(result)
   } catch (err) {
     const e = err as AxiosError<{ message?: string }>
@@ -3557,7 +3573,8 @@ router.post("/oauth/exchange/:role", async (req, res: Response) => {
   try {
     const result = await createOAuthSession(effectiveRole, code, redirectUri, statePayload.expectedLogin)
     void saveUserToDb(result.token, result.role)
-    void syncTeacherFromHemis(result.token)
+    recordStudentLogin(result.token, loginMeta(req))
+    void syncTeacherFromHemis(result.token, loginMeta(req))
     callbackUrl.searchParams.set("token", result.token)
     callbackUrl.searchParams.set("role", result.role)
     res.json({ redirect: callbackUrl.toString() })
@@ -3597,7 +3614,8 @@ router.post("/oauth/callback", async (req, res: Response) => {
   try {
     const result = await createOAuthSession(effectiveRole, code, redirectUri, statePayload.expectedLogin)
     void saveUserToDb(result.token, result.role)
-    void syncTeacherFromHemis(result.token)
+    recordStudentLogin(result.token, loginMeta(req))
+    void syncTeacherFromHemis(result.token, loginMeta(req))
     res.json({ success: true, ...result })
   } catch (err) {
     console.error("[HEMIS oauth]", extractMessage(err), (err as AxiosError)?.response?.data)
