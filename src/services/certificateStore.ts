@@ -3,6 +3,7 @@ import path from "path"
 import type mysql from "mysql2/promise"
 import { pool, fromMysqlDate } from "./db"
 import { notifySafe } from "./notificationStore"
+import { resolveInside, existingFileInside } from "./safePath"
 
 /* ── O'qituvchi tashakkurnomasi ─────────────────────────────────────────
    "Fan resurslari"da yetarli mavzuni to'liq to'ldirgan o'qituvchiga bir marta
@@ -69,11 +70,12 @@ export async function getCertificateConfig(): Promise<CertificateConfig> {
   const raw = await readSettings()
   const goal = Number(raw.certificate_topic_goal)
   const parts = parseParts(raw.certificate_parts)
+  const templateFile = raw.certificate_template ? templatePath(raw.certificate_template) : null
   return {
     auto: raw.certificate_auto !== "0",
     goal: Number.isInteger(goal) && goal >= 1 ? goal : DEFAULT_GOAL,
     parts: parts.length ? parts : TOPIC_PARTS,
-    hasCustomTemplate: Boolean(raw.certificate_template) && fs.existsSync(templatePath(raw.certificate_template)),
+    hasCustomTemplate: Boolean(templateFile && fs.existsSync(templateFile)),
   }
 }
 
@@ -426,9 +428,12 @@ export async function revokeCertificate(teacherUserId: number): Promise<boolean>
 const STORAGE_ROOT = path.resolve(process.env.LOCAL_RESOURCE_STORAGE || path.join(process.cwd(), "storage"))
 const TEMPLATE_DIR = path.join(STORAGE_ROOT, "certificates")
 
-// Fayl nomi faqat server yaratgan qiymat (lms_settings) — basename yo'ldan chiqib ketishni to'sadi
-function templatePath(name: string) {
-  return path.join(TEMPLATE_DIR, path.basename(name))
+// Nom faqat server o'zi yaratgan ko'rinishda bo'ladi (saveCustomTemplate) va lms_settings'da
+// saqlanadi. Bazadagi qiymat boshqacha bo'lsa (buzilgan/qo'lda o'zgartirilgan) — fayl ochilmaydi.
+const TEMPLATE_NAME = /^template-\d{1,20}\.(png|jpg|webp)$/
+
+export function templatePath(name: string): string | null {
+  return TEMPLATE_NAME.test(name) ? resolveInside(TEMPLATE_DIR, name) : null
 }
 
 const TEMPLATE_TYPES: { ext: string; mime: string; magic: (b: Buffer) => boolean }[] = [
@@ -440,8 +445,8 @@ const TEMPLATE_TYPES: { ext: string; mime: string; magic: (b: Buffer) => boolean
 export async function getCustomTemplate(): Promise<{ filePath: string; mimeType: string } | null> {
   const name = (await readSettings()).certificate_template
   if (!name) return null
-  const filePath = templatePath(name)
-  if (!fs.existsSync(filePath)) return null // nosemgrep
+  const filePath = TEMPLATE_NAME.test(name) ? await existingFileInside(TEMPLATE_DIR, name) : null
+  if (!filePath) return null
   const type = TEMPLATE_TYPES.find((t) => t.ext === path.extname(filePath).toLowerCase())
   return { filePath, mimeType: type?.mime ?? "application/octet-stream" }
 }
@@ -456,7 +461,8 @@ async function setTemplateSetting(name: string | null) {
   } else {
     await pool.query("DELETE FROM lms_settings WHERE key_name = 'certificate_template'")
   }
-  if (previous && previous !== name) await fs.promises.rm(templatePath(previous), { force: true }) // nosemgrep
+  const previousPath = previous && previous !== name ? templatePath(previous) : null
+  if (previousPath) await fs.promises.rm(previousPath, { force: true })
 }
 
 /** Rasm turini mazmunidan (magic bytes) aniqlaydi — sarlavhaga ishonilmaydi */
@@ -465,7 +471,9 @@ export async function saveCustomTemplate(body: Buffer): Promise<boolean> {
   if (!type) return false
   await fs.promises.mkdir(TEMPLATE_DIR, { recursive: true })
   const name = `template-${Date.now()}${type.ext}`
-  await fs.promises.writeFile(templatePath(name), body) // nosemgrep
+  const filePath = templatePath(name)
+  if (!filePath) return false
+  await fs.promises.writeFile(filePath, body)
   await setTemplateSetting(name)
   return true
 }

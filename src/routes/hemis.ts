@@ -12,6 +12,7 @@ import { withHemisCache, upsertHemisUser, pool, clearUserCache, getHemisUser, ge
 import { encryptSecret, decryptSecret } from "../services/credentialCrypto"
 import { recordPlatformSession, type LoginMeta } from "../services/attendanceStore"
 import { refreshStudentFromHemis } from "../services/hemisSync"
+import { isSafeFileName, resolveInside, existingFileInside } from "../services/safePath"
 import {
   teacherUserId,
   studentUserId,
@@ -23,6 +24,7 @@ import {
   getTeacherGroupIds,
   submissionUploadsDir,
   sanitizeFilename,
+  safeMimeType,
   type SyncedGroup,
   type TeacherScheduleInput,
 } from "../services/teachingStore"
@@ -4532,22 +4534,32 @@ router.get("/exams", async (req: AuthRequest, res: Response) => {
   }
 })
 
+/** HEMIS topshiriqlari uchun yuklangan fayllar papkasi */
+function hemisSubmissionDir(): string {
+  return path.join(submissionUploadsDir(), "hemis")
+}
+
 /* ── POST /api/hemis/task-submit ─────────────────────────────────── */
 // Hozircha HEMIS ga yubormaydi — faylni o'z serverimizda saqlaymiz.
 // Keyin tayyor bo'lganda bu yerga HEMIS ga yuborish qo'shiladi.
 router.post("/task-submit", async (req: AuthRequest, res: Response) => {
-  const { task_id, comment, filename, file_type, file_data } = req.body
+  const { task_id, comment, filename, file_data } = req.body
   if (!task_id || !file_data || !filename) {
     res.status(400).json({ success: false, message: "task_id, filename va file_data kerak" })
     return
   }
   try {
     const buffer    = Buffer.from(String(file_data), "base64")
-    const mimeType  = String(file_type || "application/octet-stream")
+    // Turi mijoz yuborgan file_type'dan emas, kengaytmadan aniqlanadi (stored XSS bo'lmasin)
+    const mimeType  = safeMimeType(String(filename))
     const savedName = sanitizeFilename(String(filename))
-    const dir       = path.join(submissionUploadsDir(), "hemis")
+    const dir       = hemisSubmissionDir()
     fs.mkdirSync(dir, { recursive: true })
-    const absPath    = path.join(dir, savedName)
+    const absPath   = resolveInside(dir, savedName)
+    if (!absPath) {
+      res.status(400).json({ success: false, message: "Fayl nomi yaroqsiz" })
+      return
+    }
     fs.writeFileSync(absPath, buffer)
 
     const relativePath  = path.join("submissions", "hemis", savedName).replace(/\\/g, "/")
@@ -4658,12 +4670,14 @@ router.get("/task-submission-file/:filename", async (req: AuthRequest, res: Resp
     return
   }
   try {
-    const fname   = String(req.params.filename)
-    const absPath = path.join(submissionUploadsDir(), "hemis", fname)
-    if (!fs.existsSync(absPath)) {
-      res.status(404).json({ success: false, message: "Fayl topilmadi" })
+    // Nom faqat server yaratgan ko'rinishda bo'ladi (sanitizeFilename) — "/", "\",
+    // "..", %2F va h.k. bo'lsa diskka umuman murojaat qilinmaydi.
+    const fname = String(req.params.filename)
+    if (!isSafeFileName(fname)) {
+      res.status(400).json({ success: false, message: "Fayl nomi yaroqsiz" })
       return
     }
+    // Avval bazadagi yozuv va ruxsat, keyin disk — begona fayl bor-yo'qligi bilinmasin
     const [row] = await pool.query<mysql.RowDataPacket[]>(
       "SELECT original_name, mime_type, group_id FROM lms_hemis_task_submissions WHERE file_name = ? LIMIT 1",
       [fname]
@@ -4678,11 +4692,17 @@ router.get("/task-submission-file/:filename", async (req: AuthRequest, res: Resp
       res.status(403).json({ success: false, message: "Bu fayl sizga tegishli emas" })
       return
     }
-    const originalName = row[0]?.original_name ?? fname
-    const mimeType     = row[0]?.mime_type ?? "application/octet-stream"
-    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(String(originalName))}"`)
-    res.setHeader("Content-Type", String(mimeType))
-    res.sendFile(absPath)
+    const absPath = await existingFileInside(hemisSubmissionDir(), fname)
+    if (!absPath) {
+      res.status(404).json({ success: false, message: "Fayl topilmadi" })
+      return
+    }
+    const originalName = String(row[0]?.original_name ?? fname)
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(originalName)}"`)
+    res.setHeader("Content-Type", safeMimeType(originalName))
+    res.setHeader("X-Content-Type-Options", "nosniff")
+    // root bilan: express/send ham yo'l shu papkadan chiqmasligini yana tekshiradi
+    res.sendFile(path.basename(absPath), { root: path.dirname(absPath), dotfiles: "deny" })
   } catch (err) {
     res.status(500).json({ success: false, message: extractMessage(err) })
   }

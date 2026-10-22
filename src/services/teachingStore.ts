@@ -87,7 +87,8 @@ export function questionImagesDir() {
 
 export function sanitizeFilename(filename: string) {
   const parsed = path.parse(filename || "file")
-  const base = parsed.name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "file"
+  // Boshidagi "." va "-" olib tashlanadi — yashirin fayl yoki buyruq opsiyasiga o'xshash nom bo'lmasin
+  const base = parsed.name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^[-.]+|-+$/g, "") || "file"
   // Kengaytmada ham faqat harf/raqam qoladi (\, bo'shliq, qo'shtirnoq va h.k. kirmasin)
   const ext = (parsed.ext || "").toLowerCase().replace(/[^a-z0-9.]/g, "").slice(0, 16)
   return `${base.slice(0, 80)}-${Date.now()}-${randomBytes(4).toString("hex")}${ext}`

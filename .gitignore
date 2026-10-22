@@ -1,6 +1,24 @@
 node_modules/
 dist/
-.env
 storage/
 *.log
 *.log.*
+
+# Maxfiy sozlamalar va ularning nusxalari (.env.bak-*, .env.old va h.k.)
+# hech qachon Git'ga tushmasin. Namuna fayl (.env.example) bo'lsa — kuzatiladi.
+.env
+.env.*
+!.env.example
+*.bak
+*.bak-*
+*.bak.*
+*.backup
+*.orig
+*.old
+*.pem
+*.key
+*.p12
+*.pfx
+*.sql
+*.sql.gz
+*.dump

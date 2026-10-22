@@ -123,6 +123,7 @@ import { isAdminUser } from "./admin"
 import { logAudit } from "../services/auditLog"
 import { syncTopicToGroups } from "../services/topicSync"
 import { teacherCertificate, markCertificateSeen, certificateDisplayName, getCustomTemplate } from "../services/certificateStore"
+import { isSafeFileName, resolveInside, existingFileInside, escapeLike } from "../services/safePath"
 
 const router = Router()
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
@@ -297,6 +298,13 @@ function userFromRequest(req: AuthRequest): AuthUser | null {
 }
 
 /** Xom oqim sifatida (multipart emas) yuborilgan faylni `storage/private/teaching` ga yozadi. */
+/** O'qituvchi mavzu faylini ko'ra oladimi: o'zi yaratgan yoki shu guruhda dars beradi */
+async function employeeCanViewContent(user: AuthUser, content: TeacherContentRecord): Promise<boolean> {
+  const tId = teacherUserId(user)
+  if (content.teacherUserId === tId) return true
+  return (await getTeacherGroupIds(tId)).includes(content.groupId)
+}
+
 function receiveUploadedFile(req: AuthRequest, res: Response): Promise<ContentFile | null> {
   return new Promise((resolve) => {
     const originalName = textValue(req.query.filename || req.headers["x-file-name"]) || "fayl"
@@ -711,7 +719,9 @@ router.get("/content/:id/pptx-slides", async (req: AuthRequest, res: Response): 
   const content = id !== null ? await getTeacherContent(id) : null
   if (!content || !content.file) { res.json({ count: 0, slides: [] }); return }
 
-  if (user.role !== "employee") {
+  if (user.role === "employee") {
+    if (!(await employeeCanViewContent(user, content))) { res.status(403).json({ success: false }); return }
+  } else {
     const groupId = studentGroupId(user)
     if (groupId === null || groupId !== content.groupId || content.status === "locked") {
       res.status(403).json({ success: false }); return
@@ -739,7 +749,9 @@ router.get("/content/:id/pptx-rich-slides", async (req: AuthRequest, res: Respon
   const content = id !== null ? await getTeacherContent(id) : null
   if (!content || !content.file) { res.json({ count: 0, slides: [] }); return }
 
-  if (user.role !== "employee") {
+  if (user.role === "employee") {
+    if (!(await employeeCanViewContent(user, content))) { res.status(403).json({ success: false }); return }
+  } else {
     const groupId = studentGroupId(user)
     if (groupId === null || groupId !== content.groupId || content.status === "locked") {
       res.status(403).json({ success: false }); return
@@ -776,7 +788,9 @@ router.get("/content/:id/pptx-as-pdf", async (req: AuthRequest, res: Response): 
   const content = id !== null ? await getTeacherContent(id) : null
   if (!content || !content.file) { res.status(404).end(); return }
 
-  if (user.role !== "employee") {
+  if (user.role === "employee") {
+    if (!(await employeeCanViewContent(user, content))) { res.status(403).end(); return }
+  } else {
     const groupId = studentGroupId(user)
     if (!groupId || groupId !== content.groupId || content.status === "locked") {
       res.status(403).end(); return
@@ -2188,7 +2202,12 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
 
   const storedName = sanitizeFilename(originalName)
   const relativePath = `/submissions/${storedName}`
-  const absolutePath = path.join(submissionUploadsDir(), storedName)
+  const uploadPath = resolveInside(submissionUploadsDir(), storedName)
+  if (!uploadPath) {
+    res.status(400).json({ success: false, message: "Fayl nomi yaroqsiz" })
+    return
+  }
+  const absolutePath: string = uploadPath
   const stream = fs.createWriteStream(absolutePath)
   let written = 0
   let done = false
@@ -2443,6 +2462,28 @@ router.put("/submissions/:id/grade", async (req: AuthRequest, res: Response): Pr
 
 /* ── Savol rasmlari ─────────────────────────────────────────────────── */
 
+/* Faqat rasm: turi fayl boshidagi baytlardan (magic bytes) aniqlanadi —
+   kengaytma yoki Content-Type'ga ishonilmaydi (SVG/HTML yuklab bo'lmaydi). */
+const QUESTION_IMAGE_TYPES = new Map<string, { mime: string; magic: (b: Buffer) => boolean }>([
+  [".png", { mime: "image/png", magic: (b) => b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) }],
+  [".jpg", { mime: "image/jpeg", magic: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff }],
+  [".jpeg", { mime: "image/jpeg", magic: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff }],
+  [".gif", { mime: "image/gif", magic: (b) => /^GIF8[79]a$/.test(b.subarray(0, 6).toString("latin1")) }],
+  [".webp", { mime: "image/webp", magic: (b) => b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP" }],
+])
+
+/** Eski savol rasmlari private/teaching papkasida qolgan. U papkada yopiq
+    mavzu fayllari ham bor, shu sabab fayl faqat haqiqatan savolda ishlatilgan
+    bo'lsagina beriladi. */
+async function isLegacyQuestionImage(filename: string): Promise<boolean> {
+  const tail = `%/question-image/${escapeLike(filename)}`
+  const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
+    "SELECT 1 FROM lms_exam_questions WHERE image_url LIKE ? OR CAST(option_images AS CHAR) LIKE ? LIMIT 1",
+    [tail, `${tail}"%`]
+  )
+  return rows.length > 0
+}
+
 /* POST /question-image — o'qituvchi rasm yuklaydi, URL qaytariladi */
 router.post(
   "/question-image",
@@ -2452,8 +2493,8 @@ router.post(
   async (req: AuthRequest, res: Response): Promise<void> => {
     const originalName = textValue(req.query.filename || req.headers["x-file-name"]) || "image.jpg"
     const ext = path.extname(originalName).toLowerCase()
-    if (ext && !ALLOWED_EXTENSIONS.has(ext)) {
-      res.status(400).json({ success: false, message: "Bu turdagi fayl qabul qilinmaydi" })
+    if (ext && !QUESTION_IMAGE_TYPES.has(ext)) {
+      res.status(400).json({ success: false, message: "Faqat rasm yuklanadi (PNG, JPG, GIF, WEBP)" })
       return
     }
     const body = req.body
@@ -2461,9 +2502,18 @@ router.post(
       res.status(400).json({ success: false, message: "Fayl bo'sh yoki noto'g'ri format" })
       return
     }
-    const storedName = sanitizeFilename(originalName)
-    // Savol rasmlari public papkasiga saqlanadi — auth shart emas, <img> to'g'ridan-to'g'ri o'qiydi
-    const absolutePath = path.join(questionImagesDir(), storedName)
+    const detected = [...QUESTION_IMAGE_TYPES].find(([, t]) => t.magic(body))
+    if (!detected) {
+      res.status(400).json({ success: false, message: "Faqat rasm yuklanadi (PNG, JPG, GIF, WEBP)" })
+      return
+    }
+    // Nom to'liq serverda tuziladi, kengaytma — aniqlangan tur
+    const storedName = storedUploadName(originalName, [detected[0]], detected[0])
+    const absolutePath = resolveInside(questionImagesDir(), storedName)
+    if (!absolutePath) {
+      res.status(500).json({ success: false, message: "Fayl saqlanmadi" })
+      return
+    }
     try {
       await fs.promises.writeFile(absolutePath, body)
       res.json({ success: true, data: { url: `/api/teaching/question-image/${storedName}` } })
@@ -2473,29 +2523,26 @@ router.post(
   }
 )
 
-/* GET /question-image/:filename — rasm faylini xizmat qilish (auth talab qilinmaydi — <img> uchun) */
+/* GET /question-image/:filename — savol rasmi (JWT kerak: <img> ?token= bilan ochadi) */
 router.get("/question-image/:filename", async (req: AuthRequest, res: Response): Promise<void> => {
   const filename = req.params.filename
-  if (!filename || filename.includes("..") || filename.includes("/")) {
+  const type = QUESTION_IMAGE_TYPES.get(path.extname(String(filename || "")).toLowerCase())
+  if (!isSafeFileName(filename) || !type) {
     res.status(400).end()
     return
   }
-  // Yangi papka (question-images) da qidiradi, topilmasa eski papkadan (private/teaching) qaraydi
-  let absolutePath = path.join(questionImagesDir(), filename)
-  if (!fs.existsSync(absolutePath)) {
-    absolutePath = path.join(teachingUploadsDir(), filename)
+  // Yangi papka (question-images), topilmasa — eski papka, faqat savolda ishlatilgan rasm bo'lsa
+  let absolutePath = await existingFileInside(questionImagesDir(), filename)
+  if (!absolutePath && await isLegacyQuestionImage(filename)) {
+    absolutePath = await existingFileInside(teachingUploadsDir(), filename)
   }
-  if (!fs.existsSync(absolutePath)) {
+  if (!absolutePath) {
     res.status(404).end()
     return
   }
-  const mimeType = /\.(png)$/i.test(filename) ? "image/png"
-    : /\.(jpg|jpeg)$/i.test(filename) ? "image/jpeg"
-    : /\.(gif)$/i.test(filename) ? "image/gif"
-    : /\.(webp)$/i.test(filename) ? "image/webp"
-    : "image/jpeg"
-  res.setHeader("Content-Type", mimeType)
-  res.setHeader("Cache-Control", "public, max-age=86400")
+  res.setHeader("Content-Type", type.mime)
+  res.setHeader("X-Content-Type-Options", "nosniff")
+  res.setHeader("Cache-Control", "private, max-age=86400")
   fs.createReadStream(absolutePath).pipe(res)
 })
 

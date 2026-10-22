@@ -26,8 +26,41 @@ import { privateStorageRoot, storedFilePath } from "./teachingStore"
    fayllar (fingerprint) bir marta kodlanadi, qolganiga natija nusxalanadi.
    Serverda ffmpeg bo'lmasa xizmat o'chiq qoladi (log'da ogohlantirish). */
 
-const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg"
-const FFPROBE = process.env.FFPROBE_PATH || "ffprobe"
+/* ── Tashqi dastur faqat ffmpeg/ffprobe — buyruq hech qachon foydalanuvchidan
+   yoki bazadan kelmaydi. .env'da FFMPEG_PATH/FFPROBE_PATH berilsa, faqat
+   mutlaq yo'l va fayl nomi aynan shu dastur bo'lsa qabul qilinadi. ── */
+export type Tool = "ffmpeg" | "ffprobe"
+
+export function toolBinary(tool: Tool, configured: string | undefined): string {
+  const value = (configured || "").trim()
+  if (!value) return tool
+  const name = path.basename(value).toLowerCase().replace(/\.exe$/, "")
+  if (path.isAbsolute(value) && name === tool) return value
+  console.warn("%s %s_PATH yaroqsiz — standart \"%s\" ishlatiladi", "[video]", tool.toUpperCase(), tool)
+  return tool
+}
+
+const FFMPEG_BIN = toolBinary("ffmpeg", process.env.FFMPEG_PATH)
+const FFPROBE_BIN = toolBinary("ffprobe", process.env.FFPROBE_PATH)
+
+/* ── Kirish fayli faqat oddiy video konteyner sifatida o'qiladi ──
+   Yuklangan ".mp4" aslida HLS/concat ro'yxati bo'lsa, ffmpeg undagi boshqa
+   fayllarni (masalan /etc/passwd) yoki URL'larni o'qib, natijani videoga
+   yozib qo'yishi mumkin. Shuning uchun: faqat "file" protokoli, faqat shu
+   demuxerlar, yo'l oldiga "file:" (nom "-" yoki "http:" bilan boshlansa ham
+   opsiya/protokol deb o'qilmaydi). */
+export const ALLOWED_DEMUXERS = ["mov", "mp4", "m4a", "3gp", "3g2", "mj2", "matroska", "webm", "avi", "mpeg", "mpegts", "flv", "asf", "ogg"]
+const INPUT_GUARD = ["-protocol_whitelist", "file", "-format_whitelist", ALLOWED_DEMUXERS.join(",")]
+
+/** ffprobe qaytargan format_name (masalan "mov,mp4,m4a,3gp,3g2,mj2") ruxsat etilganmi */
+export function isAllowedContainer(formatName: string | undefined): boolean {
+  const parts = String(formatName || "").split(",").map(p => p.trim()).filter(Boolean)
+  return parts.length > 0 && parts.some(p => ALLOWED_DEMUXERS.includes(p))
+}
+
+export function fileArg(file: string): string {
+  return `file:${file}`
+}
 const MAX_LONG_SIDE = 1920
 const MAX_SHORT_SIDE = 1080
 const SCAN_INTERVAL_MS = Number(process.env.VIDEO_SCAN_INTERVAL_MS) || 2 * 60_000
@@ -40,11 +73,18 @@ type RunResult = { code: number | null; stdout: string; stderr: string }
 
 let niceOk = false
 
-function run(cmd: string, args: string[], timeoutMs: number, lowPriority = false): Promise<RunResult> {
+/** ffmpeg/ffprobe'ni shell'siz ishga tushiradi: argumentlar massiv bo'lib
+    to'g'ridan-to'g'ri dasturga boradi, ";", "|", "$(...)" kabi belgilar
+    buyruq sifatida talqin qilinmaydi. */
+export function runProcess(tool: Tool, args: readonly string[], timeoutMs: number, lowPriority = false): Promise<RunResult> {
+  if (tool !== "ffmpeg" && tool !== "ffprobe") return Promise.reject(new Error("ruxsat etilmagan dastur"))
+  const bin = tool === "ffprobe" ? FFPROBE_BIN : FFMPEG_BIN
+  const argv = args.map(String)
   return new Promise((resolve, reject) => {
     // Linux'da `nice` — meeting (mediasoup) va API'dan protsessor tortib olmasin
-    const useNice = lowPriority && niceOk
-    const child = spawn(useNice ? "nice" : cmd, useNice ? ["-n", "15", cmd, ...args] : args, { windowsHide: true })
+    const child = lowPriority && niceOk
+      ? spawn("nice", ["-n", "15", bin, ...argv], { windowsHide: true, shell: false })
+      : spawn(bin, argv, { windowsHide: true, shell: false })
     let stdout = ""
     let stderr = ""
     child.stdout.on("data", (d) => { if (stdout.length < 2_000_000) stdout += d })
@@ -67,11 +107,12 @@ interface Probe {
   format: { format_name?: string; duration?: string }
 }
 
-async function probe(file: string): Promise<Probe | null> {
+export async function probe(file: string): Promise<Probe | null> {
   try {
-    const r = await run(FFPROBE, ["-v", "error", "-print_format", "json", "-show_streams", "-show_format", file], 60_000)
+    const r = await runProcess("ffprobe", ["-v", "error", ...INPUT_GUARD, "-print_format", "json", "-show_streams", "-show_format", fileArg(file)], 60_000)
     if (r.code !== 0) return null
     const parsed = JSON.parse(r.stdout) as Probe
+    if (!isAllowedContainer(parsed.format?.format_name)) return null
     return { streams: parsed.streams ?? [], format: parsed.format ?? {} }
   } catch {
     return null
@@ -122,7 +163,7 @@ function fingerprint(file: string): string {
   }
 }
 
-type Plan = { action: "ok" | "remux" | "encode"; audioCopy: boolean; reason: string }
+export type Plan = { action: "ok" | "remux" | "encode"; audioCopy: boolean; reason: string }
 
 function plan(p: Probe, ext: string, faststart: boolean): Plan | null {
   const v = p.streams.find(s => s.codec_type === "video")
@@ -147,13 +188,13 @@ function plan(p: Probe, ext: string, faststart: boolean): Plan | null {
 // Bitta qo'shtirnoq — vergullar filtrlar ajratuvchisi deb o'qilmasin.
 const SCALE = "scale='trunc(iw*min(1,min(1920/max(iw,ih),1080/min(iw,ih)))/2)*2':'trunc(ih*min(1,min(1920/max(iw,ih),1080/min(iw,ih)))/2)*2'"
 
-function ffmpegArgs(input: string, output: string, p: Plan): string[] {
-  const head = ["-hide_banner", "-nostdin", "-y", "-i", input, "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn"]
+export function ffmpegArgs(input: string, output: string, p: Plan): string[] {
+  const head = ["-hide_banner", "-nostdin", "-y", ...INPUT_GUARD, "-i", fileArg(input), "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn"]
   const audio = p.audioCopy ? ["-c:a", "copy"] : ["-c:a", "aac", "-b:a", "128k", "-ac", "2"]
   const video = p.action === "remux"
     ? ["-c:v", "copy"]
     : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-profile:v", "high", "-pix_fmt", "yuv420p", "-vf", SCALE, "-threads", "2"]
-  return [...head, ...video, ...audio, "-movflags", "+faststart", "-f", "mp4", output]
+  return [...head, ...video, ...audio, "-movflags", "+faststart", "-f", "mp4", fileArg(output)]
 }
 
 function durationOf(p: Probe | null): number {
@@ -210,7 +251,7 @@ async function processOne(relativePath: string): Promise<void> {
     await mark(relativePath, "converted", { action: "copy", output: outRel, fp })
     await mark(outRel, "ok", { action: "ok", fp: null })
     fs.rm(input, { force: true }, () => undefined) // nosemgrep
-    console.log(`${LOG} ${relativePath} → ${outRel} (avvalgi natijadan nusxa)`)
+    console.log("%s %s → %s (avvalgi natijadan nusxa)", LOG, relativePath, outRel)
     return
   }
 
@@ -238,9 +279,9 @@ async function processOne(relativePath: string): Promise<void> {
   }
   const tmp = `${out}.part`
   currentJob = { relativePath, action: p.action, startedAt: Date.now() }
-  console.log(`${LOG} ${relativePath}: ${p.action} (${p.reason})`)
+  console.log("%s %s: %s (%s)", LOG, relativePath, p.action, p.reason)
   try {
-    const r = await run(FFMPEG, ffmpegArgs(input, tmp, p), ENCODE_TIMEOUT_MS, p.action === "encode")
+    const r = await runProcess("ffmpeg", ffmpegArgs(input, tmp, p), ENCODE_TIMEOUT_MS, p.action === "encode")
     if (r.code !== 0) throw new Error(r.stderr.split("\n").filter(Boolean).slice(-3).join(" | ") || `ffmpeg kodi ${r.code}`)
     // Natija butunligini tekshiramiz: davomiyligi aslidan sezilarli farq qilmasin
     const before = durationOf(info)
@@ -253,15 +294,24 @@ async function processOne(relativePath: string): Promise<void> {
     await mark(relativePath, "converted", { action: p.action, output: outRel, fp })
     await mark(outRel, "ok", { action: "ok" })
     fs.rm(input, { force: true }, () => undefined) // nosemgrep
-    console.log(`${LOG} tayyor: ${outRel} (${Math.round((Date.now() - currentJob.startedAt) / 1000)}s)`)
+    console.log("%s tayyor: %s (%ds)", LOG, outRel, Math.round((Date.now() - currentJob.startedAt) / 1000))
   } catch (err) {
     fs.rm(tmp, { force: true }, () => undefined) // nosemgrep
     const message = err instanceof Error ? err.message : String(err)
-    console.warn(`${LOG} xato ${relativePath}: ${message}`)
+    console.warn("%s xato %s: %s", LOG, relativePath, message)
     await mark(relativePath, "failed", { action: p.action, error: message.slice(0, 2000), fp, bumpAttempt: true })
   } finally {
     currentJob = null
   }
+}
+
+/** `nice` bor va ishlaydimi (Linux) — past ustuvorlikda kodlash uchun */
+function niceWorks(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn("nice", ["-n", "15", FFMPEG_BIN, "-version"], { windowsHide: true, shell: false, stdio: "ignore" })
+    child.on("error", () => resolve(false))
+    child.on("close", (code) => resolve(code === 0))
+  })
 }
 
 let available: boolean | null = null
@@ -270,15 +320,15 @@ let scanning = false
 async function ffmpegAvailable(): Promise<boolean> {
   if (available !== null) return available
   try {
-    const [a, b] = await Promise.all([run(FFMPEG, ["-version"], 15_000), run(FFPROBE, ["-version"], 15_000)])
+    const [a, b] = await Promise.all([runProcess("ffmpeg", ["-version"], 15_000), runProcess("ffprobe", ["-version"], 15_000)])
     available = a.code === 0 && b.code === 0
   } catch {
     available = false
   }
   if (available && process.platform !== "win32") {
-    niceOk = await run("nice", ["-n", "15", FFMPEG, "-version"], 15_000).then(r => r.code === 0).catch(() => false)
+    niceOk = await niceWorks()
   }
-  if (!available) console.warn(`${LOG} ffmpeg/ffprobe topilmadi — videolar telefonlarga moslashtirilmaydi (o'rnatish: sudo apt install -y ffmpeg)`)
+  if (!available) console.warn("%s ffmpeg/ffprobe topilmadi — videolar telefonlarga moslashtirilmaydi (o'rnatish: sudo apt install -y ffmpeg)", LOG)
   return available
 }
 
@@ -308,13 +358,13 @@ export async function scanVideos(): Promise<void> {
         } catch (err) {
           // Kutilmagan xato (masalan fayl o'qilmadi) — navbat to'xtab qolmasin
           const message = err instanceof Error ? err.message : String(err)
-          console.warn(`${LOG} xato ${rel}: ${message}`)
+          console.warn("%s xato %s: %s", LOG, rel, message)
           await mark(rel, "failed", { error: message.slice(0, 2000), bumpAttempt: true }).catch(() => {})
         }
       }
     }
   } catch (err) {
-    console.warn(`${LOG} skan xatosi:`, err instanceof Error ? err.message : err)
+    console.warn("%s skan xatosi: %s", LOG, err instanceof Error ? err.message : String(err))
   } finally {
     scanning = false
   }
