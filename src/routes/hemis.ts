@@ -13,6 +13,7 @@ import { encryptSecret, decryptSecret } from "../services/credentialCrypto"
 import { recordPlatformSession, type LoginMeta } from "../services/attendanceStore"
 import { refreshStudentFromHemis } from "../services/hemisSync"
 import { isSafeFileName, resolveInside, existingFileInside } from "../services/safePath"
+import { isAllowedAppRedirect, isValidCodeChallenge, createMobileHandoff, redeemMobileHandoff, appRedirectUrl } from "../services/mobileAuth"
 import {
   teacherUserId,
   studentUserId,
@@ -1239,6 +1240,9 @@ type OAuthStatePayload = {
   role?: string
   redirectUri?: string
   expectedLogin?: string
+  /** Mobil ilova: kirishdan keyin qaytiladigan manzil va PKCE challenge */
+  appRedirect?: string
+  codeChallenge?: string
 }
 
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000
@@ -1305,13 +1309,14 @@ function cleanupExpiredOAuthStates() {
   }
 }
 
-function createOAuthState(role: OAuthRole, redirectUri: string, expectedLogin?: string) {
+function createOAuthState(role: OAuthRole, redirectUri: string, expectedLogin?: string, mobile?: { appRedirect: string; codeChallenge: string }) {
   return jwt.sign(
     {
       purpose: "hemis-oauth",
       role,
       redirectUri,
       ...(expectedLogin ? { expectedLogin } : {}),
+      ...(mobile ? { appRedirect: mobile.appRedirect, codeChallenge: mobile.codeChallenge } : {}),
       nonce: randomBytes(8).toString("hex"),
     },
     JWT_SECRET,
@@ -3438,7 +3443,16 @@ router.get("/oauth/start/:role", (req, res: Response) => {
 
   const redirectUri = configuredOAuthRedirectUri(requestedRole)
   const expectedLogin = textValue(req.query.login, req.query.expectedLogin)
-  const state = createOAuthState(requestedRole, redirectUri, expectedLogin)
+  // Mobil ilova: qaytish manzili ruxsat etilgan ro'yxatda va PKCE challenge bo'lishi shart
+  let mobile: { appRedirect: string; codeChallenge: string } | undefined
+  if (req.query.app_redirect !== undefined) {
+    if (!isAllowedAppRedirect(req.query.app_redirect) || !isValidCodeChallenge(req.query.code_challenge)) {
+      res.status(400).json({ success: false, message: "Ilova manzili yoki code_challenge yaroqsiz" })
+      return
+    }
+    mobile = { appRedirect: req.query.app_redirect, codeChallenge: req.query.code_challenge }
+  }
+  const state = createOAuthState(requestedRole, redirectUri, expectedLogin, mobile)
   // Semgrep: rol normalizeOAuthRole() ro'yxatidan, manzil host'i server sozlamasidan — foydalanuvchi boshqara olmaydi.
   res.redirect(buildOAuthAuthorizeUrl(requestedRole, redirectUri, state).toString()) // nosemgrep
 })
@@ -3523,15 +3537,30 @@ router.post("/oauth/exchange/:role", async (req, res: Response) => {
   // qiymat (bitta redirect_uri bir nechta rol uchun umumiy bo'lganda mos keladi).
   const effectiveRole = normalizeOAuthRole(statePayload.role) || requestedRole
 
+  const mobileRedirect = statePayload.appRedirect && isAllowedAppRedirect(statePayload.appRedirect) && isValidCodeChallenge(statePayload.codeChallenge)
+    ? statePayload.appRedirect
+    : null
+
   try {
     const result = await createOAuthSession(effectiveRole, code, redirectUri, statePayload.expectedLogin)
     void saveUserToDb(result.token, result.role)
     recordStudentLogin(result.token, loginMeta(req))
     void syncTeacherFromHemis(result.token, loginMeta(req))
+    if (mobileRedirect) {
+      // Token URL'da yurmaydi — ilova bir martalik kodni PKCE bilan almashtiradi
+      const handoff = createMobileHandoff(result.token, result.role, statePayload.codeChallenge as string)
+      res.json({ redirect: appRedirectUrl(mobileRedirect, { code: handoff }) })
+      return
+    }
     callbackUrl.searchParams.set("token", result.token)
     callbackUrl.searchParams.set("role", result.role)
     res.json({ redirect: callbackUrl.toString() })
   } catch (err) {
+    if (mobileRedirect) {
+      const error = err instanceof NotMasofaviyError ? "not_masofaviy" : "oauth_failed"
+      res.json({ redirect: appRedirectUrl(mobileRedirect, { error, message: extractMessage(err, "HEMIS OAuth orqali kirishda xatolik") }) })
+      return
+    }
     if (err instanceof NotMasofaviyError) {
       callbackUrl.searchParams.set("error", "not_masofaviy")
       callbackUrl.searchParams.set("message", err.message)
@@ -3569,6 +3598,12 @@ router.post("/oauth/callback", async (req, res: Response) => {
     void saveUserToDb(result.token, result.role)
     recordStudentLogin(result.token, loginMeta(req))
     void syncTeacherFromHemis(result.token, loginMeta(req))
+    if (statePayload.appRedirect && isAllowedAppRedirect(statePayload.appRedirect) && isValidCodeChallenge(statePayload.codeChallenge)) {
+      // Mobil ilova boshlagan kirish: sahifa ilovaga qaytaradi, token bermaymiz
+      const handoff = createMobileHandoff(result.token, result.role, statePayload.codeChallenge)
+      res.json({ success: true, appRedirect: appRedirectUrl(statePayload.appRedirect, { code: handoff }) })
+      return
+    }
     res.json({ success: true, ...result })
   } catch (err) {
     console.error("[HEMIS oauth]", extractMessage(err), (err as AxiosError)?.response?.data)
@@ -3578,6 +3613,16 @@ router.post("/oauth/callback", async (req, res: Response) => {
       details: (err as { details?: unknown }).details,
     })
   }
+})
+
+/* ── POST /api/hemis/oauth/mobile/redeem — mobil ilova kodni tokenga almashtiradi ── */
+router.post("/oauth/mobile/redeem", (req, res: Response) => {
+  const result = redeemMobileHandoff(req.body?.code, req.body?.code_verifier)
+  if (!result) {
+    res.status(400).json({ success: false, message: "Kirish kodi yaroqsiz yoki eskirgan" })
+    return
+  }
+  res.json({ success: true, token: result.token, role: result.role })
 })
 
 /* ── GET /api/hemis/download  (token-authenticated file proxy) ───── */
