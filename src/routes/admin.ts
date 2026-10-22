@@ -223,58 +223,6 @@ router.get("/check", async (req: AuthRequest, res: Response): Promise<void> => {
   })
 })
 
-/* ── POST /api/admin/view-as-student — o'zining o'qituvchi sifatida
-   biriktirilgan guruhlaridan biriga "talaba ko'zi bilan" qarash uchun
-   (demo talaba hisobiga bog'langan token qaytaradi). Faqat FIXED_ADMIN
-   uchun — "Rol berish" orqali admin bo'lganlar ham bundan foydalana
-   olmaydi (haqiqiy talaba HEMIS tokeniga ega emasmiz, shu sababli faqat
-   demo hisobi bor guruhlar uchun ishlaydi). ── */
-router.post("/view-as-student", async (req: AuthRequest, res: Response): Promise<void> => {
-  const hemisId = getHemisId(req)
-  if (!FIXED_ADMIN_HEMIS_ID || hemisId !== FIXED_ADMIN_HEMIS_ID) {
-    res.status(403).json({ success: false, message: "Bu imkoniyat faqat asosiy administrator uchun" })
-    return
-  }
-
-  const groupIdRaw = Number(req.body?.groupId)
-  if (!Number.isFinite(groupIdRaw)) {
-    res.status(400).json({ success: false, message: "groupId majburiy" })
-    return
-  }
-  const groupId = groupIdRaw
-
-  const tId = teacherUserId(req.user)
-  const ownGroupIds = await getTeacherGroupIds(tId)
-  if (!ownGroupIds.includes(groupId)) {
-    res.status(403).json({ success: false, message: "Bu guruh sizga biriktirilmagan" })
-    return
-  }
-
-  const [rows] = await pool.query<RowDataPacket[]>(
-    "SELECT hemis_id, full_name, group_id FROM lms_demo_accounts WHERE group_id = ? AND role = 'student' LIMIT 1",
-    [groupId]
-  )
-  const demoStudent = rows[0]
-  if (!demoStudent) {
-    res.status(404).json({ success: false, message: "Bu guruh uchun demo talaba hisobi topilmadi" })
-    return
-  }
-
-  const studentHemisId = Number(demoStudent.hemis_id)
-  const token = jwt.sign(
-    {
-      id: studentHemisId, userId: studentHemisId, hemisToken: "demo-token", role: "student",
-      username: demoStudent.full_name, fullName: demoStudent.full_name,
-      groupId: Number(demoStudent.group_id),
-      studentAuthMode: "password",
-      impersonatedBy: hemisId,
-    },
-    JWT_SECRET, { expiresIn: "2d" }
-  )
-
-  res.json({ success: true, token, role: "student", studentName: String(demoStudent.full_name) })
-})
-
 // Aniq grant (lms_permissions) bo'lmasa HEMIS rolidan (talaba/xodim) kelib
 // chiqib sukut bo'yicha effektiv rol — classifyLmsRole bilan bir xil
 // mantiq, faqat SQL darajasida (rol bo'yicha filtr/agregat sanoq uchun).

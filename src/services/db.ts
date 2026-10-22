@@ -1114,21 +1114,6 @@ export async function initDatabase() {
   await execIgnoreDuplicate(`ALTER TABLE face_requests ADD COLUMN user_id INT NULL`)
   await execIgnoreDuplicate(`ALTER TABLE face_requests ADD COLUMN user_role VARCHAR(20) NULL`)
 
-  // ── Demo/test hisoblar — login+parol bilan HEMIS'siz kirish (faqat sinov uchun) ──
-  await exec(`
-    CREATE TABLE IF NOT EXISTS lms_demo_accounts (
-      id                 INT AUTO_INCREMENT PRIMARY KEY,
-      username           VARCHAR(100) NOT NULL,
-      password_hash      VARCHAR(255) NOT NULL,
-      role               ENUM('student','employee') NOT NULL,
-      hemis_id           INT NOT NULL,
-      full_name          VARCHAR(255) NOT NULL,
-      group_id           INT NULL,
-      teacher_group_ids  JSON NULL,
-      created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE KEY uq_demo_username (username)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-  `)
 
   // ── HEMIS to'liq talaba/xodim ro'yxati (fon rejimida sinxronlanadi,
   // services/hemisSync.ts) — login blokidan mustaqil, admin-token

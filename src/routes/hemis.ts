@@ -2,7 +2,6 @@ import { Router, Response, type Request as ExpressRequest } from "express"
 import type mysql from "mysql2/promise"
 import axios, { AxiosError } from "axios"
 import jwt from "jsonwebtoken"
-import bcrypt from "bcryptjs"
 import archiver from "archiver"
 import { randomBytes } from "crypto"
 import fs from "fs"
@@ -13,11 +12,6 @@ import { withHemisCache, upsertHemisUser, pool, clearUserCache, getHemisUser, ge
 import { encryptSecret, decryptSecret } from "../services/credentialCrypto"
 import { recordPlatformSession, type LoginMeta } from "../services/attendanceStore"
 import { refreshStudentFromHemis } from "../services/hemisSync"
-import {
-  isDemoUser, mockStudentMe, mockEmployeeMe, mockSchedule, mockAttendance,
-  mockGrades, mockPerformance, mockDocuments, mockCertificates, mockContractList,
-  mockAttendanceJournal,
-} from "../services/demoHemis"
 import {
   teacherUserId,
   studentUserId,
@@ -3329,49 +3323,6 @@ router.post("/auto-login", async (req, res: Response) => {
     return
   }
 
-  // ── Demo/test hisob tekshiruvi — HEMIS'ga umuman murojaat qilmasdan ──
-  try {
-    const [demoRows] = await pool.query<mysql.RowDataPacket[]>(
-      "SELECT * FROM lms_demo_accounts WHERE username = ? LIMIT 1", [login]
-    )
-    const demo = demoRows[0]
-    if (demo && (await bcrypt.compare(password, String(demo.password_hash)))) {
-      const hemisId = Number(demo.hemis_id)
-      const teacherGroupIds = demo.teacher_group_ids
-        ? (typeof demo.teacher_group_ids === "string" ? JSON.parse(demo.teacher_group_ids) : demo.teacher_group_ids)
-        : []
-      const token = demo.role === "student"
-        ? jwt.sign(
-            {
-              id: hemisId, userId: hemisId, hemisToken: "demo-token", role: "student",
-              username: demo.full_name, fullName: demo.full_name,
-              groupId: demo.group_id != null ? Number(demo.group_id) : null,
-              studentAuthMode: "password",
-            },
-            JWT_SECRET, { expiresIn: "2d" }
-          )
-        : jwt.sign(
-            {
-              id: hemisId, userId: hemisId, hemisToken: "demo-token", role: "employee",
-              username: demo.full_name, fullName: demo.full_name, isEmployee: true,
-              employeeHemisBase: HEMIS_EMPLOYEE, employeeProfilePath: "/v1/account/me", employeeAuthMode: "password",
-              teacherGroupIds, employeeType: "O'qituvchi",
-            },
-            JWT_SECRET, { expiresIn: "2d" }
-          )
-      res.json({ success: true, token, role: demo.role, source: "demo" })
-      return
-    }
-  } catch { /* demo tekshiruvi muvaffaqiyatsiz bo'lsa — real HEMIS urinishiga o'tamiz */ }
-
-  // "demo_" bilan boshlanadigan login hech qachon haqiqiy HEMIS hisobi emas —
-  // topilmasa HEMIS'ning parol endpointiga (IP bloklash manbai) behuda
-  // so'rov yubormasdan, aniq xabar qaytaramiz.
-  if (/^demo_/i.test(login)) {
-    res.status(401).json({ success: false, message: "Demo hisob topilmadi yoki parol noto'g'ri" })
-    return
-  }
-
   // ── Qaytgan talaba: keshlangan parol/HEMIS tokeni mos kelsa, HEMIS'ga
   // umuman tegmasdan kirish (800+ talaba bir vaqtda kirganda ham) ──
   const local = await tryLocalStudentLogin(login, password)
@@ -3905,7 +3856,6 @@ function getHemisToken(req: AuthRequest, res: Response): string | null {
 router.get("/me", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
-  if (isDemoUser(req.user)) { res.json({ success: true, data: mockStudentMe(req.user), source: "demo" }); return }
   if (req.user?.studentProfile) {
     res.json({ success: true, data: req.user.studentProfile, source: "token" })
     return
@@ -3923,7 +3873,6 @@ router.get("/me", async (req: AuthRequest, res: Response) => {
 router.get("/employee-me", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
-  if (isDemoUser(req.user)) { res.json({ success: true, data: mockEmployeeMe(req.user), source: "demo" }); return }
   if (req.user?.employeeProfile) {
     res.json({ success: true, data: req.user.employeeProfile, source: "token" })
     return
@@ -3951,13 +3900,6 @@ router.get("/employee/:resource", async (req: AuthRequest, res: Response) => {
 
   const resource = String(req.params.resource || "").trim()
 
-  // Demo hisob uchun "attendance-journal" haqiqiy HEMIS'ga so'ralganda
-  // bo'sh qaytadi (demo-token ishlamaydi) — shu sabab Meeting yaratishda
-  // guruh nomlari "Guruh 9901" kabi umumiy fallback'ga tushib qolardi.
-  if (isDemoUser(req.user) && resource === "attendance-journal") {
-    res.json({ success: true, data: mockAttendanceJournal(req.user), source: "demo" })
-    return
-  }
 
   try {
     const result = await employeeResourceData(
@@ -4135,7 +4077,6 @@ async function scheduleFromBackendApi(studentId: string, groupId: string, week?:
 router.get("/schedule", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
-  if (isDemoUser(req.user)) { res.json({ success: true, data: mockSchedule(req.user), source: "demo" }); return }
 
   const week = req.query._week || req.query.week
   const semester = req.query._semester || req.query.semester
@@ -4203,7 +4144,6 @@ async function attendanceFromBackendApi(studentId: string, semester?: string, su
 router.get("/attendance", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
-  if (isDemoUser(req.user)) { res.json({ success: true, data: mockAttendance(req.user), source: "demo" }); return }
 
   const semester = req.query._semester || req.query.semester
 
@@ -4347,7 +4287,6 @@ function mergePlanWithRecords<P extends GradeKeyFields, R extends GradeKeyFields
 router.get("/grades", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
-  if (isDemoUser(req.user)) { res.json({ success: true, data: mockGrades(), source: "demo" }); return }
 
   if (req.user?.studentAuthMode === "oauth") {
     const studentId = textValue(req.user?.id, req.user?.userId)
@@ -4475,7 +4414,6 @@ async function performanceFromBackendApi(studentId: string, studentName: string,
 router.get("/performance", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
-  if (isDemoUser(req.user)) { res.json({ success: true, data: mockPerformance(), source: "demo" }); return }
 
   const semester = req.query._semester || req.query.semester
   if (req.user?.studentAuthMode === "oauth") {
@@ -4812,7 +4750,6 @@ async function contractsFromBackendApi(studentId: string, fullName: string) {
 router.get("/contract-list", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
-  if (isDemoUser(req.user)) { res.json({ success: true, data: mockContractList(req.user), source: "demo" }); return }
 
   const studentId = textValue(req.user?.id, req.user?.userId)
 
@@ -4865,7 +4802,6 @@ router.get("/decree", async (req: AuthRequest, res: Response) => {
 router.get("/documents", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
-  if (isDemoUser(req.user)) { res.json({ success: true, data: mockDocuments(), source: "demo" }); return }
   try {
     const r = await withHemisCache(reqUserId(req), "documents",
       () => hemisGet(HEMIS, "/v1/student/document-all", hToken), TTL_4H)
@@ -4914,7 +4850,6 @@ router.get("/resources", async (req: AuthRequest, res: Response) => {
 router.get("/certificate", async (req: AuthRequest, res: Response) => {
   const hToken = getHemisToken(req, res)
   if (!hToken) return
-  if (isDemoUser(req.user)) { res.json({ success: true, data: mockCertificates(), source: "demo" }); return }
   try {
     const r = await withHemisCache(reqUserId(req), "certificate",
       () => hemisGet(HEMIS, "/v1/student/certificate", hToken), TTL_4H)
