@@ -124,6 +124,7 @@ import { logAudit } from "../services/auditLog"
 import { syncTopicToGroups } from "../services/topicSync"
 import { teacherCertificate, markCertificateSeen, certificateDisplayName, getCustomTemplate } from "../services/certificateStore"
 import { isSafeFileName, resolveInside, existingFileInside, escapeLike } from "../services/safePath"
+import { getTelegramConfig } from "../services/telegramConfig"
 
 const router = Router()
 const JWT_SECRET = process.env.JWT_SECRET || "secret"
@@ -3713,14 +3714,13 @@ router.post("/notify-student", async (req: AuthRequest, res: Response): Promise<
     platformNotified = true
   }
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN
-  const chatId   = process.env.TELEGRAM_CHAT_ID
+  const { botToken, chatId } = await getTelegramConfig()
   if (!botToken || !chatId) {
     if (platformNotified) {
       res.json({ success: true, message: "Platformaga xabar yuborildi (Telegram sozlanmagan)" })
       return
     }
-    res.status(503).json({ success: false, message: "Telegram bot sozlanmagan (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID kerak)" }); return
+    res.status(503).json({ success: false, message: "Telegram bot sozlanmagan (Admin → Sozlamalar → Telegram bot)" }); return
   }
 
   const lines: string[] = [

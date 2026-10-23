@@ -36,6 +36,10 @@ import {
 } from "../services/permissionsStore"
 import { logAudit, listAuditLog } from "../services/auditLog"
 import {
+  TELEGRAM_TOKEN_KEY, TELEGRAM_CHAT_KEY, getTelegramConfig, saveTelegramToken, maskTelegramToken,
+  isValidTelegramToken, isValidTelegramChatId, sendTelegramTestMessage,
+} from "../services/telegramConfig"
+import {
   getCertificateConfig,
   certificateDisplayName,
   parseParts,
@@ -885,10 +889,9 @@ router.post("/send-report-telegram", adminOnly, async (req: AuthRequest, res: Re
     res.status(400).json({ success: false, message: "pdfBase64 majburiy" }); return
   }
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN
-  const chatId   = process.env.TELEGRAM_CHAT_ID
+  const { botToken, chatId } = await getTelegramConfig()
   if (!botToken || !chatId) {
-    res.status(503).json({ success: false, message: "Telegram bot sozlanmagan" }); return
+    res.status(503).json({ success: false, message: "Telegram bot sozlanmagan (Admin → Sozlamalar → Telegram bot)" }); return
   }
 
   try {
@@ -994,6 +997,13 @@ router.get("/settings", adminOnly, async (_req: AuthRequest, res: Response): Pro
   const [rows] = await pool.query<RowDataPacket[]>("SELECT key_name, value FROM lms_settings")
   const settings: Record<string, string> = {}
   for (const r of rows as RowDataPacket[]) settings[String(r.key_name)] = String(r.value)
+  // Bot token sir — brauzerga faqat yashirilgan ko'rinishi va qayerdan olingani boradi
+  delete settings[TELEGRAM_TOKEN_KEY]
+  const tg = await getTelegramConfig()
+  settings[TELEGRAM_CHAT_KEY] = tg.chatId
+  settings.telegram_chat_source = tg.chatSource
+  settings.telegram_bot_token_hint = maskTelegramToken(tg.botToken)
+  settings.telegram_bot_token_source = tg.tokenSource
   res.json({ success: true, data: settings })
 })
 
@@ -1004,8 +1014,25 @@ router.put("/settings", requirePermission("settings", "edit"), async (req: AuthR
     "face_block_threshold", "test_max_attempts", "meeting_attendance_minutes", "attendance_mode",
     "certificate_auto", "certificate_topic_goal", "certificate_parts",
     "platform_attendance_minutes", "platform_meeting_percent",
+    TELEGRAM_CHAT_KEY,
   ])
   const applied: Record<string, string> = {}
+
+  // Telegram: bo'sh token — eskisi qoladi; noto'g'ri qiymat bo'lsa hech narsa saqlanmaydi
+  const tgToken = String(updates[TELEGRAM_TOKEN_KEY] ?? "").trim()
+  const tgChat = String(updates[TELEGRAM_CHAT_KEY] ?? "").trim()
+  if (tgToken && !isValidTelegramToken(tgToken)) {
+    res.status(400).json({ success: false, message: "Bot token noto'g'ri. @BotFather bergan ko'rinishda kiriting: 123456789:AA..." })
+    return
+  }
+  if (tgChat && !isValidTelegramChatId(tgChat)) {
+    res.status(400).json({ success: false, message: "Chat ID noto'g'ri. Raqam (guruh uchun -100...) yoki @kanal_nomi bo'lishi kerak" })
+    return
+  }
+  if (tgToken) {
+    await saveTelegramToken(tgToken)
+    applied[TELEGRAM_TOKEN_KEY] = maskTelegramToken(tgToken)
+  }
 
   for (const [key, val] of Object.entries(updates)) {
     if (!allowed.has(key)) continue
@@ -1049,6 +1076,28 @@ router.put("/settings", requirePermission("settings", "edit"), async (req: AuthR
   }
 
   res.json({ success: true, message: "Sozlamalar saqlandi" })
+})
+
+/* ── POST /api/admin/settings/telegram-test — sinov xabari yuborish.
+   Formadagi (hali saqlanmagan) qiymatlar bo'lsa shular, bo'lmasa saqlangani bilan ── */
+router.post("/settings/telegram-test", requirePermission("settings", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
+  const typedToken = String(body.botToken ?? "").trim()
+  const typedChat = String(body.chatId ?? "").trim()
+  if (typedToken && !isValidTelegramToken(typedToken)) {
+    res.status(400).json({ success: false, message: "Bot token noto'g'ri. @BotFather bergan ko'rinishda kiriting: 123456789:AA..." }); return
+  }
+  if (typedChat && !isValidTelegramChatId(typedChat)) {
+    res.status(400).json({ success: false, message: "Chat ID noto'g'ri. Raqam (guruh uchun -100...) yoki @kanal_nomi bo'lishi kerak" }); return
+  }
+  const saved = await getTelegramConfig()
+  const botToken = typedToken || saved.botToken
+  const chatId = typedChat || saved.chatId
+  if (!botToken || !chatId) {
+    res.status(400).json({ success: false, message: "Bot token va Chat ID kiritilmagan" }); return
+  }
+  const result = await sendTelegramTestMessage(botToken, chatId)
+  res.status(result.ok ? 200 : 502).json({ success: result.ok, message: result.message })
 })
 
 /* ── Tashakkurnomalar ───────────────────────────────────────────────── */
