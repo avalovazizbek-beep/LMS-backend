@@ -125,6 +125,47 @@ export async function findTelegramChats(botToken: string): Promise<{ ok: boolean
   }
 }
 
+export function escapeTelegramHtml(text: string) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// Avtomatik xabarlar navbati: bir guruhga daqiqasiga ~20 xabar chegarasi bor,
+// bir vaqtda ko'p tashakkurnoma berilsa ham hammasi yetib borishi uchun ketma-ket
+let queue: Promise<void> = Promise.resolve()
+
+/** Sozlangan chatga HTML xabar (fon rejimida). Sozlanmagan bo'lsa — jim o'tib ketadi */
+export function queueTelegramMessage(html: string): Promise<void> {
+  queue = queue.then(() => sendQueued(html)).catch((err) => {
+    console.warn("[telegram] xabar yuborilmadi:", err instanceof Error ? err.message : err)
+  })
+  return queue
+}
+
+async function sendQueued(html: string) {
+  const { botToken, chatId } = await getTelegramConfig()
+  if (!botToken || !chatId) return
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: html, parse_mode: "HTML", disable_web_page_preview: true }),
+      signal: AbortSignal.timeout(15000),
+    })
+    const json = await resp.json() as { ok: boolean; description?: string; parameters?: { retry_after?: number } }
+    if (json.ok) break
+    const retryAfter = json.parameters?.retry_after
+    if (resp.status === 429 && retryAfter && attempt === 0) {
+      await sleep(retryAfter * 1000 + 500)
+      continue
+    }
+    console.warn("[telegram] xabar yuborilmadi:", json.description ?? resp.status)
+    break
+  }
+  await sleep(3500)
+}
+
 /** Sinov xabari — token va chat to'g'riligini darhol tekshirish uchun */
 export async function sendTelegramTestMessage(botToken: string, chatId: string): Promise<{ ok: boolean; message: string }> {
   try {

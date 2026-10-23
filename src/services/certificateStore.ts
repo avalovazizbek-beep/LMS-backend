@@ -4,6 +4,7 @@ import type mysql from "mysql2/promise"
 import { pool, fromMysqlDate } from "./db"
 import { notifySafe } from "./notificationStore"
 import { resolveInside, existingFileInside } from "./safePath"
+import { queueTelegramMessage, escapeTelegramHtml } from "./telegramConfig"
 
 /* ── O'qituvchi tashakkurnomasi ─────────────────────────────────────────
    "Fan resurslari"da yetarli mavzuni to'liq to'ldirgan o'qituvchiga bir marta
@@ -268,7 +269,30 @@ async function getCertificateRow(teacherUserId: number): Promise<CertificateRow 
   return rows.length ? mapCertificateRow(rows[0]) : null
 }
 
-function notifyIssued(teacherUserId: number) {
+/** Yangi tashakkurnoma — sozlangan Telegram chatiga xabar (faqat berilgan paytda) */
+async function announceOnTelegram(teacherUserId: number, fullName: string, completedTopics: number, issuedBy: string | null) {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT full_name, department FROM hemis_employees_directory WHERE hemis_id = ? LIMIT 1",
+    [teacherUserId]
+  )
+  const name = String(rows[0]?.full_name ?? "").trim() || fullName || `#${teacherUserId}`
+  const department = String(rows[0]?.department ?? "").trim()
+  const date = new Date().toLocaleDateString("en-GB", { timeZone: "Asia/Tashkent" }).replace(/\//g, ".")
+  const lines = [
+    "🏅 <b>Yangi tashakkurnoma</b>",
+    "",
+    `👤 <b>${escapeTelegramHtml(name)}</b>`,
+    department ? `🏛 ${escapeTelegramHtml(department)}` : "",
+    `📚 To'liq mavzular: ${completedTopics} ta`,
+    `🗓 ${date}`,
+    issuedBy ? `✍️ Qo'lda berdi: ${escapeTelegramHtml(issuedBy)}` : "⚙️ Avtomatik berildi — shart bajarildi",
+  ]
+  await queueTelegramMessage(lines.filter((line, i) => line || i === 1).join("\n"))
+}
+
+function notifyIssued(teacherUserId: number, fullName: string, completedTopics: number, issuedBy: string | null) {
+  announceOnTelegram(teacherUserId, fullName, completedTopics, issuedBy).catch((err) =>
+    console.warn("[certificate] Telegram xabari xatosi:", (err as Error)?.message ?? err))
   notifySafe({
     role: "employee",
     userId: teacherUserId,
@@ -286,7 +310,7 @@ async function issueAutomatically(teacherUserId: number, fullName: string, compl
     "INSERT IGNORE INTO lms_teacher_certificates (teacher_user_id, full_name, completed_topics) VALUES (?, ?, ?)",
     [teacherUserId, fullName, completedTopics]
   )
-  if (result.affectedRows > 0) notifyIssued(teacherUserId)
+  if (result.affectedRows > 0) notifyIssued(teacherUserId, fullName, completedTopics, null)
   return result.affectedRows > 0
 }
 
@@ -412,7 +436,7 @@ export async function issueCertificateManually(teacherUserId: number, issuedBy: 
        issued_by = VALUES(issued_by), issued_at = CURRENT_TIMESTAMP, revoked_at = NULL, seen_at = NULL`,
     [teacherUserId, name, count, issuedBy]
   )
-  notifyIssued(teacherUserId)
+  notifyIssued(teacherUserId, name, count, issuedBy)
   return "issued"
 }
 
