@@ -63,6 +63,68 @@ export async function saveTelegramToken(token: string) {
   )
 }
 
+export interface TelegramChatInfo {
+  id: string
+  title: string
+  type: string
+}
+
+type TgChat = { id?: number; title?: string; first_name?: string; last_name?: string; username?: string; type?: string }
+
+/**
+ * Bot qo'shilgan chatlarni getUpdates orqali topish — admin guruh ID'sini
+ * qo'lda qidirmasin. Telegram yangilanishlarni ~24 soat saqlaydi, shuning uchun
+ * bot ancha oldin qo'shilgan bo'lsa guruhda «/start@bot» yozish kerak bo'ladi.
+ */
+export async function findTelegramChats(botToken: string): Promise<{ ok: boolean; message?: string; botUsername?: string; chats: TelegramChatInfo[] }> {
+  try {
+    const call = async (method: string) => {
+      const resp = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, { signal: AbortSignal.timeout(15000) })
+      return await resp.json() as { ok: boolean; description?: string; result?: unknown }
+    }
+    const me = await call("getMe")
+    if (!me.ok) return { ok: false, message: `Telegram xatosi: ${me.description ?? "noma'lum"}`, chats: [] }
+    const updates = await call("getUpdates")
+    if (!updates.ok) return { ok: false, message: `Telegram xatosi: ${updates.description ?? "noma'lum"}`, chats: [] }
+
+    const chats = new Map<string, TelegramChatInfo>()
+    const removed = new Set<string>()
+    const add = (chat?: TgChat) => {
+      if (!chat || chat.id === undefined) return
+      const name = chat.title || [chat.first_name, chat.last_name].filter(Boolean).join(" ") || (chat.username ? `@${chat.username}` : "")
+      chats.set(String(chat.id), { id: String(chat.id), title: name || String(chat.id), type: chat.type ?? "" })
+    }
+    for (const u of (updates.result as Record<string, Record<string, unknown>>[] | undefined) ?? []) {
+      for (const key of ["message", "edited_message", "channel_post", "my_chat_member", "chat_member"]) {
+        const part = u[key]
+        if (!part) continue
+        const chat = part.chat as TgChat | undefined
+        add(chat)
+        // Bot guruhdan chiqarilgan bo'lsa — ro'yxatda ko'rsatmaymiz
+        const status = (part.new_chat_member as { status?: string } | undefined)?.status
+        if (key === "my_chat_member" && chat?.id !== undefined) {
+          if (status === "left" || status === "kicked") removed.add(String(chat.id))
+          else removed.delete(String(chat.id))
+        }
+        // Oddiy guruh supergroup'ga aylansa ID o'zgaradi (-100...)
+        const migrated = part.migrate_to_chat_id
+        if (typeof migrated === "number" && chat) {
+          removed.add(String(chat.id))
+          add({ ...chat, id: migrated, type: "supergroup" })
+        }
+      }
+    }
+    const order: Record<string, number> = { supergroup: 0, group: 0, channel: 1, private: 2 }
+    const list = [...chats.values()]
+      .filter((c) => !removed.has(c.id))
+      .sort((a, b) => (order[a.type] ?? 3) - (order[b.type] ?? 3) || a.title.localeCompare(b.title))
+    const username = (me.result as { username?: string } | undefined)?.username
+    return { ok: true, botUsername: username, chats: list }
+  } catch (e) {
+    return { ok: false, message: `Telegramga ulanib bo'lmadi: ${e instanceof Error ? e.message : "noma'lum"}`, chats: [] }
+  }
+}
+
 /** Sinov xabari — token va chat to'g'riligini darhol tekshirish uchun */
 export async function sendTelegramTestMessage(botToken: string, chatId: string): Promise<{ ok: boolean; message: string }> {
   try {

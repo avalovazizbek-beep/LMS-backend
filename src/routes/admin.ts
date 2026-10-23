@@ -37,7 +37,7 @@ import {
 import { logAudit, listAuditLog } from "../services/auditLog"
 import {
   TELEGRAM_TOKEN_KEY, TELEGRAM_CHAT_KEY, getTelegramConfig, saveTelegramToken, maskTelegramToken,
-  isValidTelegramToken, isValidTelegramChatId, sendTelegramTestMessage,
+  isValidTelegramToken, isValidTelegramChatId, sendTelegramTestMessage, findTelegramChats,
 } from "../services/telegramConfig"
 import {
   getCertificateConfig,
@@ -1098,6 +1098,25 @@ router.post("/settings/telegram-test", requirePermission("settings", "edit"), as
   }
   const result = await sendTelegramTestMessage(botToken, chatId)
   res.status(result.ok ? 200 : 502).json({ success: result.ok, message: result.message })
+})
+
+/* ── POST /api/admin/settings/telegram-chats — bot qo'shilgan guruh/kanallar ro'yxati
+   (Chat ID'ni qo'lda qidirmaslik uchun) ── */
+router.post("/settings/telegram-chats", requirePermission("settings", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
+  const typedToken = String(body.botToken ?? "").trim()
+  if (typedToken && !isValidTelegramToken(typedToken)) {
+    res.status(400).json({ success: false, message: "Bot token noto'g'ri. @BotFather bergan ko'rinishda kiriting: 123456789:AA..." }); return
+  }
+  const botToken = typedToken || (await getTelegramConfig()).botToken
+  if (!botToken) {
+    res.status(400).json({ success: false, message: "Avval bot tokenni kiriting" }); return
+  }
+  const result = await findTelegramChats(botToken)
+  if (!result.ok) {
+    res.status(502).json({ success: false, message: result.message }); return
+  }
+  res.json({ success: true, data: { botUsername: result.botUsername ?? null, chats: result.chats } })
 })
 
 /* ── Tashakkurnomalar ───────────────────────────────────────────────── */
