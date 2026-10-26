@@ -4,7 +4,7 @@ import jwt from "jsonwebtoken"
 import { Router, Response } from "express"
 import type { Server as SocketIOServer } from "socket.io"
 import type { ResultSetHeader, RowDataPacket } from "mysql2"
-import { authMiddleware, AuthRequest, AuthUser } from "../middleware/auth"
+import { authMiddleware, AuthRequest, AuthUser, withFixedGroupId } from "../middleware/auth"
 
 let _io: SocketIOServer | null = null
 export function setSocketIO(io: SocketIOServer) { _io = io }
@@ -59,7 +59,7 @@ function meetingId(req: AuthRequest) {
 /* ── token-tekshiruvchi fayl oqimi (authMiddleware'dan OLDIN) ──────────
    <video src="...?token=..."> to'g'ridan-to'g'ri brauzerdan ochilishi
    uchun, teaching.ts:userFromRequest naqshiga o'xshab. */
-function userFromRequest(req: AuthRequest): AuthUser | null {
+async function userFromRequest(req: AuthRequest): Promise<AuthUser | null> {
   if (req.user) return req.user
   const headerToken = req.headers.authorization?.startsWith("Bearer ")
     ? req.headers.authorization.split(" ")[1]
@@ -68,14 +68,14 @@ function userFromRequest(req: AuthRequest): AuthUser | null {
   const token = headerToken || queryToken
   if (!token) return null
   try {
-    return jwt.verify(token, JWT_SECRET) as AuthUser
+    return await withFixedGroupId(jwt.verify(token, JWT_SECRET) as AuthUser)
   } catch {
     return null
   }
 }
 
 router.get("/recordings/:id/file", async (req: AuthRequest, res: Response): Promise<void> => {
-  const authUser = userFromRequest(req)
+  const authUser = await userFromRequest(req)
   if (!authUser) {
     res.status(401).json({ success: false, message: "Token topilmadi yoki yaroqsiz" })
     return

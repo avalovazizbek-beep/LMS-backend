@@ -4,7 +4,7 @@ import path from "path"
 import { execFile } from "child_process"
 import jwt from "jsonwebtoken"
 import express, { Router, Response } from "express"
-import { authMiddleware, requireRole, AuthRequest, AuthUser } from "../middleware/auth"
+import { authMiddleware, requireRole, AuthRequest, AuthUser, withFixedGroupId } from "../middleware/auth"
 import { pool } from "../services/db"
 import { createNotification, notifySafe, bumpGroupedSafe, studentOwnersInGroups, adminOwnersFor, type NotificationType } from "../services/notificationStore"
 import { parseNumber } from "../services/meetingStore"
@@ -283,7 +283,7 @@ async function applyMyRetakeGrants(items: TeacherContentRecord[], sId: number): 
    bilan ochilishi mumkin bo'lishi kerak — shu sababli umumiy
    authMiddleware ulanishidan oldin joylashtirilgan, hemis.ts:/download
    namunasiga o'xshab. */
-function userFromRequest(req: AuthRequest): AuthUser | null {
+async function userFromRequest(req: AuthRequest): Promise<AuthUser | null> {
   if (req.user) return req.user
   const headerToken = req.headers.authorization?.startsWith("Bearer ")
     ? req.headers.authorization.split(" ")[1]
@@ -292,7 +292,7 @@ function userFromRequest(req: AuthRequest): AuthUser | null {
   const token = headerToken || queryToken
   if (!token) return null
   try {
-    return jwt.verify(token, JWT_SECRET) as AuthUser
+    return await withFixedGroupId(jwt.verify(token, JWT_SECRET) as AuthUser)
   } catch {
     return null
   }
@@ -422,7 +422,7 @@ export function streamPrivateFile(req: AuthRequest, res: Response, relativePath:
 }
 
 router.get("/content/:id/file", async (req: AuthRequest, res: Response): Promise<void> => {
-  const user = userFromRequest(req)
+  const user = await userFromRequest(req)
   if (!user) {
     res.status(401).json({ success: false, message: "Token topilmadi yoki yaroqsiz" })
     return
@@ -714,7 +714,7 @@ except Exception as e:
 `.trim()
 
 router.get("/content/:id/pptx-slides", async (req: AuthRequest, res: Response): Promise<void> => {
-  const user = userFromRequest(req)
+  const user = await userFromRequest(req)
   if (!user) { res.status(401).json({ success: false }); return }
   const id = numberValue(req.params.id)
   const content = id !== null ? await getTeacherContent(id) : null
@@ -744,7 +744,7 @@ router.get("/content/:id/pptx-slides", async (req: AuthRequest, res: Response): 
 
 /* ── GET /content/:id/pptx-rich-slides — rich slide data with colors/positioning ── */
 router.get("/content/:id/pptx-rich-slides", async (req: AuthRequest, res: Response): Promise<void> => {
-  const user = userFromRequest(req)
+  const user = await userFromRequest(req)
   if (!user) { res.status(401).json({ success: false }); return }
   const id = numberValue(req.params.id)
   const content = id !== null ? await getTeacherContent(id) : null
@@ -783,7 +783,7 @@ router.get("/content/:id/pptx-rich-slides", async (req: AuthRequest, res: Respon
 
 /* ── GET /content/:id/pptx-as-pdf — PPTX → PDF conversion (LibreOffice) ── */
 router.get("/content/:id/pptx-as-pdf", async (req: AuthRequest, res: Response): Promise<void> => {
-  const user = userFromRequest(req)
+  const user = await userFromRequest(req)
   if (!user) { res.status(401).end(); return }
   const id = numberValue(req.params.id)
   const content = id !== null ? await getTeacherContent(id) : null
@@ -837,7 +837,7 @@ router.get("/content/:id/pptx-as-pdf", async (req: AuthRequest, res: Response): 
 })
 
 router.get("/content/:id/files/:fileId", async (req: AuthRequest, res: Response): Promise<void> => {
-  const user = userFromRequest(req)
+  const user = await userFromRequest(req)
   if (!user) {
     res.status(401).json({ success: false, message: "Token topilmadi yoki yaroqsiz" })
     return
@@ -872,7 +872,7 @@ router.get("/content/:id/files/:fileId", async (req: AuthRequest, res: Response)
 })
 
 router.get("/submissions/:id/file", async (req: AuthRequest, res: Response): Promise<void> => {
-  const user = userFromRequest(req)
+  const user = await userFromRequest(req)
   if (!user) {
     res.status(401).json({ success: false, message: "Token topilmadi yoki yaroqsiz" })
     return

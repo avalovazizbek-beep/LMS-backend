@@ -977,20 +977,11 @@ function numberValue(...values: unknown[]) {
   return null
 }
 
-function normalizeGroupName(value: unknown) {
-  return String(value ?? "")
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, "")
-}
-
+// Ilgari BH-M-425 nomli guruhga qattiq yozilgan 425 ID berilardi — HEMIS'da
+// uning haqiqiy ID'si boshqa (425 esa begona eski guruh), shu sabab talabalar
+// o'qituvchi kontentini umuman ko'rmasdi. ID faqat HEMIS profilidan olinadi.
 function resolveStudentGroupId(profile: Record<string, unknown>) {
   const group = asRecord(profile.group)
-  const groupName = normalizeGroupName(textValue(group.name, profile.group_name))
-  const groupCode = normalizeGroupName(textValue(group.code, profile.group_code))
-
-  if (groupName === "BH-M-425" || groupCode === "BH-M-425") return 425
-
   return numberValue(
     profile.group_id,
     profile.groupId,
@@ -1021,8 +1012,6 @@ function resolveEmployeeGroupIds(profile: Record<string, unknown>) {
   const groupIds = groups
     .map((item) => {
       const group = asRecord(item)
-      const groupName = normalizeGroupName(textValue(group.name, group.code))
-      if (groupName === "BH-M-425") return 425
       return numberValue(group.id, group.group_id, group.groupId, group.code)
     })
     .filter((item): item is number => item !== null)

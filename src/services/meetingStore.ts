@@ -272,6 +272,13 @@ export async function resolveMeetingUser(authUser?: AuthLikeUser): Promise<Meeti
       }
       return mapUser(rows[0], await teacherGroupIds(id))
     }
+    // Guruh birinchi kirishda saqlanadi — talaba boshqa guruhga o'tsa (yoki
+    // eski noto'g'ri ID bilan yozilgan bo'lsa) tokendagi joriy guruh ustun
+    const freshGroupId = parseNumber(authUser?.groupId)
+    if (freshGroupId !== null && Number(rows[0].group_id) !== freshGroupId) {
+      await pool.query("UPDATE lms_meeting_users SET group_id = ? WHERE id = ?", [freshGroupId, id])
+      rows[0].group_id = freshGroupId
+    }
     return mapUser(rows[0], [])
   }
 
