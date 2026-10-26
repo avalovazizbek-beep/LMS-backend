@@ -282,11 +282,13 @@ export async function resolveMeetingUser(authUser?: AuthLikeUser): Promise<Meeti
     return mapUser(rows[0], [])
   }
 
-  const groupId = parseNumber(authUser?.groupId) ?? (role === "student" ? 501 : null)
+  // Guruhi noma'lum foydalanuvchiga taxminiy guruh berilmaydi (ilgari 501/502
+  // — HEMIS'dagi begona eski guruhlar — qo'yilardi)
+  const groupId = parseNumber(authUser?.groupId)
   const teacherGroups =
     authUser?.teacherGroupIds
       ?.map(item => parseNumber(item))
-      .filter((item): item is number => item !== null) ?? (role === "teacher" ? [501, 502] : [])
+      .filter((item): item is number => item !== null) ?? []
   const fullName = authUser?.fullName || authUser?.username || "LMS User"
 
   await pool.query(
