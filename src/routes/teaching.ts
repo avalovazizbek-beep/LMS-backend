@@ -2,6 +2,7 @@ import fs from "fs"
 import os from "os"
 import path from "path"
 import { execFile } from "child_process"
+import { convertWithLibreOffice } from "../services/officeConvert"
 import jwt from "jsonwebtoken"
 import express, { Router, Response } from "express"
 import { authMiddleware, requireRole, AuthRequest, AuthUser, withFixedGroupId } from "../middleware/auth"
@@ -782,6 +783,10 @@ router.get("/content/:id/pptx-rich-slides", async (req: AuthRequest, res: Respon
 })
 
 /* ── GET /content/:id/pptx-as-pdf — PPTX → PDF conversion (LibreOffice) ── */
+// TheoryViewer avval HEAD, keyin GET yuboradi — ikkalasi bitta konvertatsiyani kutadi
+const pptxPdfJobs = new Map<number, Promise<boolean>>()
+const PPTX_PDF_RETRY_MS = 6 * 60 * 60_000
+
 router.get("/content/:id/pptx-as-pdf", async (req: AuthRequest, res: Response): Promise<void> => {
   const user = await userFromRequest(req)
   if (!user) { res.status(401).end(); return }
@@ -815,25 +820,27 @@ router.get("/content/:id/pptx-as-pdf", async (req: AuthRequest, res: Response): 
 
   if (fs.existsSync(pdfPath)) { serve(); return } // nosemgrep
 
-  // Try LibreOffice (Windows: soffice.exe, Linux/Mac: libreoffice or soffice)
-  const candidates = process.platform === "win32"
-    ? ["C:\\Program Files\\LibreOffice\\program\\soffice.exe", "soffice"]
-    : ["libreoffice", "soffice"]
+  // Konvertatsiya bo'lmagan fayl har ochilishda qayta urinilmaydi (har urinish
+  // soffice'ni qulatib core dump qoldirardi) — muddatdan keyin yoki fayl
+  // almashtirilganda yana sinaladi
+  const relativePath = content.file.relativePath
+  const failMarker = `${pdfPath}.failed`
+  try {
+    const recent = Date.now() - fs.statSync(failMarker).mtimeMs < PPTX_PDF_RETRY_MS // nosemgrep
+    if (recent && fs.readFileSync(failMarker, "utf-8") === relativePath) { res.status(422).end(); return } // nosemgrep
+  } catch { /* belgi yo'q */ }
 
-  let tried = 0
-  function tryNext() {
-    if (tried >= candidates.length) { res.status(422).end(); return }
-    const bin = candidates[tried++]
-    execFile(bin, ["--headless", "--convert-to", "pdf", "--outdir", cacheDir, absPath], { timeout: 45000 }, (err) => {
-      if (err) { tryNext(); return }
-      // LibreOffice names output after input basename
-      const auto = path.join(cacheDir, path.basename(absPath, path.extname(absPath)) + ".pdf") // nosemgrep
-      if (!fs.existsSync(auto)) { tryNext(); return } // nosemgrep
-      try { fs.renameSync(auto, pdfPath) } catch { /* already renamed */ } // nosemgrep
-      serve()
-    })
+  let job = pptxPdfJobs.get(content.id)
+  if (!job) {
+    job = convertWithLibreOffice(absPath, "pdf", pdfPath).finally(() => pptxPdfJobs.delete(content.id))
+    pptxPdfJobs.set(content.id, job)
   }
-  tryNext()
+  if (!(await job)) {
+    try { fs.writeFileSync(failMarker, relativePath) } catch { /* ignore */ } // nosemgrep
+    res.status(422).end()
+    return
+  }
+  serve()
 })
 
 router.get("/content/:id/files/:fileId", async (req: AuthRequest, res: Response): Promise<void> => {

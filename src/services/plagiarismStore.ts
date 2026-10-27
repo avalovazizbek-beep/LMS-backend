@@ -1,42 +1,31 @@
 import path from "path"
 import os from "os"
 import fs from "fs"
-import { execFile } from "child_process"
+import crypto from "crypto"
+import { convertWithLibreOffice } from "./officeConvert"
 import axios from "axios"
 import type mysql from "mysql2/promise"
 import { pool } from "./db"
 import { privateStorageRoot, storedFilePath, type SubmissionRecord } from "./teachingStore"
 
-/* ── Fayldan matn ajratib olish — mavjud "pptx-as-pdf" yo'lidagi bilan bir
-   xil, allaqachon serverga o'rnatilgan LibreOffice (soffice) orqali ────── */
-const LO_CANDIDATES = process.platform === "win32"
-  ? ["C:\\Program Files\\LibreOffice\\program\\soffice.exe", "soffice"]
-  : ["libreoffice", "soffice"]
+/* ── Fayldan matn ajratib olish — "pptx-as-pdf" bilan bir xil, umumiy
+   LibreOffice konvertori orqali (services/officeConvert.ts) ────────────── */
 
 // .doc eski (binary) format ham LibreOffice orqali ochiladi
 const LO_EXTRACTABLE_EXT = new Set([".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".odt", ".pdf"])
 
-function convertToText(absPath: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const cacheDir = path.join(os.tmpdir(), "lms-plagiarism-txt")
-    fs.mkdirSync(cacheDir, { recursive: true })
-    let tried = 0
-    function tryNext() {
-      if (tried >= LO_CANDIDATES.length) { resolve(null); return }
-      const bin = LO_CANDIDATES[tried++]
-      // Semgrep: absPath storedFilePath() dan, cacheDir va natija nomi server o'zi tuzadi; execFile shell'siz, argumentlar massivi.
-      execFile(bin, ["--headless", "--convert-to", "txt:Text", "--outdir", cacheDir, absPath], { timeout: 45000 }, (err) => { // nosemgrep
-        if (err) { tryNext(); return }
-        const auto = path.join(cacheDir, path.basename(absPath, path.extname(absPath)) + ".txt") // nosemgrep
-        if (!fs.existsSync(auto)) { tryNext(); return } // nosemgrep
-        let text: string | null = null
-        try { text = fs.readFileSync(auto, "utf-8") } catch { text = null } // nosemgrep
-        fs.rm(auto, { force: true }, () => undefined) // nosemgrep
-        resolve(text)
-      })
-    }
-    tryNext()
-  })
+async function convertToText(absPath: string): Promise<string | null> {
+  const cacheDir = path.join(os.tmpdir(), "lms-plagiarism-txt")
+  fs.mkdirSync(cacheDir, { recursive: true })
+  const out = path.join(cacheDir, `${crypto.randomUUID()}.txt`)
+  if (!(await convertWithLibreOffice(absPath, "txt:Text", out))) return null
+  try {
+    return fs.readFileSync(out, "utf-8") // nosemgrep
+  } catch {
+    return null
+  } finally {
+    fs.rm(out, { force: true }, () => undefined) // nosemgrep
+  }
 }
 
 function stripRtf(raw: string): string {
