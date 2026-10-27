@@ -88,6 +88,21 @@ async function resolveTeacher(): Promise<number | null> {
   return null
 }
 
+/** Skript backend qayta ishga tushishidan oldin ham ishlasin: yangi ustunlar
+    (db.ts initDatabase bilan bir xil) hali qo'shilmagan bo'lsa — qo'shadi */
+async function ensureGradeColumns() {
+  for (const sql of [
+    "ALTER TABLE lms_teacher_content ADD COLUMN grade_points INT NULL DEFAULT NULL",
+    "ALTER TABLE lms_teacher_content ADD COLUMN grade_part VARCHAR(20) NULL DEFAULT NULL",
+  ]) {
+    try {
+      await pool.query(sql)
+    } catch (err) {
+      if ((err as { code?: string }).code !== "ER_DUP_FIELDNAME") throw err
+    }
+  }
+}
+
 async function attach(teacherId: number) {
   const existing = await listTeacherContent({ teacherUserId: teacherId, groupId: SINOV_GROUP_ID, subjectName: SINOV_SUBJECT, type: "mavzu" })
   const missing = SINOV_TOPICS.filter((tp) =>
@@ -102,6 +117,7 @@ async function attach(teacherId: number) {
     return
   }
 
+  await ensureGradeColumns()
   await upsertGroups([{ id: SINOV_GROUP_ID, name: SINOV_GROUP_NAME }])
   await addTeacherGroups(teacherId, [SINOV_GROUP_ID])
   for (const [i, tp] of missing.entries()) {
