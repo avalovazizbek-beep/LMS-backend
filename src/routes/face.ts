@@ -5,6 +5,7 @@ import { pool } from "../services/db"
 import { isAdminUser } from "./admin"
 import { studentUserId, teacherUserId } from "../services/teachingStore"
 import { adminOwnersFor, bumpGroupedSafe, notifySafe } from "../services/notificationStore"
+import { logAudit } from "../services/auditLog"
 import type mysql from "mysql2/promise"
 
 const router = Router()
@@ -127,12 +128,19 @@ router.post("/register", async (req: AuthRequest, res: Response) => {
     // prevents one person registering the same face on multiple student
     // accounts (exam-proctoring integrity).
     const [others] = await pool.query<mysql.RowDataPacket[]>(
-      "SELECT descriptors FROM face_registrations WHERE username != ?", [un]
+      "SELECT username, display_name, descriptors FROM face_registrations WHERE username != ?", [un]
     )
     for (const row of others) {
       const otherDescriptors: number[][] = JSON.parse(row.descriptors)
-      const isSamePerson = averageDist(descriptors, otherDescriptors) <= DUPLICATE_THRESHOLD
-      if (isSamePerson) {
+      const dist = averageDist(descriptors, otherDescriptors)
+      if (dist <= DUPLICATE_THRESHOLD) {
+        // Talabaga boshqa hisob kimligi aytilmaydi — admin audit log'dan
+        // qaysi hisob to'sayotganini ko'rib, o'shaning Face ID'sini o'chiradi.
+        void logAudit(req, "face.duplicate_blocked", "face-id", un, {
+          matchedUsername: row.username,
+          matchedName: row.display_name,
+          distance: Number(dist.toFixed(3)),
+        })
         res.status(409).json({
           success: false,
           message: "Bu yuz allaqachon boshqa hisobda ro'yxatdan o'tgan",
