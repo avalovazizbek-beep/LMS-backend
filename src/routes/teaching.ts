@@ -1910,8 +1910,9 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
   }
 
   // Oraliq / mustaqil ish balli — ma'ruza yoki amaliyotning 35 balidan ulush.
-  // Test/topshiriqning o'z maksimal bali berilmasa shu ballga teng qilinadi
-  // (topshiriq 0..ball oralig'ida baholanadi).
+  // Topshiriq 0..ball oralig'ida baholanadi (maksimal bali shu ballga teng);
+  // test esa 100 ballikda yechiladi va jurnalda foizi ballga aylanadi
+  // (10 ballik testda 80% → 8).
   const isMustaqil = (meta.type === "exam" || meta.type === "assignment") && !!meta.topicKey && isMustaqilType(meta.trainingType)
   if (meta.gradePoints !== null && !(isOraliq || isMustaqil)) meta.gradePoints = null
   if (meta.gradePoints !== null) {
@@ -1919,7 +1920,7 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
       res.status(400).json({ success: false, message: `Ball 1 dan ${PART_TOTAL} gacha butun son bo'lishi kerak` })
       return
     }
-    if (meta.maxScore === null) meta.maxScore = meta.gradePoints
+    if (meta.type === "assignment" && meta.maxScore === null) meta.maxScore = meta.gradePoints
   }
   if (isMustaqil && meta.gradePoints !== null) {
     if (!(GRADE_PARTS as readonly string[]).includes(meta.gradePart)) meta.gradePart = LECTURE_PART
@@ -2163,9 +2164,9 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
       res.status(400).json({ success: false, message: error })
       return
     }
-    // Hali hech kim topshirmagan bo'lsa — maksimal ball yangi ballga moslanadi
-    // (eski ball bilan bir xil yoki umuman qo'yilmagan bo'lsa)
-    if (patch.gradePoints != null && patch.maxScore === undefined &&
+    // Topshiriqni hali hech kim topshirmagan bo'lsa — maksimal ball yangi
+    // ballga moslanadi (eski ball bilan bir xil yoki umuman qo'yilmagan bo'lsa)
+    if (existing.type === "assignment" && patch.gradePoints != null && patch.maxScore === undefined &&
       (existing.maxScore == null || existing.maxScore === existing.gradePoints)) {
       const [[row]] = await pool.query<import("mysql2").RowDataPacket[]>(
         "SELECT COUNT(*) AS n FROM lms_submissions WHERE content_id = ?", [existing.id]
