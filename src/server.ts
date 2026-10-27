@@ -26,6 +26,7 @@ import plagiarismRoutes from "./routes/plagiarism"
 import supportRoutes from "./routes/support"
 import photosRoutes from "./routes/photos"
 import zoomRoutes, { zoomWebhookHandler } from "./routes/zoom"
+import { zoomReviewGuard } from "./services/zoomReview"
 import { startNotificationScheduler } from "./services/notificationScheduler"
 import googleMeetRoutes from "./routes/googleMeet"
 import {
@@ -98,6 +99,8 @@ app.use("/uploads", express.static(publicResourcePath(), {
   setHeaders: (res) => res.setHeader("X-Content-Type-Options", "nosniff"),
 }))
 
+// Zoom Marketplace test hisobi faqat Zoom oqimi API'larini ko'radi
+app.use("/api", zoomReviewGuard)
 app.use("/api/auth", authRoutes)
 app.use("/api/users", usersRoutes)
 app.use("/api/groups", groupsRoutes)

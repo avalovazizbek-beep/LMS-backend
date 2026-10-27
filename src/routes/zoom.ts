@@ -14,6 +14,14 @@ import {
   zoomUrlValidationResponse,
   handleZoomDeauthorization,
 } from "../services/zoomService"
+import {
+  isZoomReviewEnabled,
+  checkZoomReviewCredentials,
+  zoomReviewLoginBlocked,
+  recordZoomReviewFailure,
+  ensureZoomReviewSandbox,
+  signZoomReviewToken,
+} from "../services/zoomReview"
 
 const router = Router()
 
@@ -37,13 +45,14 @@ router.get("/callback", async (req, res: Response): Promise<void> => {
   const state = typeof req.query.state === "string" ? req.query.state : ""
   const oauthError = typeof req.query.error === "string" ? req.query.error : ""
 
+  // reason — frontend xabarni foydalanuvchi tilida ko'rsatishi uchun
   if (oauthError) {
-    redirectToProfile(res, { zoom: "error", message: `Zoom ruxsat bermadi: ${oauthError}` })
+    redirectToProfile(res, { zoom: "error", reason: "denied", message: `Zoom ruxsat bermadi: ${oauthError}` })
     return
   }
   const decoded = state ? verifyState(state) : null
   if (!decoded || !code) {
-    redirectToProfile(res, { zoom: "error", message: "So'rov muddati tugagan yoki yaroqsiz. Qaytadan urinib ko'ring." })
+    redirectToProfile(res, { zoom: "error", reason: "expired", message: "So'rov muddati tugagan yoki yaroqsiz. Qaytadan urinib ko'ring." })
     return
   }
 
@@ -60,7 +69,7 @@ router.get("/callback", async (req, res: Response): Promise<void> => {
       ax?.response?.status ?? "",
       ax?.response?.data !== undefined ? JSON.stringify(ax.response.data) : err instanceof Error ? err.message : err
     )
-    redirectToProfile(res, { zoom: "error", message: "Zoom account ulanmadi. Qaytadan urinib ko'ring." })
+    redirectToProfile(res, { zoom: "error", reason: "failed", message: "Zoom account ulanmadi. Qaytadan urinib ko'ring." })
   }
 })
 
@@ -109,6 +118,36 @@ export async function zoomWebhookHandler(req: Request, res: Response): Promise<v
 
   res.status(200).json({ received: true })
 }
+
+/* ── POST /api/integrations/zoom/review-login — Zoom Marketplace
+   tekshiruvchilari uchun test o'qituvchi hisobi (services/zoomReview.ts).
+   .env'da sozlanmagan bo'lsa route yo'qdek 404 qaytaradi. ───────────── */
+router.post("/review-login", async (req: Request, res: Response): Promise<void> => {
+  if (!isZoomReviewEnabled()) {
+    res.status(404).json({ success: false, message: "Not found" })
+    return
+  }
+  const ip = req.ip || "unknown"
+  if (zoomReviewLoginBlocked(ip)) {
+    res.status(429).json({ success: false, message: "Too many failed attempts. Try again in 15 minutes." })
+    return
+  }
+  const login = typeof req.body?.login === "string" ? req.body.login : ""
+  const password = typeof req.body?.password === "string" ? req.body.password : ""
+  if (!checkZoomReviewCredentials(login, password)) {
+    recordZoomReviewFailure(ip)
+    res.status(401).json({ success: false, message: "Wrong username or password" })
+    return
+  }
+  try {
+    await ensureZoomReviewSandbox()
+  } catch (err) {
+    console.error("[zoom review] sandbox guruhni yaratishda xato:", err instanceof Error ? err.message : err)
+    res.status(500).json({ success: false, message: "Test account is temporarily unavailable" })
+    return
+  }
+  res.json({ success: true, token: signZoomReviewToken(), role: "employee" })
+})
 
 router.use(authMiddleware)
 
