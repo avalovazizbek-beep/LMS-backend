@@ -14,6 +14,7 @@ import { recordPlatformSession, type LoginMeta } from "../services/attendanceSto
 import { refreshStudentFromHemis } from "../services/hemisSync"
 import { isSafeFileName, resolveInside, existingFileInside } from "../services/safePath"
 import { isAllowedAppRedirect, isValidCodeChallenge, createMobileHandoff, redeemMobileHandoff, appRedirectUrl } from "../services/mobileAuth"
+import { withSinovControls } from "../services/sinovSandbox"
 import {
   teacherUserId,
   studentUserId,
@@ -3945,7 +3946,8 @@ router.get("/employee/:resource", async (req: AuthRequest, res: Response) => {
       req.user?.employeeHemisBase || HEMIS_EMPLOYEE,
       req.user
     )
-    res.json({ success: true, ...result })
+    // Sinov guruhi HEMIS'da yo'q — uning oraliqlari nazoratlar ro'yxatiga qo'shiladi
+    res.json({ success: true, ...(await withSinovControls(resource, teacherUserId(req.user), result)) })
   } catch (err) {
     res.status(502).json({ success: false, message: extractMessage(err) })
   }

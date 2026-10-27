@@ -18,6 +18,9 @@
  *   orqali ko'rinib turadi — shu sabab uchta bo'sh mavzu yaratiladi.
  * - Guruhda talaba yo'q: jurnal ustunlari (maksimal ballar) ko'rinadi,
  *   talabalar qatori bo'sh bo'ladi.
+ * - Oraliqlar: HEMIS'da bu guruh yo'q, shu sabab backend o'qituvchining
+ *   HEMIS nazoratlar ro'yxatiga "1-on" / "2-on" qatorlarini qo'shadi
+ *   (services/sinovSandbox.ts) — Imtihonlar ro'yxati → Yangi qo'shish.
  */
 import "dotenv/config"
 import type mysql from "mysql2/promise"
@@ -25,10 +28,8 @@ import { pool } from "../src/services/db"
 import {
   addTeacherGroups, createTeacherContent, deleteTeacherContent, listTeacherContent, upsertGroups,
 } from "../src/services/teachingStore"
+import { SINOV_GROUP_ID, SINOV_GROUP_NAME, SINOV_SUBJECT } from "../src/services/sinovSandbox"
 
-const SINOV_GROUP_ID = 990000102
-const SINOV_GROUP_NAME = "SINOV-M-101 (sinov guruhi)"
-const SINOV_SUBJECT = "Sinov fani"
 const SINOV_TOPICS = [
   { title: "1-mavzu (sinov)", trainingType: "Ma'ruza" },
   { title: "1-amaliy mashg'ulot (sinov)", trainingType: "Amaliyot" },
