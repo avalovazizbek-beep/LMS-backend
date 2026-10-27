@@ -76,8 +76,9 @@ function reviewEmployeeProfile() {
     employee_id_number: "ZOOM-REVIEW",
     department: { id: 0, name: "Zoom Marketplace review (test account)" },
     staffPosition: { id: 0, name: "Teacher (test account)" },
-    employeeType: { id: 0, name: "O'qituvchi" },
-    employeeStatus: { id: 0, name: "Faol" },
+    // faqat ko'rsatish uchun — reviewer interfeysni inglizcha ko'radi
+    employeeType: { id: 0, name: "Teacher" },
+    employeeStatus: { id: 0, name: "Active" },
     active: true,
   }
 }
