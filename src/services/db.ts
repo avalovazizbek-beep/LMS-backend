@@ -649,6 +649,10 @@ export async function initDatabase() {
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN completion_points INT NULL DEFAULT NULL`)
   // Moslashuvchan test: talaba javobiga qarab keyingi savol qiyinligi moslashadi
   await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN is_adaptive TINYINT(1) NOT NULL DEFAULT 0 AFTER language`)
+  // Oraliq / mustaqil ish: jurnalda beriladigan ball (ma'ruza yoki amaliyot
+  // 35 balidan ulush) va qaysi qismdan olinishi ("Ma'ruza" / "Amaliyot")
+  await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN grade_points INT NULL DEFAULT NULL`)
+  await execIgnoreDuplicate(`ALTER TABLE lms_teacher_content ADD COLUMN grade_part VARCHAR(20) NULL DEFAULT NULL`)
 
   // ── Talaba progress: video/audio pozitsiyasi va hujjat sahifalari ──
   await exec(`

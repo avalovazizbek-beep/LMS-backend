@@ -412,6 +412,10 @@ export interface TeacherContentRecord {
   durationMinutes: number | null
   trainingLoad: number | null
   completionPoints: number | null
+  /** Oraliq / mustaqil ish: jurnaldagi ball (35 lik qismdan ulush) */
+  gradePoints: number | null
+  /** Mustaqil ish qaysi qismdan: "Ma'ruza" / "Amaliyot" */
+  gradePart: string | null
   lessonDate: string | null
   delivered: boolean
   isActive: boolean
@@ -495,6 +499,8 @@ async function mapContentRow(row: mysql.RowDataPacket): Promise<TeacherContentRe
     durationMinutes: row.duration_minutes == null ? null : Number(row.duration_minutes),
     trainingLoad: row.training_load == null ? null : Number(row.training_load),
     completionPoints: row.completion_points == null ? null : Number(row.completion_points),
+    gradePoints: row.grade_points == null ? null : Number(row.grade_points),
+    gradePart: row.grade_part ?? null,
     lessonDate: row.lesson_date ? toMysqlDateOnly(new Date(row.lesson_date)) : null,
     delivered: Boolean(row.delivered),
     isActive: row.is_active == null ? true : Boolean(row.is_active),
@@ -529,6 +535,8 @@ export interface CreateContentInput {
   language?: string | null
   isAdaptive?: boolean
   completionPoints?: number | null
+  gradePoints?: number | null
+  gradePart?: string | null
   durationMinutes?: number | null
   trainingLoad?: number | null
   lessonDate?: string | null
@@ -542,8 +550,8 @@ export async function createTeacherContent(input: CreateContentInput): Promise<T
     `INSERT INTO lms_teacher_content
       (uuid, type, teacher_user_id, group_id, subject_name, topic_key, title, description, kind, training_type, control_type, resource_type,
        file_name, original_name, mime_type, file_size, relative_path, public_url, meeting_link,
-       available_from, deadline, max_score, attempts_count, question_display_count, language, is_adaptive, duration_minutes, training_load, completion_points, lesson_date, delivered)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       available_from, deadline, max_score, attempts_count, question_display_count, language, is_adaptive, duration_minutes, training_load, completion_points, grade_points, grade_part, lesson_date, delivered)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       uuid,
       input.type,
@@ -574,6 +582,8 @@ export async function createTeacherContent(input: CreateContentInput): Promise<T
       input.durationMinutes ?? null,
       input.trainingLoad ?? null,
       input.completionPoints ?? null,
+      input.gradePoints ?? null,
+      input.gradePart?.trim() || null,
       input.lessonDate ? input.lessonDate.slice(0, 10) : null,
       input.delivered ? 1 : 0,
     ]
@@ -735,6 +745,8 @@ export interface UpdateContentInput {
   language?: string | null
   isAdaptive?: boolean
   completionPoints?: number | null
+  gradePoints?: number | null
+  gradePart?: string | null
   durationMinutes?: number | null
   trainingLoad?: number | null
   lessonDate?: string | null
@@ -800,6 +812,14 @@ export async function updateTeacherContent(id: number, patch: UpdateContentInput
   if (patch.completionPoints !== undefined) {
     sets.push("completion_points = ?")
     params.push(patch.completionPoints)
+  }
+  if (patch.gradePoints !== undefined) {
+    sets.push("grade_points = ?")
+    params.push(patch.gradePoints)
+  }
+  if (patch.gradePart !== undefined) {
+    sets.push("grade_part = ?")
+    params.push(patch.gradePart?.trim() || null)
   }
   if (patch.durationMinutes !== undefined) {
     sets.push("duration_minutes = ?")
@@ -870,6 +890,7 @@ export async function duplicateTeacherContent(
     availableFrom: item.availableFrom, deadline: target.deadline !== undefined ? target.deadline : item.deadline, maxScore: item.maxScore,
     attemptsCount: item.attemptsCount, questionDisplayCount: item.questionDisplayCount,
     language: item.language, isAdaptive: item.isAdaptive, completionPoints: item.completionPoints,
+    gradePoints: item.gradePoints, gradePart: item.gradePart,
     durationMinutes: item.durationMinutes, trainingLoad: item.trainingLoad,
     lessonDate: item.lessonDate, delivered: item.delivered, file,
   })

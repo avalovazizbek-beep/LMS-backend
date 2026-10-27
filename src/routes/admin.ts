@@ -2214,7 +2214,8 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
   const subject = typeof req.query.subject === "string" ? req.query.subject.trim() : ""
   const controlType = typeof req.query.controlType === "string" ? req.query.controlType.trim() : ""
 
-  const where: string[] = ["tc.type = 'exam'", "tc.is_active = 1"]
+  // Oraliq test yoki topshiriq bo'ladi; qolganlari — faqat test
+  const where: string[] = [controlType === "oraliq" ? "tc.type IN ('exam','assignment')" : "tc.type = 'exam'", "tc.is_active = 1"]
   const params: unknown[] = []
   if (groupId) { where.push("tc.group_id = ?"); params.push(groupId) }
   if (subject) { where.push("LOWER(tc.subject_name) = LOWER(?)"); params.push(subject) }
@@ -2222,8 +2223,8 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
   else if (controlType) { where.push("tc.control_type = ?"); params.push(controlType) }
 
   const [rows] = await pool.query<RowDataPacket[]>(`
-    SELECT tc.id, tc.title, tc.subject_name, tc.group_id, g.name AS group_name, tc.control_type, tc.kind,
-           tc.teacher_user_id, tc.max_score, tc.available_from, tc.deadline,
+    SELECT tc.id, tc.type, tc.title, tc.subject_name, tc.group_id, g.name AS group_name, tc.control_type, tc.kind,
+           tc.teacher_user_id, tc.max_score, tc.grade_points, tc.available_from, tc.deadline,
            COALESCE(NULLIF(TRIM(hu.full_name),''), CONCAT('O\\'qituvchi #', tc.teacher_user_id)) AS teacher_name,
            (SELECT COUNT(*) FROM lms_submissions s WHERE s.content_id = tc.id) AS submission_count,
            (SELECT COUNT(*) FROM lms_exam_retake_grants rg WHERE rg.content_id = tc.id AND rg.status = 'active') AS grant_count
@@ -2236,12 +2237,14 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
   `, params)
 
   res.json({ success: true, data: rows.map(r => ({
-    id: Number(r.id), title: String(r.title), subjectName: String(r.subject_name),
+    id: Number(r.id), type: String(r.type), title: String(r.title), subjectName: String(r.subject_name),
     groupId: Number(r.group_id), groupName: r.group_name ? String(r.group_name) : `Guruh ${r.group_id}`,
     controlType: r.control_type ?? null, teacherName: String(r.teacher_name),
     // Oraliqning jurnaldagi o'rni (ON1/ON2) — `kind` ustunida
     slot: r.control_type === "oraliq" && (r.kind === "ON1" || r.kind === "ON2") ? String(r.kind) : null,
     maxScore: r.max_score == null ? null : Number(r.max_score),
+    // Jurnaldagi ball (ma'ruza 35 balidan); eski oraliqlarda null — 17 / 18
+    gradePoints: r.grade_points == null ? null : Number(r.grade_points),
     availableFrom: r.available_from, deadline: r.deadline,
     submissionCount: Number(r.submission_count ?? 0),
     grantCount: Number(r.grant_count ?? 0),
@@ -2254,7 +2257,7 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
 router.get("/oraliq/:id/students", requirePermission("retake", "view"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const exam = Number.isFinite(id) ? await getTeacherContent(id) : null
-  if (!exam || exam.type !== "exam" || !isControlExam(exam.controlType)) {
+  if (!exam || !((exam.type === "exam" && isControlExam(exam.controlType)) || (exam.type === "assignment" && exam.controlType === "oraliq"))) {
     res.status(404).json({ success: false, message: "Nazorat topilmadi" })
     return
   }
@@ -2302,7 +2305,7 @@ router.get("/oraliq/:id/students", requirePermission("retake", "view"), async (r
       exam: {
         id: exam.id, title: exam.title, subjectName: exam.subjectName,
         groupId: exam.groupId, groupName: groupRow?.name ? String(groupRow.name) : `Guruh ${exam.groupId}`,
-        controlType: exam.controlType, slot, maxScore: exam.maxScore, attemptsCount: exam.attemptsCount,
+        type: exam.type, controlType: exam.controlType, slot, maxScore: exam.maxScore, gradePoints: exam.gradePoints, attemptsCount: exam.attemptsCount,
         availableFrom: exam.availableFrom, deadline: exam.deadline, status: exam.status,
         questionCount: exam.questionCount, isActive: exam.isActive,
       },
@@ -2315,7 +2318,7 @@ router.get("/oraliq/:id/students", requirePermission("retake", "view"), async (r
 router.get("/content/:id/submissions", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const content = Number.isFinite(id) ? await getTeacherContent(id) : null
-  if (!content || content.type !== "exam") { res.status(404).json({ success: false, message: "Imtihon topilmadi" }); return }
+  if (!content || !(content.type === "exam" || (content.type === "assignment" && content.controlType === "oraliq"))) { res.status(404).json({ success: false, message: "Imtihon topilmadi" }); return }
   const submissions = await listSubmissions(content.id)
   res.json({ success: true, data: submissions.map(s => ({ ...s, passed: isExamPassed(s.grade, content.maxScore) })) })
 })
@@ -2324,7 +2327,7 @@ router.get("/content/:id/submissions", adminOnly, async (req: AuthRequest, res: 
 router.post("/content/:id/retake-grants", requirePermission("retake", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const content = Number.isFinite(id) ? await getTeacherContent(id) : null
-  if (!content || content.type !== "exam") { res.status(404).json({ success: false, message: "Imtihon topilmadi" }); return }
+  if (!content || !(content.type === "exam" || (content.type === "assignment" && content.controlType === "oraliq"))) { res.status(404).json({ success: false, message: "Imtihon topilmadi" }); return }
 
   const body = req.body as { studentUserIds?: unknown; reason?: string }
   const ids = Array.isArray(body.studentUserIds) ? body.studentUserIds.map(Number).filter(Number.isFinite) : []
