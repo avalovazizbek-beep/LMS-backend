@@ -1,6 +1,7 @@
 import type mysql from "mysql2/promise"
 import { pool, withHemisCache } from "./db"
 import { studentUserId } from "./teachingStore"
+import { SINOV_GROUP_ID } from "./sinovIds"
 import { fetchGroupRoster, type GroupRosterStudent } from "../routes/hemis"
 
 export { normalizeTrainingType } from "./trainingType"
@@ -66,7 +67,8 @@ async function cachedGroupRoster(groupId: number): Promise<GroupRosterStudent[]>
 }
 
 export async function getGroupRoster(groupId: number, subjectName?: string): Promise<RosterStudent[]> {
-  const data = filterEnrolled(await cachedGroupRoster(groupId), subjectName)
+  // Sinov guruhi HEMIS'da yo'q — so'ramaymiz, ro'yxat kirgan sinov talabasidan
+  const data = groupId === SINOV_GROUP_ID ? [] : filterEnrolled(await cachedGroupRoster(groupId), subjectName)
   if (data.length) {
     return sortByFullName(data.map((s) => ({
       studentUserId: studentUserId({ id: s.hemisId }),

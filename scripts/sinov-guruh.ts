@@ -7,7 +7,10 @@
  * topilsa — o'sha). Avval faqat KO'RISH, keyin --apply bilan bajarish:
  *   npx ts-node -P scripts/tsconfig.json scripts/sinov-guruh.ts --teacher "AVALOV AZIZBEK"
  *   npx ts-node -P scripts/tsconfig.json scripts/sinov-guruh.ts --teacher "AVALOV AZIZBEK" --apply
- * Sinov tugagach — guruh va undagi hamma narsani o'chirish:
+ * Sinov talabasi (talaba tomonini ko'rish uchun) — har safar yangi parol
+ * chiqaradi, eskisi ishlamay qoladi; kirish: /sinov-login:
+ *   npx ts-node -P scripts/tsconfig.json scripts/sinov-guruh.ts --student --apply
+ * Sinov tugagach — guruh, sinov talabasi va hamma narsani o'chirish:
  *   npx ts-node -P scripts/tsconfig.json scripts/sinov-guruh.ts --remove --apply
  *
  * - Guruh ID 990000102: HEMIS'da uchramaydigan diapazon (Zoom test hisobi
@@ -24,12 +27,17 @@
  *   (services/sinovSandbox.ts) — Imtihonlar ro'yxati → Yangi qo'shish.
  */
 import "dotenv/config"
+import crypto from "crypto"
 import type mysql from "mysql2/promise"
 import { pool } from "../src/services/db"
+import { recordPlatformSession } from "../src/services/attendanceStore"
 import {
   addTeacherGroups, createTeacherContent, deleteTeacherContent, listTeacherContent, upsertGroups,
 } from "../src/services/teachingStore"
-import { SINOV_GROUP_ID, SINOV_GROUP_NAME, SINOV_SUBJECT } from "../src/services/sinovSandbox"
+import {
+  SINOV_GROUP_ID, SINOV_GROUP_NAME, SINOV_SUBJECT, SINOV_STUDENT_ID, SINOV_STUDENT_LOGIN, SINOV_STUDENT_NAME,
+  SINOV_PASSWORD_SETTING,
+} from "../src/services/sinovSandbox"
 
 const SINOV_TOPICS = [
   { title: "1-mavzu (sinov)", trainingType: "Ma'ruza" },
@@ -38,6 +46,7 @@ const SINOV_TOPICS = [
 
 const apply = process.argv.includes("--apply")
 const remove = process.argv.includes("--remove")
+const student = process.argv.includes("--student")
 
 function argValue(name: string): string | null {
   const i = process.argv.indexOf(name)
@@ -131,6 +140,28 @@ async function attach(teacherId: number) {
   console.log("\nTayyor. LMS'dan chiqib qayta kiring: guruh — SINOV-M-101, fan — Sinov fani.")
 }
 
+/** Sinov talabasi: yangi tasodifiy parol, bazaga faqat sha256 xeshi */
+async function createStudent() {
+  console.log(`\nSinov talabasi: login ${SINOV_STUDENT_LOGIN}, ${SINOV_STUDENT_NAME}, guruh ${SINOV_GROUP_NAME}`)
+  if (!apply) {
+    console.log("KO'RISH rejimi — parol yaratilmadi. Bajarish uchun oxiriga --apply qo'shing.")
+    return
+  }
+  // O'xshash belgilarsiz (0/O, 1/l/I) 12 ta belgi
+  const alphabet = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"
+  const password = Array.from({ length: 12 }, () => alphabet[crypto.randomInt(alphabet.length)]).join("")
+  const hash = crypto.createHash("sha256").update(password, "utf8").digest("hex")
+  await upsertGroups([{ id: SINOV_GROUP_ID, name: SINOV_GROUP_NAME }])
+  await pool.query(
+    "INSERT INTO lms_settings (key_name, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+    [SINOV_PASSWORD_SETTING, hash]
+  )
+  // Kirmasidan oldin ham o'qituvchi jurnalida ko'rinsin
+  await recordPlatformSession(SINOV_STUDENT_ID, SINOV_STUDENT_NAME, SINOV_GROUP_ID, "student")
+  console.log(`\n  Kirish sahifasi: https://lms.sies.uz/sinov-login\n  Login:  ${SINOV_STUDENT_LOGIN}\n  Parol:  ${password}\n`)
+  console.log("Parol faqat hozir ko'rinadi (bazada xeshi). Yangisi kerak bo'lsa — shu buyruqni qayta ishga tushiring.")
+}
+
 async function removeAll() {
   const items = await listTeacherContent({ groupId: SINOV_GROUP_ID })
   const subs = await rows("SELECT COUNT(*) AS n FROM lms_submissions WHERE content_id IN (?)", [items.length ? items.map((i) => i.id) : [null]])
@@ -141,17 +172,28 @@ async function removeAll() {
   }
   for (const item of items) await deleteTeacherContent(item.id)
   await pool.query("DELETE FROM lms_period_grades WHERE group_id = ?", [SINOV_GROUP_ID])
+  await pool.query("DELETE FROM lms_attendance WHERE group_id = ?", [SINOV_GROUP_ID])
   await pool.query("DELETE FROM lms_teacher_groups WHERE group_id = ?", [SINOV_GROUP_ID])
   await pool.query("DELETE FROM lms_groups WHERE id = ?", [SINOV_GROUP_ID])
-  console.log("\nSinov guruhi va undagi hamma narsa o'chirildi.")
+  // Sinov talabasi: kirish huquqi, kirish tarixi, Face ID, bildirishnomalari
+  await pool.query("DELETE FROM lms_settings WHERE key_name = ?", [SINOV_PASSWORD_SETTING])
+  await pool.query("DELETE FROM lms_platform_sessions WHERE user_id = ? AND role = 'student'", [SINOV_STUDENT_ID])
+  await pool.query("DELETE FROM face_registrations WHERE username = ?", [SINOV_STUDENT_LOGIN])
+  await pool.query("DELETE FROM face_requests WHERE username = ?", [SINOV_STUDENT_LOGIN])
+  await pool.query("DELETE FROM lms_notifications WHERE user_role = 'student' AND user_id = ?", [SINOV_STUDENT_ID])
+  console.log("\nSinov guruhi, sinov talabasi va hamma narsa o'chirildi.")
 }
 
 async function main() {
-  if (remove) await removeAll()
-  else {
+  if (remove) {
+    await removeAll()
+    return
+  }
+  if (argValue("--teacher") || !student) {
     const teacherId = await resolveTeacher()
     if (teacherId !== null) await attach(teacherId)
   }
+  if (student) await createStudent()
 }
 
 main()
