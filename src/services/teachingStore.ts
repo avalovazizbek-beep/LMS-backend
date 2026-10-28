@@ -5,6 +5,7 @@ import type mysql from "mysql2/promise"
 import { pool, toMysqlDate, fromMysqlDate } from "./db"
 import { deleteMeetingsForContent, stableNumericId } from "./meetingStore"
 import { normalizeTrainingType } from "./trainingType"
+import { SINOV_GROUP_ID } from "./sinovIds"
 
 export type ContentType =
   | "lesson"
@@ -231,7 +232,9 @@ export async function upsertGroups(groups: SyncedGroup[]) {
 }
 
 export async function replaceTeacherGroups(userId: number, groupIds: number[]) {
-  await pool.query("DELETE FROM lms_teacher_groups WHERE user_id = ?", [userId])
+  // Sinov guruhi HEMIS'da yo'q — har kirishdagi sinxronizatsiya uni
+  // o'chirib yubormasin (faqat scripts/sinov-guruh.ts --remove o'chiradi)
+  await pool.query("DELETE FROM lms_teacher_groups WHERE user_id = ? AND group_id <> ?", [userId, SINOV_GROUP_ID])
   for (const gid of groupIds) {
     await pool.query("INSERT IGNORE INTO lms_teacher_groups (user_id, group_id) VALUES (?, ?)", [userId, gid])
   }

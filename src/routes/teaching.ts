@@ -75,6 +75,7 @@ import {
   PART_TOTAL, GRADE_PARTS, LECTURE_PART, MUSTAQIL_CONTROL,
 } from "../services/periodGrades"
 import { buildGradeJournal } from "../services/gradeJournal"
+import { SINOV_GROUP_ID, SINOV_SUBJECT } from "../services/sinovIds"
 import {
   listQuestions,
   replaceQuestions,
@@ -1108,6 +1109,18 @@ router.get("/my-subjects", async (req: AuthRequest, res: Response): Promise<void
     params
   )
   let data = rows.map(r => ({ groupId: Number(r.group_id), subjectName: String(r.subject_name) }))
+
+  // Sinov guruhi HEMIS'da yo'q — fani kontenti bo'lmasa ham doim ro'yxatda
+  // (HEMIS'ga so'ramaymiz; scripts/sinov-guruh.ts --reset'dan keyin ham)
+  const hasSinov = groupId === SINOV_GROUP_ID ||
+    (groupId === null && (await getTeacherGroupIds(tId)).includes(SINOV_GROUP_ID))
+  if (hasSinov && !data.some(d => d.groupId === SINOV_GROUP_ID && d.subjectName === SINOV_SUBJECT)) {
+    data.push({ groupId: SINOV_GROUP_ID, subjectName: SINOV_SUBJECT })
+  }
+  if (groupId === SINOV_GROUP_ID) {
+    res.json({ success: true, data })
+    return
+  }
 
   // Bu guruhda bazamizda hali kontent yo'q (yangi guruh yoki hali hech narsa
   // yuklanmagan) — "Fan" tanlovini bo'sh/o'chirilgan qoldirmaslik uchun
