@@ -10,6 +10,10 @@
  * Sinov talabasi (talaba tomonini ko'rish uchun) — har safar yangi parol
  * chiqaradi, eskisi ishlamay qoladi; kirish: /sinov-login:
  *   npx ts-node -P scripts/tsconfig.json scripts/sinov-guruh.ts --student --apply
+ * Qaytadan boshlash — guruh, fan, asos mavzular, sinov talabasi (paroli,
+ * Face ID) qoladi; o'qituvchi yaratgan hamma narsa (mavzular, test,
+ * topshiriq, oraliq, mustaqil ish), talaba ishlari, baholar, davomat o'chadi:
+ *   npx ts-node -P scripts/tsconfig.json scripts/sinov-guruh.ts --reset --teacher "AVALOV AZIZBEK" --apply
  * Sinov tugagach — guruh, sinov talabasi va hamma narsani o'chirish:
  *   npx ts-node -P scripts/tsconfig.json scripts/sinov-guruh.ts --remove --apply
  *
@@ -47,6 +51,7 @@ const SINOV_TOPICS = [
 const apply = process.argv.includes("--apply")
 const remove = process.argv.includes("--remove")
 const student = process.argv.includes("--student")
+const reset = process.argv.includes("--reset")
 
 function argValue(name: string): string | null {
   const i = process.argv.indexOf(name)
@@ -162,6 +167,28 @@ async function createStudent() {
   console.log("Parol faqat hozir ko'rinadi (bazada xeshi). Yangisi kerak bo'lsa — shu buyruqni qayta ishga tushiring.")
 }
 
+/** Guruhni bo'shatish: faqat asos mavzular (guruh va fan ko'rinib turishi
+    uchun) qoladi — o'qituvchi yaratgan qolgan hamma narsa o'chadi */
+async function resetContent() {
+  const items = await listTeacherContent({ groupId: SINOV_GROUP_ID })
+  const isAnchor = (c: (typeof items)[number]) =>
+    c.type === "mavzu" && c.kind === "topic" && c.subjectName === SINOV_SUBJECT &&
+    SINOV_TOPICS.some((tp) => tp.title === c.title && tp.trainingType === c.trainingType)
+  const doomed = items.filter((c) => !isAnchor(c))
+  const subs = await rows("SELECT COUNT(*) AS n FROM lms_submissions WHERE content_id IN (?)", [doomed.length ? doomed.map((i) => i.id) : [null]])
+  console.log(`${SINOV_GROUP_NAME}: ${doomed.length} ta o'chiriladigan kontent (mavzu, test, topshiriq, oraliq, mustaqil ish), ${subs[0].n} ta topshirilgan ish`)
+  console.log(`Qoladi: guruh, "${SINOV_SUBJECT}", ${items.length - doomed.length} ta asos mavzu, sinov talabasi (paroli va Face ID)`)
+  if (!apply) {
+    console.log("\nKO'RISH rejimi — hech narsa o'zgarmadi. Bajarish uchun oxiriga --apply qo'shing.")
+    return
+  }
+  for (const item of doomed) await deleteTeacherContent(item.id)
+  await pool.query("DELETE FROM lms_period_grades WHERE group_id = ?", [SINOV_GROUP_ID])
+  await pool.query("DELETE FROM lms_attendance WHERE group_id = ?", [SINOV_GROUP_ID])
+  await pool.query("DELETE FROM lms_notifications WHERE user_role = 'student' AND user_id = ?", [SINOV_STUDENT_ID])
+  console.log("\nTozalandi — oraliq, mustaqil ish va topshiriqlarni qaytadan yaratishingiz mumkin.")
+}
+
 async function removeAll() {
   const items = await listTeacherContent({ groupId: SINOV_GROUP_ID })
   const subs = await rows("SELECT COUNT(*) AS n FROM lms_submissions WHERE content_id IN (?)", [items.length ? items.map((i) => i.id) : [null]])
@@ -189,6 +216,7 @@ async function main() {
     await removeAll()
     return
   }
+  if (reset) await resetContent()
   if (argValue("--teacher") || !student) {
     const teacherId = await resolveTeacher()
     if (teacherId !== null) await attach(teacherId)
