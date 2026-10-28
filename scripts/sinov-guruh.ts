@@ -15,7 +15,8 @@
  * - Nomida "-M-" bor: LMS faqat masofaviy guruhlarni ko'rsatadi.
  * - HEMIS sinxronizatsiyasi o'qituvchining guruhlar ro'yxatini har kirishda
  *   qayta yozadi; guruh o'qituvchida shu guruhdagi mavzulari (kontenti)
- *   orqali ko'rinib turadi — shu sabab uchta bo'sh mavzu yaratiladi.
+ *   orqali ko'rinib turadi — shu sabab ma'ruza va amaliyot uchun bo'sh mavzu
+ *   yaratiladi (mustaqil ish Nazoratlar bo'limida, oraliq bilan bir joyda).
  * - Guruhda talaba yo'q: jurnal ustunlari (maksimal ballar) ko'rinadi,
  *   talabalar qatori bo'sh bo'ladi.
  * - Oraliqlar: HEMIS'da bu guruh yo'q, shu sabab backend o'qituvchining
@@ -33,7 +34,6 @@ import { SINOV_GROUP_ID, SINOV_GROUP_NAME, SINOV_SUBJECT } from "../src/services
 const SINOV_TOPICS = [
   { title: "1-mavzu (sinov)", trainingType: "Ma'ruza" },
   { title: "1-amaliy mashg'ulot (sinov)", trainingType: "Amaliyot" },
-  { title: "1-mustaqil ish (sinov)", trainingType: "Mustaqil ish" },
 ]
 
 const apply = process.argv.includes("--apply")

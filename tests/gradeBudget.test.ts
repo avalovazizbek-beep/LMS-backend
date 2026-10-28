@@ -49,7 +49,7 @@ test("eski ball qo'yilmagan oraliqlar 17 + 18 — ma'ruzada joy qolmaydi", () =>
   const content = [oraliq("ON1", null), oraliq("ON2", null)]
   assert.equal(gradeBudget(content).lecture.used, 35)
   const scale = journalScale(content)
-  assert.deepEqual(scale, { jn: 35, on1: 17, on2: 18, mi: 0, yn: 30 })
+  assert.deepEqual(scale, { jn: 35, on1: 17, on2: 18, mi: 0, lecture: 35, practice: 35, yn: 30 })
 })
 
 test("amaliyot mustaqil ishi JN maksimalini kamaytiradi", () => {
@@ -72,4 +72,22 @@ test("tahrirda o'z eski balli hisobga olinmaydi", () => {
   const content = [on1, oraliq("ON2", 15)]
   assert.equal(budgetError(content, { ...on1, gradePoints: 20 }), null)
   assert.notEqual(budgetError(content, { ...on1, gradePoints: 21 }), null)
+})
+
+test("mustaqil ishlar qism ichida MI-1, MI-2 bo'lib raqamlanadi", async () => {
+  const { miColumns } = await import("../src/services/periodGrades")
+  const [m1, a] = mustaqil(5, "Ma'ruza")
+  const [m2, b] = mustaqil(10, "Ma'ruza")
+  const [m3, c] = mustaqil(8, "Amaliyot")
+  b.availableFrom = "2026-10-02T00:00:00.000Z"
+  const cols = miColumns([m1, a, m2, b, m3, c])
+  assert.deepEqual(cols.map((x) => [x.label, x.part, x.points]), [["MI-1", "Ma'ruza", 5], ["MI-1", "Amaliyot", 8], ["MI-2", "Ma'ruza", 10]])
+})
+
+test("Nazoratlarda yaratilgan mustaqil ish (mavzusiz) ham taqsimotga kiradi", () => {
+  const mi = item({ type: "assignment", controlType: "mustaqil", gradePoints: 15, gradePart: "Ma'ruza" })
+  const content = [oraliq("ON1", 10), oraliq("ON2", 10), mi]
+  assert.equal(gradeBudget(content).lecture.used, 35)
+  assert.notEqual(budgetError(content, item({ type: "exam", controlType: "mustaqil", gradePoints: 1, gradePart: "Ma'ruza" })), null)
+  assert.equal(budgetError(content, item({ type: "exam", controlType: "mustaqil", gradePoints: 35, gradePart: "Amaliyot" })), null)
 })

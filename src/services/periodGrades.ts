@@ -129,7 +129,12 @@ export function miPart(item: Pick<TeacherContentRecord, "gradePart">): string {
   return item.gradePart === PRACTICE_PART ? PRACTICE_PART : LECTURE_PART
 }
 
-/** Mustaqil ish — "Mustaqil ish" turidagi mavzuning ball qo'yilgan test/topshirig'i */
+/** Mustaqil ish nazorati (oraliq bilan bir joyda yaratiladi) — `control_type` */
+export const MUSTAQIL_CONTROL = "mustaqil"
+
+/** Mustaqil ish — ball qo'yilgan test/topshiriq: Nazoratlar bo'limida
+    yaratilgan (control_type = "mustaqil") yoki avval Fan resurslaridagi
+    "Mustaqil ish" turidagi mavzuda yaratilgan */
 export function pickMiItems(content: TeacherContentRecord[]): TeacherContentRecord[] {
   const byTopic = new Map<string, TeacherContentRecord[]>()
   for (const c of content) {
@@ -138,8 +143,8 @@ export function pickMiItems(content: TeacherContentRecord[]): TeacherContentReco
     byTopic.get(c.topicKey)!.push(c)
   }
   return content.filter((c) =>
-    !!c.topicKey && c.isActive && (c.type === "exam" || c.type === "assignment") &&
-    c.gradePoints != null && c.gradePoints > 0 && isMustaqilType(topicTrainingType(byTopic.get(c.topicKey)!)))
+    c.isActive && (c.type === "exam" || c.type === "assignment") && c.gradePoints != null && c.gradePoints > 0 &&
+    (c.topicKey ? isMustaqilType(topicTrainingType(byTopic.get(c.topicKey)!)) : c.controlType === MUSTAQIL_CONTROL))
 }
 
 export interface BudgetItem { id: number; label: string; title: string; type: ContentType; points: number }
@@ -176,7 +181,7 @@ export function budgetError(content: TeacherContentRecord[], candidate: TeacherC
   return null
 }
 
-export interface JournalScale { jn: number; on1: number; on2: number; mi: number; yn: number }
+export interface JournalScale { jn: number; on1: number; on2: number; mi: number; lecture: number; practice: number; yn: number }
 
 /** Jurnal ustunlarining maksimal ballari. Hali yaratilmagan oraliq o'rni
     eski 17 / 18 ni oladi, lekin ma'ruzaning qolgan balidan oshmaydi. */
@@ -196,45 +201,70 @@ export function journalScale(content: TeacherContentRecord[]): JournalScale {
   const mi = [...budget.lecture.items, ...budget.practice.items]
     .filter((i) => i.label === "MI")
     .reduce((s, i) => s + i.points, 0)
-  return { jn: Math.max(0, PART_TOTAL - budget.practice.used), on1, on2, mi, yn: YN_TOTAL }
+  return { jn: Math.max(0, PART_TOTAL - budget.practice.used), on1, on2, mi, lecture: PART_TOTAL, practice: PART_TOTAL, yn: YN_TOTAL }
 }
 
-/** Mustaqil ishlardan to'plangan ball (har biri o'z balliga nisbatan).
+/** Jurnaldagi mustaqil ish ustuni: ma'ruza / amaliyot qismi ichida
+    yaratilish tartibida MI-1, MI-2, ... */
+export interface MiColumn { id: number; label: string; title: string; part: string; points: number }
+
+export function miColumns(content: TeacherContentRecord[]): MiColumn[] {
+  const items = pickMiItems(content).sort((a, b) =>
+    new Date(a.availableFrom).getTime() - new Date(b.availableFrom).getTime() || a.id - b.id)
+  const counters = new Map<string, number>()
+  return items.map((c) => {
+    const part = miPart(c)
+    const n = (counters.get(part) ?? 0) + 1
+    counters.set(part, n)
+    return { id: c.id, label: `MI-${n}`, title: c.title, part, points: c.gradePoints! }
+  })
+}
+
+/** Har bir mustaqil ishdan olingan ball (o'z balliga nisbatan, butun son).
     Muddati o'tgan, topshirilmagan (qayta ochilmagan) ish — 0; muddati
-    tugamagan va hali topshirilmagani hisobga kirmaydi. Hech biri
-    hisobga kirmasa — null. */
-export async function computeMiCells(
+    tugamagan va hali topshirilmagani yoki baholanmagani — null. */
+export async function computeMiScores(
   content: TeacherContentRecord[],
   studentIds: number[],
-): Promise<Map<number, number | null>> {
-  const items = pickMiItems(content).filter((c) => c.type === "assignment" || c.questionCount > 0)
-  const out = new Map<number, number | null>()
-  if (!items.length || !studentIds.length) {
-    for (const sId of studentIds) out.set(sId, null)
-    return out
-  }
+): Promise<Map<number, Record<number, number | null>>> {
+  const items = pickMiItems(content)
+  const out = new Map<number, Record<number, number | null>>()
+  for (const sId of studentIds) out.set(sId, {})
+  if (!items.length || !studentIds.length) return out
+
   const ids = items.map((c) => c.id)
   const [subs, grants] = await Promise.all([getSubmissionsBulk(ids, studentIds), getActiveGrantKeys(ids)])
   const subMap = new Map(subs.map((s) => [`${s.contentId}:${s.studentUserId}`, s]))
   const reopened = new Set(content.filter((c) => c.type === "mavzu" && c.kind === "topic" && c.isReopened).map((c) => c.topicKey))
   const now = Date.now()
+  // Savolsiz testni talaba yecha olmaydi — topshirmaganga 0 qo'yilmaydi
+  const takeable = (c: TeacherContentRecord) => c.type === "assignment" || c.questionCount > 0
   const closed = (c: TeacherContentRecord) =>
     !!c.deadline && new Date(c.deadline).getTime() < now && !reopened.has(c.topicKey)
 
   for (const sId of studentIds) {
-    let total = 0
-    let counted = false
+    const row = out.get(sId)!
     for (const c of items) {
       const sub = subMap.get(`${c.id}:${sId}`)
       const pct = sub ? examPct(sub.grade, c.maxScore) : null
-      if (pct != null) {
-        total += (pct * c.gradePoints!) / 100
-        counted = true
-      } else if (!sub && closed(c) && !grants.has(`${c.id}:${sId}`)) {
-        counted = true
-      }
+      if (pct != null) row[c.id] = Math.round((pct * c.gradePoints!) / 100)
+      else if (!sub && takeable(c) && closed(c) && !grants.has(`${c.id}:${sId}`)) row[c.id] = 0
+      else row[c.id] = null
     }
-    out.set(sId, counted ? Math.round(total) : null)
+  }
+  return out
+}
+
+/** Mustaqil ishlar yig'indisi (talabaning o'z sahifasi uchun); hech biri hisobga kirmasa — null */
+export async function computeMiCells(
+  content: TeacherContentRecord[],
+  studentIds: number[],
+): Promise<Map<number, number | null>> {
+  const scores = await computeMiScores(content, studentIds)
+  const out = new Map<number, number | null>()
+  for (const [sId, row] of scores) {
+    const values = Object.values(row).filter((v): v is number => v != null)
+    out.set(sId, values.length ? values.reduce((a, b) => a + b, 0) : null)
   }
   return out
 }

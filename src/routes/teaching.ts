@@ -71,8 +71,8 @@ import {
   type SubmissionRecord,
 } from "../services/teachingStore"
 import {
-  computePeriodCells, computeMiCells, normalizeGrade, gradeBudget, budgetError, journalScale,
-  isMustaqilType, PART_TOTAL, GRADE_PARTS, LECTURE_PART, type PeriodKey,
+  computePeriodCells, computeMiCells, computeMiScores, miColumns, normalizeGrade, gradeBudget, budgetError, journalScale,
+  isMustaqilType, PART_TOTAL, GRADE_PARTS, LECTURE_PART, MUSTAQIL_CONTROL, type PeriodKey,
 } from "../services/periodGrades"
 import {
   listQuestions,
@@ -169,6 +169,11 @@ const EXAM_PASS_RATIO = 0.6   // 60% — test o'tish chegarasi (keyingi mavzuni 
 const GRADE_SCALE = { jn: 35, on1: 17, on2: 18, mi: 0, yn: 30 } as const
 const JN_TRAINING_TYPE = "Amaliyot"
 
+function sumOrNull(values: (number | null)[]): number | null {
+  const known = values.filter((v): v is number => v != null)
+  return known.length ? known.reduce((a, b) => a + b, 0) : null
+}
+
 function toScaleBall(pct: number, max: number): number {
   return Math.round((Math.min(100, Math.max(0, pct)) * max) / 100)
 }
@@ -186,6 +191,11 @@ const LECTURE_ONLY_MESSAGE = "Oraliq nazoratni faqat shu guruhga bu fandan ma'ru
 async function oraliqSlotTaken(groupId: number, subjectName: string, slot: string, exceptId?: number): Promise<TeacherContentRecord | null> {
   const items = await listTeacherContent({ groupId, subjectName, isActive: true })
   return items.find((c) => isOraliqItem(c) && c.kind === slot && c.id !== exceptId) ?? null
+}
+
+/** Mustaqil ish nazorati — oraliq bilan bir joyda (Nazoratlar) yaratiladi, mavzusiz */
+function isMustaqilControlItem(c: { type: ContentType | null; controlType: string | null }): boolean {
+  return (c.type === "exam" || c.type === "assignment") && c.controlType === MUSTAQIL_CONTROL
 }
 
 /** Oraliq nazorat test yoki topshiriq ko'rinishida bo'ladi */
@@ -1901,7 +1911,8 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
   // (o'qituvchi son qo'ymasa — 1 ta); oraliqda ON1/ON2 o'rni tanlanadi va uni
   // faqat ma'ruza o'qituvchisi yaratadi
   const isOraliq = isOraliqItem(meta)
-  if ((meta.type === "exam" && isControlExam(meta.controlType)) || isOraliq) {
+  const isMustaqilControl = isMustaqilControlItem(meta)
+  if ((meta.type === "exam" && isControlExam(meta.controlType)) || isOraliq || isMustaqilControl) {
     if (!meta.deadline || new Date(meta.deadline).getTime() <= new Date(meta.availableFrom).getTime()) {
       res.status(400).json({ success: false, message: "Nazorat uchun tugash vaqti majburiy va ochilish vaqtidan keyin bo'lishi kerak" })
       return
@@ -1913,7 +1924,12 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
   // Topshiriq 0..ball oralig'ida baholanadi (maksimal bali shu ballga teng);
   // test esa 100 ballikda yechiladi va jurnalda foizi ballga aylanadi
   // (10 ballik testda 80% → 8).
-  const isMustaqil = (meta.type === "exam" || meta.type === "assignment") && !!meta.topicKey && isMustaqilType(meta.trainingType)
+  const isMustaqil = isMustaqilControl ||
+    ((meta.type === "exam" || meta.type === "assignment") && !!meta.topicKey && isMustaqilType(meta.trainingType))
+  if (isMustaqilControl && meta.gradePoints === null) {
+    res.status(400).json({ success: false, message: `Mustaqil ish uchun ball kiriting (1 dan ${PART_TOTAL} gacha)` })
+    return
+  }
   if (meta.gradePoints !== null && !(isOraliq || isMustaqil)) meta.gradePoints = null
   if (meta.gradePoints !== null) {
     if (!Number.isInteger(meta.gradePoints) || meta.gradePoints < 1 || meta.gradePoints > PART_TOTAL) {
@@ -2132,7 +2148,7 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
   if ("delivered" in body) patch.delivered = boolValue(body.delivered)
   if ("isActive" in body) patch.isActive = boolValue(body.isActive)
 
-  if ((existing.type === "exam" && isControlExam(existing.controlType)) || isOraliqItem(existing)) {
+  if ((existing.type === "exam" && isControlExam(existing.controlType)) || isOraliqItem(existing) || isMustaqilControlItem(existing)) {
     if (existing.type === "exam" && "attemptsCount" in body && !(patch.attemptsCount && patch.attemptsCount > 0)) patch.attemptsCount = 1
     if ("deadline" in body && !patch.deadline) {
       res.status(400).json({ success: false, message: "Nazorat uchun tugash vaqti majburiy" })
@@ -2141,8 +2157,8 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
   }
 
   // Oraliq / mustaqil ish balli (va mustaqil ishning ma'ruza/amaliyot qismi)
-  const isMustaqilItem = (existing.type === "exam" || existing.type === "assignment") && !!existing.topicKey &&
-    isMustaqilType(existing.trainingType ?? (await findTopicMarker(existing.topicKey))?.trainingType)
+  const isMustaqilItem = isMustaqilControlItem(existing) || ((existing.type === "exam" || existing.type === "assignment") && !!existing.topicKey &&
+    isMustaqilType(existing.trainingType ?? (await findTopicMarker(existing.topicKey))?.trainingType))
   if ((isOraliqItem(existing) || isMustaqilItem) && "gradePoints" in body) {
     const points = numberValue(body.gradePoints)
     if (points !== null && (!Number.isInteger(points) || points < 1 || points > PART_TOTAL)) {
@@ -2471,7 +2487,7 @@ router.post("/content/:id/copy-to-groups", async (req: AuthRequest, res: Respons
   const id = numberValue(req.params.id)
   const source = id !== null ? await getTeacherContent(id) : null
   const tId = teacherUserId(req.user)
-  if (!source || source.teacherUserId !== tId || !((source.type === "exam" && isControlExam(source.controlType)) || isOraliqItem(source))) {
+  if (!source || source.teacherUserId !== tId || !((source.type === "exam" && isControlExam(source.controlType)) || isOraliqItem(source) || isMustaqilControlItem(source))) {
     res.status(404).json({ success: false, message: "Nazorat topilmadi" })
     return
   }
@@ -2495,7 +2511,7 @@ router.post("/content/:id/copy-to-groups", async (req: AuthRequest, res: Respons
     availableFrom: source.availableFrom, deadline: source.deadline,
     maxScore: source.maxScore, attemptsCount: source.attemptsCount,
     questionDisplayCount: source.questionDisplayCount, isAdaptive: source.isAdaptive,
-    durationMinutes: source.durationMinutes, gradePoints: source.gradePoints,
+    durationMinutes: source.durationMinutes, gradePoints: source.gradePoints, gradePart: source.gradePart,
   }
   let created = 0
   let updated = 0
@@ -2508,13 +2524,13 @@ router.post("/content/:id/copy-to-groups", async (req: AuthRequest, res: Respons
     }
     const target = source.controlType === "oraliq"
       ? await oraliqSlotTaken(gid, source.subjectName, source.kind ?? "")
-      : (await listTeacherContent({ type: "exam", teacherUserId: tId, groupId: gid, subjectName: source.subjectName, isActive: true }))
+      : (await listTeacherContent({ type: source.type, teacherUserId: tId, groupId: gid, subjectName: source.subjectName, isActive: true }))
           .find((c) => c.controlType === source.controlType && c.title.trim().toLowerCase() === source.title.trim().toLowerCase()) ?? null
     if (target && target.type !== source.type) {
       skipped.push({ groupId: gid, reason: `Bu guruhda ${source.kind ?? ""} boshqa ko'rinishda (test/topshiriq) bor` }); continue
     }
-    // Oraliq balli nishon guruhdagi ma'ruza taqsimotiga ham sig'ishi kerak
-    if (source.controlType === "oraliq") {
+    // Oraliq / mustaqil ish balli nishon guruhdagi 35 ballik taqsimotga ham sig'ishi kerak
+    if (source.controlType === "oraliq" || source.controlType === MUSTAQIL_CONTROL) {
       const error = await checkGradeBudget({ ...(target ?? source), id: target?.id ?? -1, groupId: gid, gradePoints: source.gradePoints })
       if (error) { skipped.push({ groupId: gid, reason: error }); continue }
     }
@@ -3611,7 +3627,8 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
     })
   const topics = journalTopics.map(({ key, title, maxScore }, i) => ({ key, idx: i + 1, title, maxScore }))
   const scale = journalScale(allContent)
-  const meta = { scale, untypedTopicCount }
+  // Mustaqil ishlar har biri alohida ustun (ma'ruza / amaliyot qismi ichida MI-1, MI-2...)
+  const meta = { scale, untypedTopicCount, miColumns: miColumns(allContent) }
 
   const roster = await getGroupRoster(groupId, subjectName)
   if (!roster.length) {
@@ -3624,11 +3641,11 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
 
   // ON1/ON2/YN — oraliq/yakuniy nazorat testlari (mavzusiz) va qo'lda
   // kiritilgan baholardan, services/periodGrades.ts qoidalari bo'yicha
-  const [progressList, submissionList, periodCells, miCells, attList] = await Promise.all([
+  const [progressList, submissionList, periodCells, miScores, attList] = await Promise.all([
     getProgressBulk(contentIds, studentIds),
     getSubmissionsBulk(contentIds, studentIds),
     computePeriodCells(groupId, subjectName, allContent, studentIds),
-    computeMiCells(allContent, studentIds),
+    computeMiScores(allContent, studentIds),
     getAttendanceSummary(groupId, subjectName),
   ])
 
@@ -3687,8 +3704,9 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
       jn,
       on1: ball("ON1", scale.on1),
       on2: ball("ON2", scale.on2),
-      // Mustaqil ishlar — har biri o'z balli bilan, yig'indisi
-      mi:  miCells.get(s.studentUserId) ?? null,
+      // Mustaqil ishlar: har biridan olingan ball (ustun id'si bo'yicha) va yig'indisi
+      miScores: miScores.get(s.studentUserId) ?? {},
+      mi:  sumOrNull(Object.values(miScores.get(s.studentUserId) ?? {})),
       yn:  ball("YN", scale.yn),
       // Katak qayerdan kelgani: test / qo'lda / topshirmagan (0)
       periodSource: {
