@@ -500,6 +500,16 @@ export async function recordPlatformSession(
   role: string,
   meta?: LoginMeta
 ): Promise<number> {
+  // Yangi kirish — chiqilmay qolgan oldingi sessiyalar oxirgi faollik vaqtida
+  // yopiladi ("Hali chiqmagan" qatorlari to'planib qolmasin). Faollik signali
+  // umuman kelmagan (eski) sessiyaga tegilmaydi — chiqishi kirishiga teng
+  // bo'lib qolmasin. last_seen_at'ni o'ziga tenglaymiz — aks holda ON UPDATE
+  // uni hozirgi vaqtga surardi.
+  await pool.query(
+    `UPDATE lms_platform_sessions SET logout_at = last_seen_at, last_seen_at = last_seen_at
+     WHERE user_id = ? AND role = ? AND logout_at IS NULL AND last_seen_at > login_at`,
+    [userId, role]
+  )
   const [result] = await pool.query<mysql.ResultSetHeader>(
     `INSERT INTO lms_platform_sessions (user_id, full_name, group_id, role, ip_address, user_agent)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -522,17 +532,28 @@ export async function listUserSessions(userId: number, role: string, limit = 50)
   }))
 }
 
-export async function updateLastSeen(sessionId: number): Promise<void> {
+/* Sessiya oxiri: frontend tizimda turgan foydalanuvchi uchun har ~2 daqiqada
+   "hali shu yerda" yuboradi (last_seen_at), chiqishda (tugma yoki 30 daqiqa
+   harakatsizlik) — sessiyani yopadi (logout_at). Brauzer shunchaki yopilsa
+   chiqish vaqti oxirgi signal (last_seen_at) bo'ladi. */
+
+/** Foydalanuvchining eng so'nggi ochiq sessiyasi — hali tizimda */
+export async function touchLatestSession(userId: number, role: string): Promise<void> {
   await pool.query(
-    "UPDATE lms_platform_sessions SET last_seen_at = NOW() WHERE id = ?",
-    [sessionId]
+    `UPDATE lms_platform_sessions SET last_seen_at = NOW()
+     WHERE user_id = ? AND role = ? AND logout_at IS NULL
+     ORDER BY login_at DESC LIMIT 1`,
+    [userId, role]
   )
 }
 
-export async function closeSession(sessionId: number): Promise<void> {
+/** Chiqish: eng so'nggi ochiq sessiya yopiladi */
+export async function closeLatestSession(userId: number, role: string): Promise<void> {
   await pool.query(
-    "UPDATE lms_platform_sessions SET logout_at = NOW() WHERE id = ? AND logout_at IS NULL",
-    [sessionId]
+    `UPDATE lms_platform_sessions SET logout_at = NOW(), last_seen_at = NOW()
+     WHERE user_id = ? AND role = ? AND logout_at IS NULL
+     ORDER BY login_at DESC LIMIT 1`,
+    [userId, role]
   )
 }
 

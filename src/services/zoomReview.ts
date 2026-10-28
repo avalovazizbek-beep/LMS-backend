@@ -124,6 +124,7 @@ const ALLOWED: Array<[method: string, path: RegExp]> = [
   ["GET", /^\/teaching\/(groups|exam-settings|certificate|certificate\/template)$/],
   ["POST", /^\/teaching\/certificate\/seen$/],
   ["GET", /^\/auth\/me$/],
+  ["POST", /^\/auth\/(heartbeat|logout)$/],
   ["GET", /^\/admin\/check$/],
   ["*", /^\/notifications(\/|$)/],
   ["GET", /^\/photos\/me$/],

@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs"
 import jwt from "jsonwebtoken"
 import { users } from "../db/data"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
-import { listUserSessions } from "../services/attendanceStore"
+import { listUserSessions, touchLatestSession, closeLatestSession } from "../services/attendanceStore"
 import { studentUserId, teacherUserId } from "../services/teachingStore"
 
 const router = Router()
@@ -27,6 +27,30 @@ router.get("/login-history", authMiddleware, async (req: AuthRequest, res: Respo
 })
 
 // POST /api/auth/login
+/* POST /api/auth/heartbeat — tizimda turgan foydalanuvchi (har ~2 daqiqada,
+   tab ochiq va faol bo'lsa): sessiyaning oxirgi faollik vaqti. "Kirish
+   tarixi"dagi chiqish vaqti va platformada o'tkazilgan daqiqalar shundan. */
+router.post("/heartbeat", authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
+  const user = req.user
+  if (!user) { res.status(401).json({ success: false }); return }
+  const isStudent = user.role === "student"
+  try {
+    await touchLatestSession(isStudent ? studentUserId(user) : teacherUserId(user), isStudent ? "student" : "employee")
+  } catch { /* signal yozilmasa ham ish to'xtamaydi */ }
+  res.json({ success: true })
+})
+
+/* POST /api/auth/logout — "Chiqish" yoki 30 daqiqa harakatsizlik: sessiya yopiladi */
+router.post("/logout", authMiddleware, async (req: AuthRequest, res: Response): Promise<void> => {
+  const user = req.user
+  if (!user) { res.status(401).json({ success: false }); return }
+  const isStudent = user.role === "student"
+  try {
+    await closeLatestSession(isStudent ? studentUserId(user) : teacherUserId(user), isStudent ? "student" : "employee")
+  } catch { /* yopilmasa ham chiqish davom etadi */ }
+  res.json({ success: true })
+})
+
 router.post("/login", (req: Request, res: Response): void => {
   const { username, password } = req.body
   if (!username || !password) {
