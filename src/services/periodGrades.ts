@@ -159,9 +159,11 @@ export function gradeBudget(content: TeacherContentRecord[]): GradeBudget {
     const e = exams[slot]
     if (e) lecture.push({ id: e.id, label: slot, title: e.title, type: e.type, points: slotPoints(e, slot) })
   }
-  for (const c of pickMiItems(content)) {
-    const item = { id: c.id, label: "MI", title: c.title, type: c.type, points: c.gradePoints! }
-    if (miPart(c) === PRACTICE_PART) practice.push(item)
+  // Mustaqil ishlar jurnaldagi kabi: qism ichida yaratilish tartibida MI-1, MI-2...
+  const byId = new Map(content.map((c) => [c.id, c]))
+  for (const col of miColumns(content)) {
+    const item = { id: col.id, label: col.label, title: col.title, type: byId.get(col.id)!.type, points: col.points }
+    if (col.part === PRACTICE_PART) practice.push(item)
     else lecture.push(item)
   }
   const part = (items: BudgetItem[]): BudgetPart => ({ total: PART_TOTAL, used: items.reduce((s, i) => s + i.points, 0), items })
@@ -199,7 +201,7 @@ export function journalScale(content: TeacherContentRecord[]): JournalScale {
   const on1 = on("ON1")
   const on2 = on("ON2")
   const mi = [...budget.lecture.items, ...budget.practice.items]
-    .filter((i) => i.label === "MI")
+    .filter((i) => i.label.startsWith("MI"))
     .reduce((s, i) => s + i.points, 0)
   return { jn: Math.max(0, PART_TOTAL - budget.practice.used), on1, on2, mi, lecture: PART_TOTAL, practice: PART_TOTAL, yn: YN_TOTAL }
 }
