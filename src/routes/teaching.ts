@@ -71,9 +71,10 @@ import {
   type SubmissionRecord,
 } from "../services/teachingStore"
 import {
-  computePeriodCells, computeMiCells, computeMiScores, miColumns, normalizeGrade, gradeBudget, budgetError, journalScale,
-  isMustaqilType, PART_TOTAL, GRADE_PARTS, LECTURE_PART, MUSTAQIL_CONTROL, type PeriodKey,
+  computePeriodCells, computeMiCells, normalizeGrade, gradeBudget, budgetError, journalScale,
+  isMustaqilType, PART_TOTAL, GRADE_PARTS, LECTURE_PART, MUSTAQIL_CONTROL,
 } from "../services/periodGrades"
+import { buildGradeJournal } from "../services/gradeJournal"
 import {
   listQuestions,
   replaceQuestions,
@@ -110,7 +111,6 @@ import {
   getStudentAttendance,
   getGroupSessions,
   getStudentSessions,
-  getAttendanceSummary,
   todayDateOnly,
   isAttendanceSheetSaved,
   getLatestEditRequest,
@@ -161,22 +161,10 @@ const CONTENT_TYPES: ContentType[] = ["lesson", "assignment", "exam", "mavzu", "
 const EXAM_PASS_RATIO = 0.6   // 60% — test o'tish chegarasi (keyingi mavzuni ochish uchun)
 
 // Institut baholash tuzilishi: amaliyot 35 (JN + amaliyotdan mustaqil ishlar)
-// + ma'ruza 35 (ON1 + ON2 + ma'ruzadan mustaqil ishlar) = 70 (umumiy), YN 30
-// → jami 100. Ma'ruza/amaliyot ichidagi taqsimotni o'qituvchi qo'yadi
-// (services/periodGrades.ts, journalScale); eski standart — JN 35, ON1 17,
-// ON2 18. Jurnal ballarni shu maksimallarga nisbatan butun son qilib beradi
-// (32.3 → 32, 33.6 → 34).
+// + ma'ruza 35 (ON1 + ON2 + ma'ruzadan mustaqil ishlar) = 70 (joriy), YN 30
+// → jami 100 (jurnal: services/gradeJournal.ts). Telegram xabaridagi
+// maksimallar jurnal sahifasidan keladi; bu — eski standart zaxira.
 const GRADE_SCALE = { jn: 35, on1: 17, on2: 18, mi: 0, yn: 30 } as const
-const JN_TRAINING_TYPE = "Amaliyot"
-
-function sumOrNull(values: (number | null)[]): number | null {
-  const known = values.filter((v): v is number => v != null)
-  return known.length ? known.reduce((a, b) => a + b, 0) : null
-}
-
-function toScaleBall(pct: number, max: number): number {
-  return Math.round((Math.min(100, Math.max(0, pct)) * max) / 100)
-}
 
 /* Oraliq nazoratni faqat shu fandan ma'ruza o'qiydigan o'qituvchi o'tkazadi.
    Turi HEMIS jadvali va o'qituvchining mavzularidan aniqlanadi; hech narsa
@@ -3592,133 +3580,26 @@ router.get("/grade-journal", async (req: AuthRequest, res: Response): Promise<vo
     return
   }
 
-  // Fanning barcha o'qituvchilari kontenti — amaliyot domlasining JN'i va
-  // ma'ruza domlasining oraliq nazorati bitta qatorda yig'iladi (talaba ham
-  // mavzularni shu tarzda, o'qituvchidan qat'i nazar ko'radi).
-  const allContent = await listTeacherContent({ groupId, subjectName })
+  // Fanning barcha o'qituvchilari kontenti bitta jurnalda (services/gradeJournal.ts)
+  res.json({ success: true, data: await buildGradeJournal(groupId, subjectName) })
+})
 
-  const topicMap = new Map<string, TeacherContentRecord[]>()
-  for (const c of allContent) {
-    if (!c.topicKey) continue
-    if (!topicMap.has(c.topicKey)) topicMap.set(c.topicKey, [])
-    topicMap.get(c.topicKey)!.push(c)
-  }
-
-  // JN faqat amaliyot mavzularidagi test/topshiriqdan. Ma'ruza testlari
-  // faqat keyingi mavzuni ochish uchun — ball bermaydi; ma'ruza bahosi
-  // oraliq nazorat orqali qo'yiladi. Savolsiz test talabaga ko'rinmaydi.
-  const now = Date.now()
-  let untypedTopicCount = 0
-  const journalTopics = Array.from(topicMap.entries())
-    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
-    .flatMap(([key, items]) => {
-      const graded = items.filter(c => (c.type === "exam" && c.questionCount > 0) || c.type === "assignment")
-      if (!graded.length) return []
-      const type = topicTrainingType(items)
-      if (type === null) untypedTopicCount++
-      if (type !== JN_TRAINING_TYPE) return []
-      const marker = items.find(c => c.type === "mavzu" && c.kind === "topic")
-      const maxScore = graded.reduce((s, c) => s + (c.maxScore && c.maxScore > 0 ? c.maxScore : 100), 0)
-      // Muddati o'tgan (va qayta ochilmagan) mavzuni topshirmagan talaba 0 oladi;
-      // muddati hali tugamagan mavzu esa JN'ni tushirmaydi.
-      const closed = !marker?.isReopened &&
-        graded.every(c => c.deadline != null && new Date(c.deadline).getTime() < now)
-      return [{ key, title: marker?.title ?? graded[0].title, maxScore, graded, closed }]
-    })
-  const topics = journalTopics.map(({ key, title, maxScore }, i) => ({ key, idx: i + 1, title, maxScore }))
-  const scale = journalScale(allContent)
-  // Mustaqil ishlar har biri alohida ustun (ma'ruza / amaliyot qismi ichida MI-1, MI-2...)
-  const meta = { scale, untypedTopicCount, miColumns: miColumns(allContent) }
-
-  const roster = await getGroupRoster(groupId, subjectName)
-  if (!roster.length) {
-    res.json({ success: true, data: { topics, students: [], ...meta } })
+/* ── GET /my-journal?subject= — talabaning o'z baholari jurnaldagi
+   ko'rinishda: ma'ruza (oraliqlar, mustaqil ishlar), amaliyot (har
+   topshiriqdan olgan bali), joriy, yakuniy, ball ───────────────────── */
+router.get("/my-journal", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role === "employee") {
+    res.status(403).json({ success: false, message: "Faqat talaba uchun" })
     return
   }
-
-  const contentIds = Array.from(new Set(journalTopics.flatMap(tp => tp.graded.map(c => c.id))))
-  const studentIds = roster.map(s => s.studentUserId)
-
-  // ON1/ON2/YN — oraliq/yakuniy nazorat testlari (mavzusiz) va qo'lda
-  // kiritilgan baholardan, services/periodGrades.ts qoidalari bo'yicha
-  const [progressList, submissionList, periodCells, miScores, attList] = await Promise.all([
-    getProgressBulk(contentIds, studentIds),
-    getSubmissionsBulk(contentIds, studentIds),
-    computePeriodCells(groupId, subjectName, allContent, studentIds),
-    computeMiScores(allContent, studentIds),
-    getAttendanceSummary(groupId, subjectName),
-  ])
-
-  // Lookup maps
-  const progressMap = new Map<string, boolean>()
-  for (const p of progressList) progressMap.set(`${p.contentId}:${p.studentUserId}`, p.completed)
-
-  const subMap = new Map<string, number | null>()
-  for (const s of submissionList) subMap.set(`${s.contentId}:${s.studentUserId}`, s.grade)
-
-  const attMap = new Map<number, number>()
-  for (const a of attList) {
-    attMap.set(a.studentUserId, a.total > 0 ? Math.round((a.present / a.total) * 100) : 0)
+  const subjectName = textValue(req.query.subject)
+  const groupId = studentGroupId(req.user)
+  if (!subjectName || groupId === null) {
+    res.status(400).json({ success: false, message: "subject majburiy" })
+    return
   }
-
-  const students = roster.map(s => {
-    const topicScores: Record<string, number | null> = {}
-
-    // Har bir mavzu 100 ballik (foiz) ko'rinishga keltiriladi, o'rtachasi
-    // JN maksimaliga (35) nisbatan butun ballga aylantiriladi.
-    let pctSum = 0
-    let counted = 0
-    for (const tp of journalTopics) {
-      let earned = 0
-      let graded = false
-      let pending = false
-      for (const c of tp.graded) {
-        const key = `${c.id}:${s.studentUserId}`
-        if (!subMap.has(key)) continue
-        const g = subMap.get(key)
-        if (g == null) { pending = true; continue }   // topshirilgan, hali baholanmagan
-        earned += normalizeGrade(g, c.maxScore)
-        graded = true
-      }
-      topicScores[tp.key] = graded ? earned : null
-      if (graded) {
-        pctSum += Math.min(100, (earned / tp.maxScore) * 100)
-        counted++
-      } else if (!pending && tp.closed) {
-        counted++
-      }
-    }
-    const jn = counted > 0 ? toScaleBall(pctSum / counted, scale.jn) : null
-
-    const cells = periodCells.get(s.studentUserId)
-    const ball = (key: PeriodKey, max: number) => {
-      const pct = cells?.[key].pct
-      return pct == null ? null : toScaleBall(pct, max)
-    }
-
-    return {
-      userId: s.studentUserId,
-      fullName: s.fullName,
-      studentIdNumber: s.studentIdNumber ?? null,
-      topicScores,
-      jn,
-      on1: ball("ON1", scale.on1),
-      on2: ball("ON2", scale.on2),
-      // Mustaqil ishlar: har biridan olingan ball (ustun id'si bo'yicha) va yig'indisi
-      miScores: miScores.get(s.studentUserId) ?? {},
-      mi:  sumOrNull(Object.values(miScores.get(s.studentUserId) ?? {})),
-      yn:  ball("YN", scale.yn),
-      // Katak qayerdan kelgani: test / qo'lda / topshirmagan (0)
-      periodSource: {
-        on1: cells?.ON1.source ?? null,
-        on2: cells?.ON2.source ?? null,
-        yn:  cells?.YN.source ?? null,
-      },
-      attendancePct: attMap.get(s.studentUserId) ?? null,
-    }
-  })
-
-  res.json({ success: true, data: { topics, students, ...meta } })
+  const me = { studentUserId: studentUserId(req.user), fullName: fullNameOf(req.user), studentIdNumber: null }
+  res.json({ success: true, data: await buildGradeJournal(groupId, subjectName, [me]) })
 })
 
 /* ── POST /period-grade — ON1/ON2/YN bahosini saqlash ───────────────── */

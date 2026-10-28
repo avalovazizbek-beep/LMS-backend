@@ -160,9 +160,8 @@ export function gradeBudget(content: TeacherContentRecord[]): GradeBudget {
     if (e) lecture.push({ id: e.id, label: slot, title: e.title, type: e.type, points: slotPoints(e, slot) })
   }
   // Mustaqil ishlar jurnaldagi kabi: qism ichida yaratilish tartibida MI-1, MI-2...
-  const byId = new Map(content.map((c) => [c.id, c]))
   for (const col of miColumns(content)) {
-    const item = { id: col.id, label: col.label, title: col.title, type: byId.get(col.id)!.type, points: col.points }
+    const item = { id: col.id, label: col.label, title: col.title, type: col.type, points: col.points }
     if (col.part === PRACTICE_PART) practice.push(item)
     else lecture.push(item)
   }
@@ -208,7 +207,7 @@ export function journalScale(content: TeacherContentRecord[]): JournalScale {
 
 /** Jurnaldagi mustaqil ish ustuni: ma'ruza / amaliyot qismi ichida
     yaratilish tartibida MI-1, MI-2, ... */
-export interface MiColumn { id: number; label: string; title: string; part: string; points: number }
+export interface MiColumn { id: number; label: string; title: string; part: string; points: number; type: ContentType }
 
 export function miColumns(content: TeacherContentRecord[]): MiColumn[] {
   const items = pickMiItems(content).sort((a, b) =>
@@ -218,7 +217,7 @@ export function miColumns(content: TeacherContentRecord[]): MiColumn[] {
     const part = miPart(c)
     const n = (counters.get(part) ?? 0) + 1
     counters.set(part, n)
-    return { id: c.id, label: `MI-${n}`, title: c.title, part, points: c.gradePoints! }
+    return { id: c.id, label: `MI-${n}`, title: c.title, part, points: c.gradePoints!, type: c.type }
   })
 }
 
