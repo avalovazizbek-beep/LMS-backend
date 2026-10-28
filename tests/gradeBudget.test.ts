@@ -19,11 +19,11 @@ function item(fields: Partial<TeacherContentRecord>): TeacherContentRecord {
 }
 const oraliq = (kind: "ON1" | "ON2", gradePoints: number | null, type: "exam" | "assignment" = "exam") =>
   item({ type, controlType: "oraliq", kind, gradePoints })
+/** Nazoratlarda yaratilgan mustaqil ish (mavzusiz) + taqsimotga ta'siri yo'q ma'ruza mavzusi */
 function mustaqil(gradePoints: number, gradePart: string, type: "exam" | "assignment" = "assignment") {
-  const topicKey = `mi-${nextId}`
   return [
-    item({ type: "mavzu", kind: "topic", topicKey, trainingType: "Mustaqil ish" }),
-    item({ type, topicKey, trainingType: "Mustaqil ish", gradePoints, gradePart }),
+    item({ type: "mavzu", kind: "topic", topicKey: `t-${nextId}`, trainingType: "Ma'ruza" }),
+    item({ type, controlType: "mustaqil", gradePoints, gradePart }),
   ]
 }
 
@@ -33,7 +33,7 @@ test("ON1 10 + ON2 15 → bitta ma'ruza mustaqil ishiga 10 ball qoladi", () => {
   const [marker, mi] = mustaqil(10, "Ma'ruza")
   assert.equal(budgetError([...content, marker], mi), null)
   const [, tooMuch] = mustaqil(11, "Ma'ruza")
-  assert.match(budgetError([...content, marker], { ...tooMuch, topicKey: marker.topicKey }) ?? "", /10 ball qolgan/)
+  assert.match(budgetError([...content, marker], tooMuch) ?? "", /10 ball qolgan/)
 })
 
 test("ikkita mustaqil ish 5 balldan sig'adi, uchinchisi sig'maydi", () => {
@@ -90,4 +90,10 @@ test("Nazoratlarda yaratilgan mustaqil ish (mavzusiz) ham taqsimotga kiradi", ()
   assert.equal(gradeBudget(content).lecture.used, 35)
   assert.notEqual(budgetError(content, item({ type: "exam", controlType: "mustaqil", gradePoints: 1, gradePart: "Ma'ruza" })), null)
   assert.equal(budgetError(content, item({ type: "exam", controlType: "mustaqil", gradePoints: 35, gradePart: "Amaliyot" })), null)
+})
+
+test("Fan resurslaridagi eski \"Mustaqil ish\" mavzusi (ball qo'yilgan bo'lsa ham) hisobga kirmaydi", () => {
+  const marker = item({ type: "mavzu", kind: "topic", topicKey: "old-mi", trainingType: "Mustaqil ish" })
+  const old = item({ type: "assignment", topicKey: "old-mi", trainingType: "Mustaqil ish", gradePoints: 10, gradePart: "Ma'ruza" })
+  assert.equal(gradeBudget([oraliq("ON1", 10), marker, old]).lecture.used, 10)
 })

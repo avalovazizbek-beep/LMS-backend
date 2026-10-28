@@ -72,7 +72,7 @@ import {
 } from "../services/teachingStore"
 import {
   computePeriodCells, computeMiCells, normalizeGrade, gradeBudget, budgetError, journalScale,
-  isMustaqilType, PART_TOTAL, GRADE_PARTS, LECTURE_PART, MUSTAQIL_CONTROL,
+  PART_TOTAL, GRADE_PARTS, LECTURE_PART, MUSTAQIL_CONTROL,
 } from "../services/periodGrades"
 import { buildGradeJournal } from "../services/gradeJournal"
 import {
@@ -1912,8 +1912,7 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
   // Topshiriq 0..ball oralig'ida baholanadi (maksimal bali shu ballga teng);
   // test esa 100 ballikda yechiladi va jurnalda foizi ballga aylanadi
   // (10 ballik testda 80% → 8).
-  const isMustaqil = isMustaqilControl ||
-    ((meta.type === "exam" || meta.type === "assignment") && !!meta.topicKey && isMustaqilType(meta.trainingType))
+  const isMustaqil = isMustaqilControl
   if (isMustaqilControl && meta.gradePoints === null) {
     res.status(400).json({ success: false, message: `Mustaqil ish uchun ball kiriting (1 dan ${PART_TOTAL} gacha)` })
     return
@@ -2145,8 +2144,7 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
   }
 
   // Oraliq / mustaqil ish balli (va mustaqil ishning ma'ruza/amaliyot qismi)
-  const isMustaqilItem = isMustaqilControlItem(existing) || ((existing.type === "exam" || existing.type === "assignment") && !!existing.topicKey &&
-    isMustaqilType(existing.trainingType ?? (await findTopicMarker(existing.topicKey))?.trainingType))
+  const isMustaqilItem = isMustaqilControlItem(existing)
   if ((isOraliqItem(existing) || isMustaqilItem) && "gradePoints" in body) {
     const points = numberValue(body.gradePoints)
     if (points !== null && (!Number.isInteger(points) || points < 1 || points > PART_TOTAL)) {

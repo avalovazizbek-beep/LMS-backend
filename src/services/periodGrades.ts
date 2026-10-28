@@ -1,4 +1,4 @@
-import { getSubmissionsBulk, getPeriodGrades, topicTrainingType, ORALIQ_SLOTS, type TeacherContentRecord, type ContentType } from "./teachingStore"
+import { getSubmissionsBulk, getPeriodGrades, ORALIQ_SLOTS, type TeacherContentRecord, type ContentType } from "./teachingStore"
 import { getActiveGrantKeys } from "./retakeStore"
 
 /* ── Davriy baholar (ON1 / ON2 / YN) ──────────────────────────────────
@@ -117,10 +117,6 @@ export const GRADE_PARTS = [LECTURE_PART, PRACTICE_PART] as const
 type OraliqSlot = (typeof ORALIQ_SLOTS)[number]
 const LEGACY_SLOT_POINTS: Record<OraliqSlot, number> = { ON1: 17, ON2: 18 }
 
-export function isMustaqilType(trainingType: string | null | undefined): boolean {
-  return /mustaqil/i.test(trainingType ?? "")
-}
-
 export function slotPoints(exam: TeacherContentRecord, slot: OraliqSlot): number {
   return exam.gradePoints ?? LEGACY_SLOT_POINTS[slot]
 }
@@ -132,19 +128,15 @@ export function miPart(item: Pick<TeacherContentRecord, "gradePart">): string {
 /** Mustaqil ish nazorati (oraliq bilan bir joyda yaratiladi) — `control_type` */
 export const MUSTAQIL_CONTROL = "mustaqil"
 
-/** Mustaqil ish — ball qo'yilgan test/topshiriq: Nazoratlar bo'limida
-    yaratilgan (control_type = "mustaqil") yoki avval Fan resurslaridagi
-    "Mustaqil ish" turidagi mavzuda yaratilgan */
+/** Mustaqil ish — Nazoratlar bo'limida (oraliq bilan bir joyda) yaratilgan,
+    ball qo'yilgan test/topshiriq (control_type = "mustaqil", mavzusiz).
+    Fan resurslaridagi eski "Mustaqil ish" mavzulari hisobga kirmaydi:
+    ma'ruzaga yoki amaliyotga tegishli ekani noma'lum — kerak bo'lsa
+    o'qituvchi uni Nazoratlarda qayta yaratadi. */
 export function pickMiItems(content: TeacherContentRecord[]): TeacherContentRecord[] {
-  const byTopic = new Map<string, TeacherContentRecord[]>()
-  for (const c of content) {
-    if (!c.topicKey) continue
-    if (!byTopic.has(c.topicKey)) byTopic.set(c.topicKey, [])
-    byTopic.get(c.topicKey)!.push(c)
-  }
   return content.filter((c) =>
-    c.isActive && (c.type === "exam" || c.type === "assignment") && c.gradePoints != null && c.gradePoints > 0 &&
-    (c.topicKey ? isMustaqilType(topicTrainingType(byTopic.get(c.topicKey)!)) : c.controlType === MUSTAQIL_CONTROL))
+    c.isActive && !c.topicKey && c.controlType === MUSTAQIL_CONTROL &&
+    (c.type === "exam" || c.type === "assignment") && c.gradePoints != null && c.gradePoints > 0)
 }
 
 export interface BudgetItem { id: number; label: string; title: string; type: ContentType; points: number }
