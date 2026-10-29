@@ -936,7 +936,7 @@ router.use(authMiddleware)
    foydalanuvchi o'qiy oladi, faqat admin panelida o'zgartirish mumkin. ── */
 router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
   const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
-    "SELECT key_name, value FROM lms_settings WHERE key_name IN ('face_block_threshold', 'test_max_attempts', 'attendance_mode')"
+    "SELECT key_name, value FROM lms_settings WHERE key_name IN ('face_block_threshold', 'test_max_attempts', 'attendance_mode', 'face_practice_required')"
   )
   const raw: Record<string, string> = {}
   for (const r of rows) raw[String(r.key_name)] = String(r.value)
@@ -948,6 +948,8 @@ router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
       faceBlockThreshold: Number.isFinite(faceBlockThreshold) && faceBlockThreshold > 0 ? faceBlockThreshold : 5,
       testMaxAttempts: Number.isFinite(testMaxAttempts) && testMaxAttempts > 0 ? testMaxAttempts : null,
       attendanceMode: raw.attendance_mode === "manual" ? "manual" : "auto",
+      // Oraliq / mustaqil ish testidan oldin "Yuzni sinab ko'rish" majburiymi
+      facePracticeRequired: raw.face_practice_required !== "0",
     },
   })
 })

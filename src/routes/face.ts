@@ -193,6 +193,72 @@ router.post("/verify", async (req: AuthRequest, res: Response) => {
   }
 })
 
+/* ── Yuzni sinab ko'rish (demo test) ─────────────────────────────────
+   Talaba oraliqdan oldin kamera va Face ID ishlashini sinaydi: imtihondagi
+   nazorat ishlaydi, lekin testdan chiqarmaydi — faqat ogohlantiradi.
+   Natija "sinovdan o'tganmi" ni bilish uchun saqlanadi; o'tish qoidasi
+   haqiqiy imtihondagi bilan bir xil (yuz tasdiqlandi va xatoliklar
+   chegaraga yetmadi), shuning uchun server uni o'zi qayta hisoblaydi. */
+export const PRACTICE_ISSUES = ["camera", "not_registered", "not_verified", "mismatch", "multi_face", "no_face", "fullscreen", "tab_blur"] as const
+const BLOCKING_ISSUES = new Set(["camera", "not_registered", "not_verified"])
+
+export function practicePassed(input: { passed: boolean; violations: number; maxViolations: number; issues: string[] }): boolean {
+  return input.passed && input.violations < input.maxViolations && !input.issues.some(i => BLOCKING_ISSUES.has(i))
+}
+
+async function practiceStatus(un: string) {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT MAX(CASE WHEN passed = 1 THEN created_at END) AS last_passed_at, MAX(created_at) AS last_at, COUNT(*) AS runs
+       FROM face_practice_runs WHERE username = ?`, [un]
+  )
+  const r = rows[0] ?? {}
+  const ms = (v: unknown) => (v ? new Date(v as string).getTime() : null)
+  return { passed: !!r.last_passed_at, lastPassedAt: ms(r.last_passed_at), lastAt: ms(r.last_at), runs: Number(r.runs ?? 0) }
+}
+
+/* ── GET /api/face/practice ───────────────────────────────────────── */
+router.get("/practice", async (req: AuthRequest, res: Response) => {
+  const un = identityKey(req)
+  if (!un) { res.status(401).json({ success: false }); return }
+  try {
+    res.json({ success: true, data: await practiceStatus(un) })
+  } catch {
+    res.status(500).json({ success: false, message: "DB xatolik" })
+  }
+})
+
+/* ── POST /api/face/practice ──────────────────────────────────────── */
+router.post("/practice", async (req: AuthRequest, res: Response) => {
+  const un = identityKey(req)
+  if (!un) { res.status(401).json({ success: false }); return }
+
+  const body = req.body as { passed?: unknown; violations?: unknown; maxViolations?: unknown; confidence?: unknown; issues?: unknown }
+  const violations = Number(body.violations)
+  const maxViolations = Number(body.maxViolations)
+  const confidence = body.confidence == null ? null : Number(body.confidence)
+  if (typeof body.passed !== "boolean" || !Number.isInteger(violations) || violations < 0 || violations > 100 ||
+      !Number.isInteger(maxViolations) || maxViolations < 1 || maxViolations > 20 ||
+      (confidence !== null && (!Number.isFinite(confidence) || confidence < 0 || confidence > 100)) ||
+      !Array.isArray(body.issues)) {
+    res.status(400).json({ success: false, message: "Sinov natijasi noto'g'ri" }); return
+  }
+  const known = new Set<string>(PRACTICE_ISSUES)
+  const issues = [...new Set(body.issues.map(String).filter(i => known.has(i)))]
+  const passed = practicePassed({ passed: body.passed, violations, maxViolations, issues })
+
+  try {
+    await pool.query(
+      `INSERT INTO face_practice_runs (username, passed, violations, max_violations, confidence, issues, user_agent)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [un, passed ? 1 : 0, violations, maxViolations, confidence === null ? null : Math.round(confidence),
+        issues.join(",") || null, String(req.headers["user-agent"] ?? "").slice(0, 255) || null]
+    )
+    res.json({ success: true, data: { ...(await practiceStatus(un)), passedNow: passed } })
+  } catch {
+    res.status(500).json({ success: false, message: "DB xatolik" })
+  }
+})
+
 /* ── POST /api/face/re-register-request ──────────────────────────── */
 router.post("/re-register-request", async (req: AuthRequest, res: Response) => {
   const un = identityKey(req)

@@ -133,6 +133,23 @@ export async function initDatabase() {
   // chiqishi (kim boshlagani) frontendda qaysi xabar ko'rsatilishini aniqlaydi.
   await execIgnoreDuplicate(`ALTER TABLE face_requests ADD COLUMN initiated_by ENUM('student','admin') NOT NULL DEFAULT 'student' AFTER reason`)
 
+  // "Yuzni sinab ko'rish" — oraliqdan oldingi demo test natijalari (baho emas):
+  // kamera / Face ID muammosi imtihon kuni emas, oldindan chiqsin (2026-10-28)
+  await exec(`
+    CREATE TABLE IF NOT EXISTS face_practice_runs (
+      id             INT AUTO_INCREMENT PRIMARY KEY,
+      username       VARCHAR(255) NOT NULL,
+      passed         TINYINT(1)   NOT NULL DEFAULT 0,
+      violations     INT          NOT NULL DEFAULT 0,
+      max_violations INT          NOT NULL DEFAULT 0,
+      confidence     INT          NULL,
+      issues         VARCHAR(500) NULL,
+      user_agent     VARCHAR(255) NULL,
+      created_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_face_practice_user (username, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
   // ── Meeting users ──
   await exec(`
     CREATE TABLE IF NOT EXISTS lms_groups (
@@ -1286,6 +1303,7 @@ export async function initDatabase() {
   await pool.query(`
     INSERT IGNORE INTO lms_settings (key_name, value) VALUES
       ('face_block_threshold', '3'),
+      ('face_practice_required', '1'),
       ('test_max_attempts', '1'),
       ('attendance_mode', 'auto'),
       ('certificate_auto', '1'),

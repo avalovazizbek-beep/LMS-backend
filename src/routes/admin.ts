@@ -1011,7 +1011,7 @@ router.get("/settings", adminOnly, async (_req: AuthRequest, res: Response): Pro
 router.put("/settings", requirePermission("settings", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const updates = req.body as Record<string, unknown>
   const allowed = new Set([
-    "face_block_threshold", "test_max_attempts", "meeting_attendance_minutes", "attendance_mode",
+    "face_block_threshold", "face_practice_required", "test_max_attempts", "meeting_attendance_minutes", "attendance_mode",
     "certificate_auto", "certificate_topic_goal", "certificate_parts",
     "platform_attendance_minutes", "platform_meeting_percent",
     TELEGRAM_CHAT_KEY,
@@ -1037,7 +1037,7 @@ router.put("/settings", requirePermission("settings", "edit"), async (req: AuthR
   for (const [key, val] of Object.entries(updates)) {
     if (!allowed.has(key)) continue
     let value = String(val ?? "").trim()
-    if (key === "certificate_auto") value = value === "0" || value === "false" ? "0" : "1"
+    if (key === "certificate_auto" || key === "face_practice_required") value = value === "0" || value === "false" ? "0" : "1"
     if (key === "platform_attendance_minutes" || key === "platform_meeting_percent") {
       const n = Number(value)
       const max = key === "platform_meeting_percent" ? 100 : 600
