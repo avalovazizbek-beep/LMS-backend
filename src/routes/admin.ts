@@ -61,6 +61,8 @@ import {
 import { normalizeTrainingType } from "../services/trainingType"
 import { photoFromProfile } from "../services/photoStore"
 import { getVideoTranscodeStatus } from "../services/videoTranscode"
+import { SINOV_GROUP_ID, SINOV_STUDENT_ID, SINOV_SUBJECT } from "../services/sinovIds"
+import { ZOOM_REVIEW_GROUP_ID, ZOOM_REVIEW_TEACHER_ID } from "../services/zoomReview"
 
 const router = Router()
 router.use(authMiddleware)
@@ -494,45 +496,39 @@ router.get("/audit-log", requirePermission("permissions", "view"), async (req: A
   res.json({ success: true, data: await listAuditLog({ limit, actorHemisId, module }) })
 })
 
-/* ── GET /api/admin/stats ───────────────────────────────────────────── */
-router.get("/stats", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
-  const [[counts]] = await Promise.all([
-    pool.query<RowDataPacket[]>(`
-      SELECT
-        (SELECT COUNT(*) FROM hemis_users WHERE role='student') AS total_students,
-        (SELECT COUNT(*) FROM hemis_users WHERE role='employee') AS total_employees,
-        (SELECT COUNT(*) FROM lms_permissions WHERE lms_role='admin') AS granted_admins,
-        (SELECT COUNT(*) FROM lms_teacher_content WHERE is_active=1) AS total_content,
-        (SELECT COUNT(*) FROM lms_teacher_content WHERE is_active=1 AND (kind LIKE '%video%' OR resource_type='video')) AS total_videos,
-        (SELECT COUNT(*) FROM lms_meetings) AS total_meetings,
-        (SELECT COUNT(*) FROM face_requests WHERE status='pending') AS face_pending,
-        (SELECT COUNT(*) FROM lms_submissions) AS total_submissions,
-        (SELECT COUNT(*) FROM lms_content_progress WHERE completed=1) AS total_completions,
-        (SELECT COUNT(*) FROM lms_submissions WHERE grade IS NOT NULL) AS graded_submissions,
-        (SELECT COUNT(*) FROM face_registrations) AS face_registered,
-        (SELECT COUNT(DISTINCT user_id) FROM lms_platform_sessions WHERE role='student' AND login_at >= NOW() - INTERVAL 30 DAY) AS active_students_30d
-    `),
-  ])
+/* ── Statistika faqat haqiqiy ma'lumotdan ──────────────────────────────
+   Sinov guruhi (oraliqni sinab ko'rish), Zoom test hisobi va eski demo
+   ("Demo fan", DEMO- guruhlar) yozuvlari hisobotlarga kirmaydi. */
+const DEMO_GROUP_IDS = [SINOV_GROUP_ID, ZOOM_REVIEW_GROUP_ID]
+const DEMO_USER_IDS = [SINOV_STUDENT_ID, ZOOM_REVIEW_TEACHER_ID]
+const REAL_CONTENT_SQL = `tc.group_id NOT IN (${DEMO_GROUP_IDS.join(",")})
+  AND tc.teacher_user_id <> ${ZOOM_REVIEW_TEACHER_ID}
+  AND tc.subject_name NOT IN ('Demo fan', '${SINOV_SUBJECT}')
+  AND NOT EXISTS (SELECT 1 FROM lms_groups dg WHERE dg.id = tc.group_id AND dg.name LIKE BINARY 'DEMO-%')`
+// Faqat sinov/test guruhlariga biriktirilgan meeting (haqiqiy guruhga ham ulangani sanaladi)
+const REAL_MEETING_SQL = `m.created_by_user_id <> ${ZOOM_REVIEW_TEACHER_ID}
+  AND NOT (
+    EXISTS (SELECT 1 FROM lms_meeting_groups mg WHERE mg.meeting_id = m.id AND mg.group_id IN (${DEMO_GROUP_IDS.join(",")}))
+    AND NOT EXISTS (SELECT 1 FROM lms_meeting_groups mg WHERE mg.meeting_id = m.id AND mg.group_id NOT IN (${DEMO_GROUP_IDS.join(",")}))
+  )`
 
-  const row = (counts as RowDataPacket[])[0] ?? {}
-  res.json({
-    success: true,
-    data: {
-      totalStudents: Number(row.total_students ?? 0),
-      totalEmployees: Number(row.total_employees ?? 0),
-      grantedAdmins: Number(row.granted_admins ?? 0),
-      totalContent: Number(row.total_content ?? 0),
-      totalVideos: Number(row.total_videos ?? 0),
-      totalMeetings: Number(row.total_meetings ?? 0),
-      facePending: Number(row.face_pending ?? 0),
-      totalSubmissions: Number(row.total_submissions ?? 0),
-      totalCompletions: Number(row.total_completions ?? 0),
-      gradedSubmissions: Number(row.graded_submissions ?? 0),
-      faceRegistered: Number(row.face_registered ?? 0),
-      activeStudents30d: Number(row.active_students_30d ?? 0),
-    },
-  })
-})
+/* Material haqiqatda bo'lsagina sanaladi (Tashakkurnoma hisobi bilan bir xil):
+   video/audio/taqdimot/qo'llanma — fayli bor, YouTube — havolasi bor, test —
+   savoli bor (savolsiz test talabaga ko'rinmaydi), topshiriq — fayli yoki
+   matni bor. Bo'sh qoldirilgan qism hech qayerda son bo'lib chiqmaydi. */
+const HAS_FILE_SQL = `(tc.file_name IS NOT NULL OR EXISTS (SELECT 1 FROM lms_teacher_content_files f WHERE f.content_id = tc.id))`
+const MATERIAL_SQL = `CASE
+    WHEN tc.type = 'mavzu' AND tc.kind = 'topic' THEN NULL
+    WHEN tc.kind = 'video_lesson' AND ${HAS_FILE_SQL} THEN 'video'
+    WHEN tc.kind = 'audio'        AND ${HAS_FILE_SQL} THEN 'audio'
+    WHEN tc.kind = 'theory'       AND ${HAS_FILE_SQL} THEN 'taqdimot'
+    WHEN tc.kind = 'qollanma'     AND ${HAS_FILE_SQL} THEN 'qollanma'
+    WHEN tc.kind = 'youtube' AND TRIM(IFNULL(tc.meeting_link, '')) <> '' THEN 'youtube'
+    WHEN tc.type = 'exam' AND tc.topic_key IS NOT NULL
+         AND EXISTS (SELECT 1 FROM lms_exam_questions q WHERE q.content_id = tc.id) THEN 'test'
+    WHEN tc.type = 'assignment' AND tc.topic_key IS NOT NULL
+         AND (${HAS_FILE_SQL} OR TRIM(IFNULL(tc.description, '')) <> '') THEN 'topshiriq'
+  END`
 
 /* Mavzuning "shaxsi" — fan + mashg'ulot turi + nom (marker'dan, marker yo'q
    bo'lsa qismning o'zidan). O'qituvchi sahifasidagi birlashtirish bilan bir
@@ -541,7 +537,81 @@ const TOPIC_IDENTITY_SQL = `CONCAT(tc.subject_name, '|', IFNULL(COALESCE(mk.trai
 // Mavzular mashg'ulot turi bo'yicha (ma'ruza/amaliyot/mustaqil ish) ham
 // sanaladi; turi belgilanmaganlar = jami − shu uchtasi.
 const TOPIC_TYPE_SQL = `COALESCE(mk.training_type, tc.training_type)`
-const TOPIC_PART_SQL = `tc.topic_key IS NOT NULL AND NOT (tc.type='mavzu' AND tc.kind='topic')`
+
+/** O'qituvchi bo'yicha kontent soni — noyob MAVZU (fan + tur + nom) bo'yicha:
+    bir mavzu 4 guruhda bo'lsa — 1 mavzu, videosi bo'lsa — 1 video. Mavzu
+    kamida bitta haqiqiy materiali bo'lsa sanaladi. */
+async function teacherContentCounts(): Promise<RowDataPacket[]> {
+  const [rows] = await pool.query<RowDataPacket[]>(`
+    SELECT
+      x.tid,
+      COUNT(DISTINCT CASE WHEN x.material IS NOT NULL AND x.in_topic THEN x.topic END) AS mavzular,
+      COUNT(DISTINCT CASE WHEN x.material IS NOT NULL AND x.in_topic AND x.ttype = 'Ma''ruza'      THEN x.topic END) AS mavzu_maruza,
+      COUNT(DISTINCT CASE WHEN x.material IS NOT NULL AND x.in_topic AND x.ttype = 'Amaliyot'     THEN x.topic END) AS mavzu_amaliyot,
+      COUNT(DISTINCT CASE WHEN x.material IS NOT NULL AND x.in_topic AND x.ttype = 'Mustaqil ish' THEN x.topic END) AS mavzu_mustaqil,
+      COUNT(DISTINCT CASE WHEN x.material = 'video'     THEN x.topic END) AS videolar,
+      COUNT(DISTINCT CASE WHEN x.material = 'audio'     THEN x.topic END) AS audiolar,
+      COUNT(DISTINCT CASE WHEN x.material = 'taqdimot'  THEN x.topic END) AS taqdimotlar,
+      COUNT(DISTINCT CASE WHEN x.material = 'qollanma'  THEN x.topic END) AS qollanmalar,
+      COUNT(DISTINCT CASE WHEN x.material = 'youtube'   THEN x.topic END) AS youtube,
+      COUNT(DISTINCT CASE WHEN x.material = 'test'      THEN x.topic END) AS testlar,
+      COUNT(DISTINCT CASE WHEN x.material = 'topshiriq' THEN x.topic END) AS topshiriqlar,
+      COUNT(DISTINCT x.group_id) AS guruhlar
+    FROM (
+      SELECT tc.teacher_user_id AS tid, tc.group_id, tc.topic_key IS NOT NULL AS in_topic,
+             ${TOPIC_IDENTITY_SQL} AS topic, ${TOPIC_TYPE_SQL} AS ttype, ${MATERIAL_SQL} AS material
+        FROM lms_teacher_content tc
+        -- Qism qaysi mavzuga tegishli (nom/tur marker'dan) — TOPIC_IDENTITY_SQL uchun
+        LEFT JOIN lms_teacher_content mk
+          ON mk.topic_key = tc.topic_key AND mk.type = 'mavzu' AND mk.kind = 'topic'
+         AND mk.teacher_user_id = tc.teacher_user_id
+       WHERE tc.is_active = 1 AND ${REAL_CONTENT_SQL}
+    ) x
+    GROUP BY x.tid
+  `)
+  return rows
+}
+
+/* ── GET /api/admin/stats — bosh sahifa: foydalanuvchilar, faollik va
+   kontent (O'qituvchi hisobotidagi qoida bilan, sinov/demo'siz) ──────── */
+router.get("/stats", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
+  const demoUsers = DEMO_USER_IDS.join(",")
+  const [[counts], contentRows] = await Promise.all([
+    pool.query<RowDataPacket[]>(`
+      SELECT
+        (SELECT COUNT(*) FROM hemis_users WHERE role='student' AND hemis_id NOT IN (${DEMO_USER_IDS.map(id => `'${id}'`).join(",")})) AS total_students,
+        (SELECT COUNT(DISTINCT role, user_id) FROM lms_platform_sessions
+          WHERE login_at >= CURDATE() AND user_id NOT IN (${demoUsers})) AS today_users,
+        (SELECT COUNT(DISTINCT role, user_id) FROM lms_platform_sessions
+          WHERE logout_at IS NULL AND last_seen_at >= NOW() - INTERVAL 5 MINUTE AND user_id NOT IN (${demoUsers})) AS online_now,
+        (SELECT COUNT(*) FROM face_requests WHERE status='pending') AS face_pending
+    `),
+    teacherContentCounts(),
+  ])
+
+  const row = (counts as RowDataPacket[])[0] ?? {}
+  // Har o'qituvchining mavzulari alohida — yig'indi takrorsiz jami
+  const sum = (key: string) => contentRows.reduce((acc, r) => acc + Number(r[key] ?? 0), 0)
+  res.json({
+    success: true,
+    data: {
+      totalStudents: Number(row.total_students ?? 0),
+      // O'qituvchi hisobotidagi ro'yxat bilan bir xil
+      totalTeachers: contentRows.length,
+      todayUsers: Number(row.today_users ?? 0),
+      onlineNow: Number(row.online_now ?? 0),
+      facePending: Number(row.face_pending ?? 0),
+      content: {
+        topics: sum("mavzular"),
+        videos: sum("videolar"),
+        presentations: sum("taqdimotlar"),
+        guides: sum("qollanmalar"),
+        tests: sum("testlar"),
+        assignments: sum("topshiriqlar"),
+      },
+    },
+  })
+})
 
 /* ── GET /api/admin/teacher-stats ──────────────────────────────────── */
 router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
@@ -593,30 +663,8 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
   // bilan (indekssiz) bog'lanardi — ma'lumot ko'paygan sari sahifa
   // daqiqalab yuklanardi. Natija o'sha-o'sha.
 
-  // 1) Kontent ko'rsatkichlari — noyob MAVZU (fan + tur + nom) bo'yicha:
-  //    bir mavzu 4 guruhda bo'lsa — 1 mavzu, videosi bo'lsa — 1 video.
-  const [contentRows] = await pool.query<RowDataPacket[]>(`
-    SELECT
-      tc.teacher_user_id AS tid,
-      COUNT(DISTINCT CASE WHEN tc.topic_key IS NOT NULL AND NOT (tc.type='mavzu' AND tc.kind='topic') THEN ${TOPIC_IDENTITY_SQL} END) AS mavzular,
-      COUNT(DISTINCT CASE WHEN ${TOPIC_PART_SQL} AND ${TOPIC_TYPE_SQL} = 'Ma''ruza'      THEN ${TOPIC_IDENTITY_SQL} END) AS mavzu_maruza,
-      COUNT(DISTINCT CASE WHEN ${TOPIC_PART_SQL} AND ${TOPIC_TYPE_SQL} = 'Amaliyot'     THEN ${TOPIC_IDENTITY_SQL} END) AS mavzu_amaliyot,
-      COUNT(DISTINCT CASE WHEN ${TOPIC_PART_SQL} AND ${TOPIC_TYPE_SQL} = 'Mustaqil ish' THEN ${TOPIC_IDENTITY_SQL} END) AS mavzu_mustaqil,
-      COUNT(DISTINCT CASE WHEN tc.kind='video_lesson' THEN ${TOPIC_IDENTITY_SQL} END) AS videolar,
-      COUNT(DISTINCT CASE WHEN tc.kind='audio'        THEN ${TOPIC_IDENTITY_SQL} END) AS audiolar,
-      COUNT(DISTINCT CASE WHEN tc.kind='theory'       THEN ${TOPIC_IDENTITY_SQL} END) AS taqdimotlar,
-      COUNT(DISTINCT CASE WHEN tc.kind='qollanma'     THEN ${TOPIC_IDENTITY_SQL} END) AS qollanmalar,
-      COUNT(DISTINCT CASE WHEN tc.type='exam' AND tc.topic_key IS NOT NULL THEN ${TOPIC_IDENTITY_SQL} END) AS testlar,
-      COUNT(DISTINCT CASE WHEN tc.type='assignment' AND tc.topic_key IS NOT NULL THEN ${TOPIC_IDENTITY_SQL} END) AS amaliy,
-      COUNT(DISTINCT tc.group_id) AS guruhlar
-    FROM lms_teacher_content tc
-    -- Qism qaysi mavzuga tegishli (nom/tur marker'dan) — TOPIC_IDENTITY_SQL uchun
-    LEFT JOIN lms_teacher_content mk
-      ON mk.topic_key = tc.topic_key AND mk.type = 'mavzu' AND mk.kind = 'topic'
-     AND mk.teacher_user_id = tc.teacher_user_id
-    WHERE tc.is_active = 1
-    GROUP BY tc.teacher_user_id
-  `)
+  // 1) Kontent ko'rsatkichlari — noyob mavzu bo'yicha, sinov/demo'siz
+  const contentRows = await teacherContentCounts()
   const teacherIds = contentRows.map(r => Number(r.tid))
   if (!teacherIds.length) {
     res.json({ success: true, data: [] })
@@ -628,30 +676,32 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
     SELECT tid, COUNT(DISTINCT sid) AS n FROM (
       SELECT tc.teacher_user_id AS tid, cp.student_user_id AS sid
         FROM lms_content_progress cp
-        JOIN lms_teacher_content tc ON tc.id = cp.content_id AND tc.is_active = 1
-       WHERE cp.completed = 1
+        JOIN lms_teacher_content tc ON tc.id = cp.content_id AND tc.is_active = 1 AND ${REAL_CONTENT_SQL}
+       WHERE cp.completed = 1 AND cp.student_user_id NOT IN (?)
       UNION
       SELECT m.created_by_user_id AS tid, ma.user_id AS sid
         FROM lms_meeting_attendance ma
         JOIN lms_meetings m ON m.id = ma.meeting_id
-       WHERE ma.group_id IS NOT NULL AND m.created_by_user_id IN (?)
+       WHERE ma.group_id IS NOT NULL AND ma.group_id NOT IN (?) AND ma.user_id NOT IN (?)
+         AND m.created_by_user_id IN (?)
     ) x
     GROUP BY tid
-  `, [teacherIds])
+  `, [DEMO_USER_IDS, DEMO_GROUP_IDS, DEMO_USER_IDS, teacherIds])
 
   // 3) Topshiriq yuborgan talabalar
   const [submittedRows] = await pool.query<RowDataPacket[]>(`
     SELECT tc.teacher_user_id AS tid, COUNT(DISTINCT sub.student_user_id) AS n
       FROM lms_submissions sub
-      JOIN lms_teacher_content tc ON tc.id = sub.content_id AND tc.is_active = 1
+      JOIN lms_teacher_content tc ON tc.id = sub.content_id AND tc.is_active = 1 AND ${REAL_CONTENT_SQL}
+     WHERE sub.student_user_id NOT IN (?)
      GROUP BY tc.teacher_user_id
-  `)
+  `, [DEMO_USER_IDS])
 
   // 4) Meetinglar soni
   const [meetingRows] = await pool.query<RowDataPacket[]>(`
-    SELECT created_by_user_id AS tid, COUNT(*) AS n
-      FROM lms_meetings WHERE created_by_user_id IN (?)
-     GROUP BY created_by_user_id
+    SELECT m.created_by_user_id AS tid, COUNT(*) AS n
+      FROM lms_meetings m WHERE m.created_by_user_id IN (?) AND ${REAL_MEETING_SQL}
+     GROUP BY m.created_by_user_id
   `, [teacherIds])
 
   // 5) Ism va oxirgi faollik — hemis_users ikki yo'l bilan (teacher_user_id
@@ -714,8 +764,9 @@ router.get("/teacher-stats", adminOnly, async (_req: AuthRequest, res: Response)
       audiolar: Number(r.audiolar ?? 0),
       taqdimotlar: Number(r.taqdimotlar ?? 0),
       qollanmalar: Number(r.qollanmalar ?? 0),
+      youtube: Number(r.youtube ?? 0),
       testlar: Number(r.testlar ?? 0),
-      amaliy: Number(r.amaliy ?? 0),
+      topshiriqlar: Number(r.topshiriqlar ?? 0),
       guruhlar: Number(r.guruhlar ?? 0),
       studentsCompleted: completedBy.get(tid) ?? 0,
       studentsSubmitted: submittedBy.get(tid) ?? 0,
@@ -737,26 +788,31 @@ router.get("/teacher-stats/:teacherId/topics", adminOnly, async (req: AuthReques
     res.status(400).json({ success: false, message: "Noto'g'ri o'qituvchi ID" }); return
   }
 
+  // Belgilar hisobotdagi sonlar bilan bir xil qoidada (MATERIAL_SQL): bo'sh qism "bor" deb chiqmaydi
   const [rows] = await pool.query<RowDataPacket[]>(`
     SELECT
-      tc.topic_key,
-      COALESCE(MAX(CASE WHEN tc.kind='topic' THEN tc.title END), MIN(tc.title)) AS title,
-      COALESCE(MAX(CASE WHEN tc.kind='topic' THEN tc.training_type END), MAX(tc.training_type)) AS training_type,
-      MAX(tc.subject_name) AS subject_name,
-      MAX(tc.group_id) AS group_id,
+      x.topic_key,
+      COALESCE(MAX(CASE WHEN x.kind='topic' THEN x.title END), MIN(x.title)) AS title,
+      COALESCE(MAX(CASE WHEN x.kind='topic' THEN x.training_type END), MAX(x.training_type)) AS training_type,
+      MAX(x.subject_name) AS subject_name,
+      MAX(x.group_id) AS group_id,
       MAX(g.name) AS group_name,
-      MAX(tc.created_at) AS created_at,
-      SUM(tc.kind='video_lesson') AS has_video,
-      SUM(tc.kind='audio')        AS has_audio,
-      SUM(tc.kind='theory')       AS has_theory,
-      SUM(tc.kind='qollanma')     AS has_qollanma,
-      SUM(tc.kind='youtube')      AS has_youtube,
-      SUM(tc.type='exam')         AS has_test,
-      SUM(tc.type='assignment')   AS has_assignment
-    FROM lms_teacher_content tc
-    LEFT JOIN lms_groups g ON g.id = tc.group_id
-    WHERE tc.teacher_user_id = ? AND tc.is_active = 1 AND tc.topic_key IS NOT NULL
-    GROUP BY tc.topic_key
+      MAX(x.created_at) AS created_at,
+      SUM(x.material='video')     AS has_video,
+      SUM(x.material='audio')     AS has_audio,
+      SUM(x.material='taqdimot')  AS has_theory,
+      SUM(x.material='qollanma')  AS has_qollanma,
+      SUM(x.material='youtube')   AS has_youtube,
+      SUM(x.material='test')      AS has_test,
+      SUM(x.material='topshiriq') AS has_assignment
+    FROM (
+      SELECT tc.topic_key, tc.kind, tc.title, tc.training_type, tc.subject_name, tc.group_id, tc.created_at,
+             ${MATERIAL_SQL} AS material
+        FROM lms_teacher_content tc
+       WHERE tc.teacher_user_id = ? AND tc.is_active = 1 AND tc.topic_key IS NOT NULL AND ${REAL_CONTENT_SQL}
+    ) x
+    LEFT JOIN lms_groups g ON g.id = x.group_id
+    GROUP BY x.topic_key
     HAVING has_video > 0 OR has_audio > 0 OR has_theory > 0 OR has_qollanma > 0
         OR has_youtube > 0 OR has_test > 0 OR has_assignment > 0
     ORDER BY created_at DESC
@@ -1677,9 +1733,9 @@ router.get("/login-trend", adminOnly, async (req: AuthRequest, res: Response): P
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT DATE_FORMAT(login_at, '%Y-%m') AS d, COUNT(*) AS c
        FROM lms_platform_sessions
-       WHERE login_at >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL ? MONTH)
+       WHERE login_at >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL ? MONTH) AND user_id NOT IN (?)
        GROUP BY d`,
-      [months - 1]
+      [months - 1, DEMO_USER_IDS]
     )
     const counts: Record<string, number> = {}
     for (const r of rows as RowDataPacket[]) counts[String(r.d)] = Number(r.c)
@@ -1691,9 +1747,9 @@ router.get("/login-trend", adminOnly, async (req: AuthRequest, res: Response): P
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT DATE_FORMAT(login_at, '%Y-%m-%d') AS d, COUNT(*) AS c
      FROM lms_platform_sessions
-     WHERE login_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+     WHERE login_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY) AND user_id NOT IN (?)
      GROUP BY d`,
-    [days - 1]
+    [days - 1, DEMO_USER_IDS]
   )
   const counts: Record<string, number> = {}
   for (const r of rows as RowDataPacket[]) counts[String(r.d)] = Number(r.c)
