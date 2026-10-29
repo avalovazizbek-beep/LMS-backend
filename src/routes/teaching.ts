@@ -2604,14 +2604,17 @@ router.put("/submissions/:id/grade", async (req: AuthRequest, res: Response): Pr
     res.status(400).json({ success: false, message: "grade (baho) majburiy va musbat son bo'lishi kerak" })
     return
   }
-  if (content.maxScore !== null && grade > content.maxScore) {
-    res.status(400).json({ success: false, message: `Baho ${content.maxScore} balldan oshmasligi kerak` })
+  // Maksimal ball qo'yilmagan topshiriq (Fan resurslaridagi amaliyot topshirig'i)
+  // jurnalda 100 ballik hisoblanadi — baho ham 100 dan oshmaydi
+  const maxScore = content.maxScore && content.maxScore > 0 ? content.maxScore : 100
+  if (grade > maxScore) {
+    res.status(400).json({ success: false, message: `Baho ${maxScore} balldan oshmasligi kerak` })
     return
   }
 
   const updated = await gradeSubmission(submission.id, teacherUserId(req.user), grade, textValue(body.feedback) || null)
   res.json({ success: true, data: updated })
-  const gradeText = `${grade}${content.maxScore ? ` / ${content.maxScore}` : ""}`
+  const gradeText = `${grade} / ${maxScore}`
   void notifyUser("student", submission.studentUserId, "teacher", "Baho qo'yildi", `${content.title}: ${gradeText} ball`, { key: "graded", params: { title: content.title, grade: gradeText } })
 })
 
