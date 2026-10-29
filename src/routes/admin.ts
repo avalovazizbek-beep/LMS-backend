@@ -597,6 +597,8 @@ router.get("/stats", adminOnly, async (_req: AuthRequest, res: Response): Promis
           WHERE role='student' AND hemis_id NOT IN (?) AND updated_at >= NOW() - INTERVAL 30 DAY) AS active_students_30d,
         -- Kirishlar: takrorsiz foydalanuvchi (xodim qatori token yangilanganda ham yoziladi)
         (SELECT COUNT(DISTINCT role, user_id) FROM lms_platform_sessions
+          WHERE login_at >= CURDATE() AND user_id NOT IN (?)) AS today_users,
+        (SELECT COUNT(DISTINCT role, user_id) FROM lms_platform_sessions
           WHERE login_at >= CURDATE() - INTERVAL 6 DAY AND user_id NOT IN (?)) AS active_users_7d,
         (SELECT COUNT(DISTINCT role, user_id) FROM lms_platform_sessions
           WHERE login_at >= CURDATE() - INTERVAL 13 DAY AND login_at < CURDATE() - INTERVAL 6 DAY
@@ -619,7 +621,7 @@ router.get("/stats", adminOnly, async (_req: AuthRequest, res: Response): Promis
            JOIN (SELECT group_id, COUNT(*) AS n FROM hemis_students_directory WHERE is_active = 1 GROUP BY group_id) gs
              ON gs.group_id = tc.group_id
           WHERE tc.is_active = 1 AND ${REAL_CONTENT_SQL} AND ${TRACKABLE_SQL}) AS possible_completions
-    `, [demoHemisIds, demoHemisIds, demoHemisIds, demoHemisIds, DEMO_USER_IDS, DEMO_USER_IDS, DEMO_USER_IDS, DEMO_USER_IDS, DEMO_USER_IDS]),
+    `, [demoHemisIds, demoHemisIds, demoHemisIds, demoHemisIds, DEMO_USER_IDS, DEMO_USER_IDS, DEMO_USER_IDS, DEMO_USER_IDS, DEMO_USER_IDS, DEMO_USER_IDS]),
     teacherContentCounts(),
   ])
 
@@ -650,6 +652,7 @@ router.get("/stats", adminOnly, async (_req: AuthRequest, res: Response): Promis
       possibleCompletions: Number(row.possible_completions ?? 0),
       faceRegistered: Number(row.face_registered ?? 0),
       activeStudents30d: Number(row.active_students_30d ?? 0),
+      todayUsers: Number(row.today_users ?? 0),
       activeUsers7d: Number(row.active_users_7d ?? 0),
       activeUsersPrev7d: Number(row.active_users_prev_7d ?? 0),
       trackedSince: row.tracked_since ? String(row.tracked_since) : null,
