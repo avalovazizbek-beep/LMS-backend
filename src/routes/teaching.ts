@@ -299,7 +299,7 @@ function presentForStudent(item: TeacherContentRecord): TeacherContentRecord {
     belgilanadi — topshirmagan talaba ham (masalan oraliqqa kelmagan)
     muddati o'tgan imtihonni "Boshlash" tugmasi bilan ocha olsin. */
 async function applyMyRetakeGrants(items: TeacherContentRecord[], sId: number): Promise<(TeacherContentRecord & { retakeGranted?: boolean })[]> {
-  const examIds = items.filter((i) => i.type === "exam" || (i.type === "assignment" && i.controlType === "oraliq")).map((i) => i.id)
+  const examIds = items.filter((i) => i.type === "exam" || (i.type === "assignment" && (i.controlType === "oraliq" || i.controlType === MUSTAQIL_CONTROL))).map((i) => i.id)
   if (!examIds.length) return items
   const keys = await getActiveGrantKeys(examIds, sId)
   if (!keys.size) return items

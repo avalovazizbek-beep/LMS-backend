@@ -8,7 +8,7 @@ import { pool } from "../services/db"
 import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, storedFilePath, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen, getTeacherGroupIds, effectiveTopicDeadline, setTopicDeadline, findTopicMarkers, isControlExam } from "../services/teachingStore"
 import { listQuestions, isExamPassed, getExamViolationsSummary } from "../services/examStore"
 import { grantRetakesForContent, revokeRetakeGrant, getActiveGrantKeys } from "../services/retakeStore"
-import { computePeriodCells, pickPeriodExams, type PeriodKey } from "../services/periodGrades"
+import { computeMiScores, computePeriodCells, pickPeriodExams, MUSTAQIL_CONTROL, type PeriodKey } from "../services/periodGrades"
 import {
   listAllForAdmin as listAllAnnouncements,
   createTextOnly as createTextOnlyAnnouncement,
@@ -2208,23 +2208,32 @@ router.patch("/content/:id/toggle", requirePermission("retake", "edit"), async (
   res.json({ success: true, data: updated })
 })
 
+/** Oraliq yoki mustaqil ish (test yoki topshiriq) — Oraliqlar sahifasida ko'rinadi va qayta ochiladi */
+function isScoredControl(c: { type: string | null; controlType: string | null }): boolean {
+  return (c.type === "exam" || c.type === "assignment") && (c.controlType === "oraliq" || c.controlType === MUSTAQIL_CONTROL)
+}
+
 /* ── GET /api/admin/exams — barcha o'qituvchilarning imtihonlari (oddiy/oraliq/yakuniy) ── */
 router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
   const groupId = req.query.groupId ? Number(req.query.groupId) : null
   const subject = typeof req.query.subject === "string" ? req.query.subject.trim() : ""
   const controlType = typeof req.query.controlType === "string" ? req.query.controlType.trim() : ""
 
-  // Oraliq test yoki topshiriq bo'ladi; qolganlari — faqat test
-  const where: string[] = [controlType === "oraliq" ? "tc.type IN ('exam','assignment')" : "tc.type = 'exam'", "tc.is_active = 1"]
+  // Bir nechta tur vergul bilan: "oraliq,mustaqil" — Oraliqlar sahifasida
+  // mustaqil ishlar ham chiqadi. Oraliq va mustaqil ish test yoki topshiriq
+  // bo'ladi; qolganlari — faqat test.
+  const controlTypes = controlType && controlType !== "none" ? controlType.split(",").map(s => s.trim()).filter(Boolean) : []
+  const withTasks = controlTypes.some(c => c === "oraliq" || c === MUSTAQIL_CONTROL)
+  const where: string[] = [withTasks ? "tc.type IN ('exam','assignment')" : "tc.type = 'exam'", "tc.is_active = 1"]
   const params: unknown[] = []
   if (groupId) { where.push("tc.group_id = ?"); params.push(groupId) }
   if (subject) { where.push("LOWER(tc.subject_name) = LOWER(?)"); params.push(subject) }
   if (controlType === "none") where.push("tc.control_type IS NULL")
-  else if (controlType) { where.push("tc.control_type = ?"); params.push(controlType) }
+  else if (controlTypes.length) { where.push(`tc.control_type IN (${controlTypes.map(() => "?").join(", ")})`); params.push(...controlTypes) }
 
   const [rows] = await pool.query<RowDataPacket[]>(`
     SELECT tc.id, tc.type, tc.title, tc.subject_name, tc.group_id, g.name AS group_name, tc.control_type, tc.kind,
-           tc.teacher_user_id, tc.max_score, tc.grade_points, tc.available_from, tc.deadline,
+           tc.teacher_user_id, tc.max_score, tc.grade_points, tc.grade_part, tc.available_from, tc.deadline,
            COALESCE(NULLIF(TRIM(hu.full_name),''), CONCAT('O\\'qituvchi #', tc.teacher_user_id)) AS teacher_name,
            (SELECT COUNT(*) FROM lms_submissions s WHERE s.content_id = tc.id) AS submission_count,
            (SELECT COUNT(*) FROM lms_exam_retake_grants rg WHERE rg.content_id = tc.id AND rg.status = 'active') AS grant_count
@@ -2245,6 +2254,8 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
     maxScore: r.max_score == null ? null : Number(r.max_score),
     // Jurnaldagi ball (ma'ruza 35 balidan); eski oraliqlarda null — 17 / 18
     gradePoints: r.grade_points == null ? null : Number(r.grade_points),
+    // Mustaqil ish qaysi qism hisobidan (Ma'ruza / Amaliyot)
+    gradePart: r.control_type === MUSTAQIL_CONTROL ? (r.grade_part === "Amaliyot" ? "Amaliyot" : "Ma'ruza") : null,
     availableFrom: r.available_from, deadline: r.deadline,
     submissionCount: Number(r.submission_count ?? 0),
     grantCount: Number(r.grant_count ?? 0),
@@ -2257,10 +2268,11 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
 router.get("/oraliq/:id/students", requirePermission("retake", "view"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const exam = Number.isFinite(id) ? await getTeacherContent(id) : null
-  if (!exam || !((exam.type === "exam" && isControlExam(exam.controlType)) || (exam.type === "assignment" && exam.controlType === "oraliq"))) {
+  if (!exam || !((exam.type === "exam" && isControlExam(exam.controlType)) || isScoredControl(exam))) {
     res.status(404).json({ success: false, message: "Nazorat topilmadi" })
     return
   }
+  const isMi = exam.controlType === MUSTAQIL_CONTROL
   const [roster, submissions, violations, allContent] = await Promise.all([
     getGroupRoster(exam.groupId, exam.subjectName).catch(() => []),
     listSubmissions(exam.id),
@@ -2272,17 +2284,22 @@ router.get("/oraliq/:id/students", requirePermission("retake", "view"), async (r
   for (const s of roster) people.set(s.studentUserId, s.fullName)
   for (const s of submissions) if (!people.has(s.studentUserId)) people.set(s.studentUserId, s.studentFullName)
   const ids = [...people.keys()]
-  const [grants, cells] = await Promise.all([
+  const [grants, cells, miScores] = await Promise.all([
     getActiveGrantKeys([exam.id]),
     computePeriodCells(exam.groupId, exam.subjectName, allContent, ids),
+    isMi ? computeMiScores(allContent, ids) : Promise.resolve(null),
   ])
-  const slot = (["ON1", "ON2", "YN"] as PeriodKey[]).find((k) => pickPeriodExams(allContent)[k]?.id === exam.id) ?? null
+  const slot = isMi ? "MI" : (["ON1", "ON2", "YN"] as PeriodKey[]).find((k) => pickPeriodExams(allContent)[k]?.id === exam.id) ?? null
   const subBy = new Map(submissions.map((s) => [s.studentUserId, s]))
   const violBy = new Map(violations.map((v) => [v.studentUserId, v.counts]))
 
   const students = sortByFullName(ids.map((userId) => {
     const sub = subBy.get(userId)
-    const cell = slot ? cells.get(userId)?.[slot] ?? null : null
+    // Mustaqil ish: jurnaldagi bali (o'z balliga nisbatan) — foizga aylantiriladi
+    const miBall = miScores?.get(userId)?.[exam.id] ?? null
+    const cell = isMi
+      ? (miBall != null && exam.gradePoints ? { pct: (miBall / exam.gradePoints) * 100, source: !sub && miBall === 0 ? "absent" : "exam" } : null)
+      : slot ? cells.get(userId)?.[slot as PeriodKey] ?? null : null
     return {
       userId,
       fullName: people.get(userId) ?? "",
@@ -2305,7 +2322,7 @@ router.get("/oraliq/:id/students", requirePermission("retake", "view"), async (r
       exam: {
         id: exam.id, title: exam.title, subjectName: exam.subjectName,
         groupId: exam.groupId, groupName: groupRow?.name ? String(groupRow.name) : `Guruh ${exam.groupId}`,
-        type: exam.type, controlType: exam.controlType, slot, maxScore: exam.maxScore, gradePoints: exam.gradePoints, attemptsCount: exam.attemptsCount,
+        type: exam.type, controlType: exam.controlType, slot, maxScore: exam.maxScore, gradePoints: exam.gradePoints, gradePart: exam.gradePart, attemptsCount: exam.attemptsCount,
         availableFrom: exam.availableFrom, deadline: exam.deadline, status: exam.status,
         questionCount: exam.questionCount, isActive: exam.isActive,
       },
@@ -2318,7 +2335,7 @@ router.get("/oraliq/:id/students", requirePermission("retake", "view"), async (r
 router.get("/content/:id/submissions", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const content = Number.isFinite(id) ? await getTeacherContent(id) : null
-  if (!content || !(content.type === "exam" || (content.type === "assignment" && content.controlType === "oraliq"))) { res.status(404).json({ success: false, message: "Imtihon topilmadi" }); return }
+  if (!content || !(content.type === "exam" || isScoredControl(content))) { res.status(404).json({ success: false, message: "Imtihon topilmadi" }); return }
   const submissions = await listSubmissions(content.id)
   res.json({ success: true, data: submissions.map(s => ({ ...s, passed: isExamPassed(s.grade, content.maxScore) })) })
 })
@@ -2327,7 +2344,7 @@ router.get("/content/:id/submissions", adminOnly, async (req: AuthRequest, res: 
 router.post("/content/:id/retake-grants", requirePermission("retake", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id)
   const content = Number.isFinite(id) ? await getTeacherContent(id) : null
-  if (!content || !(content.type === "exam" || (content.type === "assignment" && content.controlType === "oraliq"))) { res.status(404).json({ success: false, message: "Imtihon topilmadi" }); return }
+  if (!content || !(content.type === "exam" || isScoredControl(content))) { res.status(404).json({ success: false, message: "Imtihon topilmadi" }); return }
 
   const body = req.body as { studentUserIds?: unknown; reason?: string }
   const ids = Array.isArray(body.studentUserIds) ? body.studentUserIds.map(Number).filter(Number.isFinite) : []
