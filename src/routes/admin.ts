@@ -572,43 +572,88 @@ async function teacherContentCounts(): Promise<RowDataPacket[]> {
   return rows
 }
 
-/* ── GET /api/admin/stats — bosh sahifa: foydalanuvchilar, faollik va
-   kontent (O'qituvchi hisobotidagi qoida bilan, sinov/demo'siz) ──────── */
+// Talaba ochib-ko'rib tugatadigan materiallar (lms_content_progress shular uchun yoziladi)
+const TRACKABLE_SQL = `tc.kind IN ('video_lesson', 'audio', 'theory', 'qollanma') AND ${HAS_FILE_SQL}`
+
+/* ── GET /api/admin/stats — bosh sahifa. Hamma son haqiqiy yozuvlardan,
+   sinov/demo'siz; kontent — O'qituvchi hisobotidagi qoida bilan. ──────── */
 router.get("/stats", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
-  const demoUsers = DEMO_USER_IDS.join(",")
+  const demoHemisIds = DEMO_USER_IDS.map(String)
   const [[counts], contentRows] = await Promise.all([
     pool.query<RowDataPacket[]>(`
       SELECT
-        (SELECT COUNT(*) FROM hemis_users WHERE role='student' AND hemis_id NOT IN (${DEMO_USER_IDS.map(id => `'${id}'`).join(",")})) AS total_students,
+        (SELECT COUNT(*) FROM hemis_users WHERE role='student' AND hemis_id NOT IN (?)) AS total_students,
+        (SELECT COUNT(*) FROM hemis_users WHERE role='employee' AND hemis_id NOT IN (?)) AS total_employees,
+        (SELECT COUNT(*) FROM lms_permissions WHERE lms_role='admin') AS granted_admins,
+        (SELECT COUNT(*) FROM lms_meetings m WHERE ${REAL_MEETING_SQL}) AS total_meetings,
+        (SELECT COUNT(*) FROM face_requests WHERE status='pending') AS face_pending,
+        -- Face ID: tizimga kirgan talabalardan ro'yxatdan o'tganlari
+        (SELECT COUNT(DISTINCT hu.hemis_id) FROM hemis_users hu
+           JOIN hemis_students_directory hsd ON hsd.hemis_id = CAST(hu.hemis_id AS UNSIGNED)
+           JOIN face_registrations fr ON fr.username = hsd.student_id_number
+          WHERE hu.role='student' AND hu.hemis_id NOT IN (?)) AS face_registered,
+        -- hemis_users.updated_at har kirishda (yangi token) yangilanadi
+        (SELECT COUNT(*) FROM hemis_users
+          WHERE role='student' AND hemis_id NOT IN (?) AND updated_at >= NOW() - INTERVAL 30 DAY) AS active_students_30d,
+        -- Kirishlar: takrorsiz foydalanuvchi (xodim qatori token yangilanganda ham yoziladi)
         (SELECT COUNT(DISTINCT role, user_id) FROM lms_platform_sessions
-          WHERE login_at >= CURDATE() AND user_id NOT IN (${demoUsers})) AS today_users,
+          WHERE login_at >= CURDATE() - INTERVAL 6 DAY AND user_id NOT IN (?)) AS active_users_7d,
         (SELECT COUNT(DISTINCT role, user_id) FROM lms_platform_sessions
-          WHERE logout_at IS NULL AND last_seen_at >= NOW() - INTERVAL 5 MINUTE AND user_id NOT IN (${demoUsers})) AS online_now,
-        (SELECT COUNT(*) FROM face_requests WHERE status='pending') AS face_pending
-    `),
+          WHERE login_at >= CURDATE() - INTERVAL 13 DAY AND login_at < CURDATE() - INTERVAL 6 DAY
+            AND user_id NOT IN (?)) AS active_users_prev_7d,
+        -- Talabalar kirishi shu kundan beri qayd etiladi (ip_address ham o'sha tuzatish bilan qo'shilgan)
+        (SELECT DATE_FORMAT(MIN(login_at), '%Y-%m-%d') FROM lms_platform_sessions
+          WHERE role='student' AND ip_address IS NOT NULL) AS tracked_since,
+        -- Topshiriqlar (testlar avtomatik baholanadi — ular ulushga kirmaydi)
+        (SELECT COUNT(*) FROM lms_submissions sub
+           JOIN lms_teacher_content tc ON tc.id = sub.content_id AND tc.is_active = 1 AND tc.type = 'assignment' AND ${REAL_CONTENT_SQL}
+          WHERE sub.student_user_id NOT IN (?)) AS total_submissions,
+        (SELECT COUNT(*) FROM lms_submissions sub
+           JOIN lms_teacher_content tc ON tc.id = sub.content_id AND tc.is_active = 1 AND tc.type = 'assignment' AND ${REAL_CONTENT_SQL}
+          WHERE sub.student_user_id NOT IN (?) AND sub.grade IS NOT NULL) AS graded_submissions,
+        -- O'zlashtirish: tugatilganlar / (har material × uning guruhidagi talabalar)
+        (SELECT COUNT(*) FROM lms_content_progress cp
+           JOIN lms_teacher_content tc ON tc.id = cp.content_id AND tc.is_active = 1 AND ${REAL_CONTENT_SQL} AND ${TRACKABLE_SQL}
+          WHERE cp.completed = 1 AND cp.student_user_id NOT IN (?)) AS total_completions,
+        (SELECT COALESCE(SUM(gs.n), 0) FROM lms_teacher_content tc
+           JOIN (SELECT group_id, COUNT(*) AS n FROM hemis_students_directory WHERE is_active = 1 GROUP BY group_id) gs
+             ON gs.group_id = tc.group_id
+          WHERE tc.is_active = 1 AND ${REAL_CONTENT_SQL} AND ${TRACKABLE_SQL}) AS possible_completions
+    `, [demoHemisIds, demoHemisIds, demoHemisIds, demoHemisIds, DEMO_USER_IDS, DEMO_USER_IDS, DEMO_USER_IDS, DEMO_USER_IDS, DEMO_USER_IDS]),
     teacherContentCounts(),
   ])
 
   const row = (counts as RowDataPacket[])[0] ?? {}
   // Har o'qituvchining mavzulari alohida — yig'indi takrorsiz jami
   const sum = (key: string) => contentRows.reduce((acc, r) => acc + Number(r[key] ?? 0), 0)
+  const content = {
+    videos: sum("videolar"),
+    audios: sum("audiolar"),
+    presentations: sum("taqdimotlar"),
+    guides: sum("qollanmalar"),
+    tests: sum("testlar"),
+    assignments: sum("topshiriqlar"),
+  }
   res.json({
     success: true,
     data: {
       totalStudents: Number(row.total_students ?? 0),
-      // O'qituvchi hisobotidagi ro'yxat bilan bir xil
-      totalTeachers: contentRows.length,
-      todayUsers: Number(row.today_users ?? 0),
-      onlineNow: Number(row.online_now ?? 0),
+      totalEmployees: Number(row.total_employees ?? 0),
+      grantedAdmins: Number(row.granted_admins ?? 0),
+      totalContent: Object.values(content).reduce((a, b) => a + b, 0),
+      totalVideos: content.videos,
+      totalMeetings: Number(row.total_meetings ?? 0),
       facePending: Number(row.face_pending ?? 0),
-      content: {
-        topics: sum("mavzular"),
-        videos: sum("videolar"),
-        presentations: sum("taqdimotlar"),
-        guides: sum("qollanmalar"),
-        tests: sum("testlar"),
-        assignments: sum("topshiriqlar"),
-      },
+      totalSubmissions: Number(row.total_submissions ?? 0),
+      gradedSubmissions: Number(row.graded_submissions ?? 0),
+      totalCompletions: Number(row.total_completions ?? 0),
+      possibleCompletions: Number(row.possible_completions ?? 0),
+      faceRegistered: Number(row.face_registered ?? 0),
+      activeStudents30d: Number(row.active_students_30d ?? 0),
+      activeUsers7d: Number(row.active_users_7d ?? 0),
+      activeUsersPrev7d: Number(row.active_users_prev_7d ?? 0),
+      trackedSince: row.tracked_since ? String(row.tracked_since) : null,
+      content,
     },
   })
 })
@@ -1724,14 +1769,15 @@ router.get("/sessions", adminOnly, async (req: AuthRequest, res: Response): Prom
   res.json({ success: true, data: rows })
 })
 
-/* ── GET /api/admin/login-trend — kirishlar soni kun YOKI oy bo'yicha
-   (BAZADAGI HAMMA sessiya bo'yicha hisoblanadi — /sessions kabi so'nggi N
-   qatorga cheklanmaydi, shuning uchun son har doim to'g'ri) ── */
+/* ── GET /api/admin/login-trend — kun YOKI oy bo'yicha tizimga kirgan
+   foydalanuvchilar (takrorsiz: xodim sessiyasi token yangilanganda ham
+   yoziladi, qatorlar soni kirishlardan ancha ko'p chiqardi). BAZADAGI HAMMA
+   sessiya bo'yicha — /sessions kabi so'nggi N qatorga cheklanmaydi ── */
 router.get("/login-trend", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.query.unit === "month") {
     const months = Math.min(Math.max(Number(req.query.months ?? 6), 1), 24)
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT DATE_FORMAT(login_at, '%Y-%m') AS d, COUNT(*) AS c
+      `SELECT DATE_FORMAT(login_at, '%Y-%m') AS d, COUNT(DISTINCT role, user_id) AS c
        FROM lms_platform_sessions
        WHERE login_at >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL ? MONTH) AND user_id NOT IN (?)
        GROUP BY d`,
@@ -1745,7 +1791,7 @@ router.get("/login-trend", adminOnly, async (req: AuthRequest, res: Response): P
 
   const days = Math.min(Math.max(Number(req.query.days ?? 7), 1), 90)
   const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT DATE_FORMAT(login_at, '%Y-%m-%d') AS d, COUNT(*) AS c
+    `SELECT DATE_FORMAT(login_at, '%Y-%m-%d') AS d, COUNT(DISTINCT role, user_id) AS c
      FROM lms_platform_sessions
      WHERE login_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY) AND user_id NOT IN (?)
      GROUP BY d`,
