@@ -40,7 +40,8 @@ function sinovControlItems(): Record<string, unknown>[] {
   }))
 }
 
-const CONTROL_RESOURCES = new Set(["controls", "other-controls"])
+// "1-on"/"2-on" turidagi nazoratlar "Oraliq nazorat" sahifasida chiqadi (hemis.ts controlKind)
+const CONTROL_RESOURCES = new Set(["controls", "midterm-controls"])
 
 /** O'qituvchida sinov guruhi bo'lsa — HEMIS nazoratlar ro'yxatiga sinov oraliqlari qo'shiladi */
 export async function withSinovControls<T extends { data: unknown }>(resource: string, teacherId: number, result: T): Promise<T> {

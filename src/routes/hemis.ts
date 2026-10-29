@@ -2428,7 +2428,12 @@ async function attendanceJournalCount(params: Record<string, string>, user?: Aut
   return attendanceJournalItems(items).length || items.length
 }
 
-function controlKind(item: unknown): "midterm" | "final" | "other" {
+// O'quv bo'limi oraliqni HEMIS'da ko'pincha «1-on», «2-on» (yoki «ON-1», «2-oraliq»)
+// turi bilan qo'yadi — unda «oraliq» so'zi yo'q va u «Boshqa nazoratlar»ga tushib
+// qolardi. Qoida oraliq yaratishdagi HEMIS ro'yxati (guessOraliqSlot) bilan bir xil.
+const ORALIQ_SLOT_RE = /(?<!\d)[12]\s*[-–.]?\s*(?:on|oraliq|он|оралиқ)(?!\p{L})|(?<!\p{L})(?:on|oraliq|он|оралиқ)\s*[-–.]?\s*[12](?!\d)/iu
+
+export function controlKind(item: unknown): "midterm" | "final" | "other" {
   const record = asRecord(item)
   const examType = asRecord(record.examType)
   const finalExamType = asRecord(record.finalExamType)
@@ -2441,7 +2446,7 @@ function controlKind(item: unknown): "midterm" | "final" | "other" {
     .join(" ")
     .toLowerCase()
 
-  if (text.includes("oraliq") || text.includes("joriy") || text.includes("current") || text.includes("midterm")) {
+  if (text.includes("oraliq") || text.includes("joriy") || text.includes("current") || text.includes("midterm") || ORALIQ_SLOT_RE.test(text)) {
     return "midterm"
   }
   if (text.includes("yakuniy") || text.includes("final")) return "final"

@@ -7,7 +7,7 @@
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "node --require ts-node/register/transpile-only --test tests/safePath.test.ts tests/certificateTemplate.test.ts tests/videoTranscode.test.ts tests/routes.security.test.ts tests/mobileAuth.test.ts tests/zoomReview.test.ts tests/gradeBudget.test.ts tests/sinovSandbox.test.ts tests/gradeJournal.test.ts tests/sinovStudent.test.ts tests/sinovGroupKeep.test.ts tests/platformSessions.test.ts",
+    "test": "node --require ts-node/register/transpile-only --test tests/safePath.test.ts tests/certificateTemplate.test.ts tests/videoTranscode.test.ts tests/routes.security.test.ts tests/mobileAuth.test.ts tests/zoomReview.test.ts tests/gradeBudget.test.ts tests/sinovSandbox.test.ts tests/gradeJournal.test.ts tests/sinovStudent.test.ts tests/sinovGroupKeep.test.ts tests/platformSessions.test.ts tests/facePractice.test.ts tests/controlKind.test.ts",
     "setup": "node scripts/install-libreoffice.js"
   },
   "dependencies": {
