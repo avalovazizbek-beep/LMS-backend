@@ -1168,6 +1168,8 @@ export interface UpsertSubmissionInput {
   groupId: number | null
   comment?: string | null
   file?: ContentFile | null
+  /** Baholangan ishni keyingi urinishda qayta yuklash — attempts_used bittaga oshadi */
+  nextAttempt?: boolean
 }
 
 /** Talaba ishni (qayta) topshirganda yozadi — qayta topshirilsa, avvalgi baho tozalanadi. */
@@ -1190,7 +1192,8 @@ export async function upsertSubmission(input: UpsertSubmissionInput): Promise<Su
        grade             = NULL,
        feedback          = NULL,
        graded_at         = NULL,
-       graded_by_user_id = NULL`,
+       graded_by_user_id = NULL,
+       attempts_used     = attempts_used + ?`,
     [
       input.contentId,
       input.studentUserId,
@@ -1203,6 +1206,7 @@ export async function upsertSubmission(input: UpsertSubmissionInput): Promise<Su
       input.file?.relativePath ?? null,
       input.file?.url ?? null,
       input.comment?.trim() || null,
+      input.nextAttempt ? 1 : 0,
     ]
   )
   const submission = await getSubmissionForStudent(input.contentId, input.studentUserId)

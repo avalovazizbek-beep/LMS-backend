@@ -289,6 +289,18 @@ function readContentMeta(source: Record<string, unknown>): ContentMeta {
   }
 }
 
+/** Talaba kartasida qaysi fan va kimniki ekani ko'rinsin — o'qituvchi ismi
+    xodimlar katalogidan, bitta so'rov bilan */
+async function withTeacherNames<T extends TeacherContentRecord>(items: T[]): Promise<(T & { teacherName: string | null })[]> {
+  const ids = [...new Set(items.map((i) => i.teacherUserId))]
+  if (!ids.length) return []
+  const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
+    "SELECT hemis_id, full_name FROM hemis_employees_directory WHERE hemis_id IN (?)", [ids]
+  )
+  const names = new Map(rows.map((r) => [Number(r.hemis_id), String(r.full_name)]))
+  return items.map((i) => ({ ...i, teacherName: names.get(i.teacherUserId) ?? null }))
+}
+
 function presentForStudent(item: TeacherContentRecord): TeacherContentRecord {
   if (item.status !== "locked") return item
   // Dedline ochilmaguncha talaba kontent tafsilotini va faylini ko'ra olmaydi
@@ -1198,7 +1210,7 @@ router.get("/content", async (req: AuthRequest, res: Response): Promise<void> =>
     await applyTopicReopen(await listTeacherContent({ type, groupId, subjectName })),
     studentUserId(req.user)
   )
-  res.json({ success: true, data: items.map(presentForStudent) })
+  res.json({ success: true, data: (await withTeacherNames(items)).map(presentForStudent) })
 })
 
 /* ── GET /grading-pending — o'qituvchining baholanmagan ishlari (guruh/fan/
@@ -2342,13 +2354,20 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
   // yo'qolmasligi uchun qayta yuborish yopiladi (pastroq bo'lsa — mumkin).
   // Oraliq / mustaqil ish topshirig'i esa baholangach qayta yuklanmaydi —
   // admin shu talabaga qayta ochib bergan bo'lsagina.
+  // Mustaqil ishga o'qituvchi bir necha urinish bergan bo'lsa (attemptsCount),
+  // baholangan ishni urinishlar tugaguncha qayta yuklash mumkin — joriy baho
+  // o'chadi, o'qituvchi yangisini baholaydi (oxirgi baho hisoblanadi).
+  let nextAttempt = false
   if (content.type === "assignment") {
     const existing = await getSubmissionForStudent(content.id, sId)
-    if (existing && existing.grade != null && isScoredWork(content) && !lateGrant) {
+    const maxAttempts = content.attemptsCount && content.attemptsCount > 0 ? content.attemptsCount : 1
+    nextAttempt = !!existing && existing.grade != null && isScoredWork(content) && !lateGrant &&
+      existing.attemptsUsed < maxAttempts
+    if (existing && existing.grade != null && isScoredWork(content) && !lateGrant && !nextAttempt) {
       res.status(409).json({ success: false, message: "Bu topshiriq allaqachon baholangan" })
       return
     }
-    if (existing && existing.grade != null && isExamPassed(normalizeGrade(existing.grade, content.maxScore), content.maxScore)) {
+    if (!nextAttempt && existing && existing.grade != null && isExamPassed(normalizeGrade(existing.grade, content.maxScore), content.maxScore)) {
       res.status(409).json({ success: false, message: "Bu topshiriq allaqachon baholangan va siz o'tgansiz" })
       return
     }
@@ -2364,6 +2383,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
       groupId,
       comment: textValue(body.comment) || null,
       file: null,
+      nextAttempt,
     })
     if (lateGrant) await consumeRetakeGrant(content.id, sId)
     res.status(201).json({ success: true, data: submission })
@@ -2440,6 +2460,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
       groupId,
       comment: textValue(req.query.comment) || null,
       file,
+      nextAttempt,
     })
     if (lateGrant) await consumeRetakeGrant(content.id, sId)
     res.status(201).json({ success: true, data: submission })
