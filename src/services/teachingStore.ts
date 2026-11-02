@@ -1214,6 +1214,14 @@ export async function upsertSubmission(input: UpsertSubmissionInput): Promise<Su
   return submission
 }
 
+/** Talaba baholanmagan ishini o'zi o'chiradi (xato fayl yuklagan) — yozuv,
+    saqlangan fayl va antiplagiat natijasi */
+export async function deleteSubmission(submission: SubmissionRecord): Promise<void> {
+  await pool.query("DELETE FROM lms_plagiarism_checks WHERE submission_id = ?", [submission.id])
+  await pool.query("DELETE FROM lms_submissions WHERE id = ?", [submission.id])
+  removeStoredFile(submission.file?.relativePath)
+}
+
 export async function listSubmissions(contentId: number): Promise<SubmissionRecord[]> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
     `SELECT s.*, g.id AS active_grant_id, g.granted_at AS active_grant_at

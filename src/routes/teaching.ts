@@ -42,6 +42,8 @@ import {
   getContentFile,
   removeContentFile,
   upsertSubmission,
+  deleteSubmission,
+  removeStoredFile,
   listSubmissions,
   getSubmissionForStudent,
   getSubmissionById,
@@ -2312,6 +2314,48 @@ async function endedWithResults(items: TeacherContentRecord[]): Promise<string |
   return `«${title}» muddati tugagan va ${Number(hit.n)} ta talabaning natijasi bor — baholar saqlanib qolishi uchun uni o'chirib bo'lmaydi`
 }
 
+/* ── DELETE /content/:id/my-submission — talaba oraliq / mustaqil ish
+   topshirig'iga yuklagan, hali baholanmagan ishini o'chiradi (xato fayl).
+   Baholangan ish o'chirilmaydi: qayta urinish bo'lsa yangisi yuklanadi va
+   eskisi o'rniga yoziladi. Keyingi urinishdagi ish ham faqat almashtiriladi —
+   o'chirilsa urinishlar hisobi yo'qolardi. Mavzu topshiriqlari (keyingi
+   mavzuni ochadi) bu yerga kirmaydi. ── */
+router.delete("/content/:id/my-submission", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role === "employee") {
+    res.status(403).json({ success: false, message: "Faqat talaba uchun" })
+    return
+  }
+  const id = numberValue(req.params.id)
+  const content = id !== null ? await getTeacherContent(id) : null
+  if (!content || content.type !== "assignment" || content.topicKey || content.groupId !== studentGroupId(req.user)) {
+    res.status(404).json({ success: false, message: "Topilmadi" })
+    return
+  }
+  const sId = studentUserId(req.user)
+  const existing = await getSubmissionForStudent(content.id, sId)
+  if (!existing) {
+    res.status(404).json({ success: false, message: "Yuklangan ish yo'q" })
+    return
+  }
+  if (existing.grade != null) {
+    res.status(409).json({ success: false, message: "Baholangan ishni o'chirib bo'lmaydi — qayta urinish bo'lsa, yangisini yuklang: eskisi o'rniga yoziladi" })
+    return
+  }
+  if (existing.attemptsUsed > 1) {
+    res.status(409).json({ success: false, message: "Bu urinishdagi ishni o'chirib bo'lmaydi — yangisini yuklasangiz, eskisi o'rniga yoziladi" })
+    return
+  }
+  const status = contentStatus(new Date(), content.availableFrom, content.deadline)
+  const canStillSubmit = status === "open" ||
+    (status === "closed" && (!!(await getActiveRetakeGrant(content.id, sId)) || (await isTopicReopened(content.topicKey))))
+  if (!canStillSubmit) {
+    res.status(403).json({ success: false, message: "Topshirish vaqti tugagan — ishni o'chirib bo'lmaydi" })
+    return
+  }
+  await deleteSubmission(existing)
+  res.json({ success: true, message: "O'chirildi" })
+})
+
 /* ── POST /content/:id/submit — talaba topshiradi ──────────────────── */
 router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.user?.role === "employee") {
@@ -2358,8 +2402,11 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
   // baholangan ishni urinishlar tugaguncha qayta yuklash mumkin — joriy baho
   // o'chadi, o'qituvchi yangisini baholaydi (oxirgi baho hisoblanadi).
   let nextAttempt = false
+  // Qayta yuklanganda eski fayl o'rniga yangisi yoziladi — eskisi serverdan ham o'chadi
+  let previousFile: string | null = null
   if (content.type === "assignment") {
     const existing = await getSubmissionForStudent(content.id, sId)
+    previousFile = existing?.file?.relativePath ?? null
     const maxAttempts = content.attemptsCount && content.attemptsCount > 0 ? content.attemptsCount : 1
     nextAttempt = !!existing && existing.grade != null && isScoredWork(content) && !lateGrant &&
       existing.attemptsUsed < maxAttempts
@@ -2385,6 +2432,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
       file: null,
       nextAttempt,
     })
+    removeStoredFile(previousFile)
     if (lateGrant) await consumeRetakeGrant(content.id, sId)
     res.status(201).json({ success: true, data: submission })
     notifyGradePending(content, fullNameOf(req.user))
@@ -2462,6 +2510,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
       file,
       nextAttempt,
     })
+    if (previousFile !== file.relativePath) removeStoredFile(previousFile)
     if (lateGrant) await consumeRetakeGrant(content.id, sId)
     res.status(201).json({ success: true, data: submission })
     notifyGradePending(content, fullNameOf(req.user))
