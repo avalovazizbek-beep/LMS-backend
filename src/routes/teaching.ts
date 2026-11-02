@@ -2555,6 +2555,7 @@ router.post("/content/:id/copy-to-groups", async (req: AuthRequest, res: Respons
   }
   let created = 0
   let updated = 0
+  let countSynced = 0
   const skipped: { groupId: number; reason: string }[] = []
 
   for (const gid of groupIds) {
@@ -2590,6 +2591,16 @@ router.post("/content/:id/copy-to-groups", async (req: AuthRequest, res: Respons
       [target.id, target.id]
     )
     if (Number(started?.n ?? 0) > 0) {
+      // Talabalar boshlagan: savollar va ball sozlamalari tegilmaydi, lekin
+      // talabaga beriladigan savollar soni manbadagidek qilinadi — aks holda
+      // manbada keyin 20 qo'yib qayta tarqatilganda bu guruhda butun baza
+      // (106 ta) chiqaverardi. Ochilgan sessiya va topshirish shu songa kesiladi.
+      const frozen = !!target.deadline && new Date(target.deadline).getTime() < Date.now()
+      if (!frozen && target.type === "exam" && (target.questionDisplayCount ?? null) !== (source.questionDisplayCount ?? null)) {
+        await updateTeacherContent(target.id, { questionDisplayCount: source.questionDisplayCount })
+        countSynced++
+        continue
+      }
       skipped.push({ groupId: gid, reason: "Talabalar topshirishni boshlagan — o'zgartirilmadi" }); continue
     }
     await updateTeacherContent(target.id, settings)
@@ -2598,8 +2609,9 @@ router.post("/content/:id/copy-to-groups", async (req: AuthRequest, res: Respons
   }
 
   const parts = [`${created} ta guruhga qo'shildi`, `${updated} ta guruhda yangilandi`]
+  if (countSynced) parts.push(`${countSynced} ta guruhda talabalar boshlagan — faqat savollar soni yangilandi`)
   if (skipped.length) parts.push(`${skipped.length} ta o'tkazib yuborildi`)
-  res.json({ success: true, data: { created, updated, skipped }, message: parts.join(", ") })
+  res.json({ success: true, data: { created, updated, countSynced, skipped }, message: parts.join(", ") })
 })
 
 /* ── DELETE /content/:id/retake-grants/:studentUserId — ruxsatni bekor qilish ── */
@@ -2990,14 +3002,17 @@ router.post("/content/:id/exam-submit", async (req: AuthRequest, res: Response):
   // Talaba sessiyaning faqat birinchi expectedCount savolini ko'rgan (GET
   // shu tartibda kesadi) — baho ham shu savollardan hisoblanadi, butun
   // sessiyadan emas (aks holda 20 ta javob 106 taga bo'linib ketardi).
-  const sessionIds = session ? session.questionIds.slice(0, expectedCount) : null
-
   const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
   const answers = Array.isArray(body.answers) ? body.answers.map((a) => numberValue(a) ?? -1) : null
-  if (!answers || answers.length !== expectedCount) {
+  // Savollar soni talaba ishlayotganda kamaytirilgan (masalan qayta tarqatishda
+  // 106 → 20): u ko'rgan butun to'plamga javob yuboradi — ishi yo'qolmasin,
+  // shu savollar bo'yicha baholanadi
+  const answeredFullSession = !!session && !!answers && answers.length === rawCount && rawCount !== expectedCount
+  if (!answers || (answers.length !== expectedCount && !answeredFullSession)) {
     res.status(400).json({ success: false, message: `answers massivi ${expectedCount} ta elementdan iborat bo'lishi kerak` })
     return
   }
+  const sessionIds = session ? session.questionIds.slice(0, answeredFullSession ? rawCount : expectedCount) : null
 
   const { submission } = await submitExamAnswers(content.id, sId, fullNameOf(req.user), studentGroupId(req.user), answers, sessionIds ?? undefined, session?.optionPerms, content.maxScore)
 
