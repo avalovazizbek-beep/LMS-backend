@@ -1370,6 +1370,11 @@ router.delete("/topics/:topicKey", async (req: AuthRequest, res: Response): Prom
       res.status(403).json({ success: false, message: "Bu mavzu siz dars beradigan guruhda emas" })
       return
     }
+    const locked = await endedWithResults(items)
+    if (locked) {
+      res.status(409).json({ success: false, message: locked })
+      return
+    }
     for (const item of items) await deleteTeacherContent(item.id)
     const marker = items.find((i) => i.type === "mavzu" && i.kind === "topic")
     void logAudit(req, "topic.deleteOthers", "teaching", topicKey, {
@@ -1393,6 +1398,12 @@ router.delete("/topics/:topicKey", async (req: AuthRequest, res: Response): Prom
       ? await findTopicMarkers(tId, undefined, marker.subjectName, marker.trainingType, marker.title)
       : []
     const keys = Array.from(new Set([topicKey, ...markers.map((m) => m.topicKey!)]))
+    const all = (await Promise.all(keys.map((key) => listTeacherContent({ topicKey: key, teacherUserId: tId })))).flat()
+    const locked = await endedWithResults(all)
+    if (locked) {
+      res.status(409).json({ success: false, message: locked })
+      return
+    }
     let deletedAll = 0
     for (const key of keys) deletedAll += await deleteTopicContent(key, tId)
     if (!deletedAll) {
@@ -1403,6 +1414,11 @@ router.delete("/topics/:topicKey", async (req: AuthRequest, res: Response): Prom
     return
   }
 
+  const locked = topicKey ? await endedWithResults(await listTeacherContent({ topicKey, teacherUserId: tId })) : null
+  if (locked) {
+    res.status(409).json({ success: false, message: locked })
+    return
+  }
   const deleted = topicKey ? await deleteTopicContent(topicKey, tId) : 0
   if (!deleted) {
     res.status(404).json({ success: false, message: "Mavzu topilmadi" })
@@ -2257,9 +2273,32 @@ router.delete("/content/:id", async (req: AuthRequest, res: Response): Promise<v
     res.status(404).json({ success: false, message: "Topilmadi" })
     return
   }
+  const locked = await endedWithResults([existing])
+  if (locked) {
+    res.status(409).json({ success: false, message: locked })
+    return
+  }
   await deleteTeacherContent(id!)
   res.json({ success: true, message: "O'chirildi" })
 })
+
+/* Muddati tugagan ishning talaba natijalari (baho, urinishlar) saqlanib
+   qoladi: bunday kontentni — yoki uni ichiga olgan mavzuni — o'qituvchi
+   o'chira olmaydi. Muddati tugamagan yoki muddatsiz bo'lsa natijalari bilan
+   birga o'chadi (masalan xato yuklangan oraliq: talabalar yangisini topshiradi). */
+async function endedWithResults(items: TeacherContentRecord[]): Promise<string | null> {
+  const now = new Date()
+  const ended = items.filter((i) => i.deadline && contentStatus(now, i.availableFrom, i.deadline) === "closed")
+  if (!ended.length) return null
+  const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
+    "SELECT content_id, COUNT(*) AS n FROM lms_submissions WHERE content_id IN (?) GROUP BY content_id",
+    [ended.map((i) => i.id)]
+  )
+  const hit = rows.find((r) => Number(r.n) > 0)
+  if (!hit) return null
+  const title = ended.find((i) => i.id === Number(hit.content_id))?.title ?? ""
+  return `«${title}» muddati tugagan va ${Number(hit.n)} ta talabaning natijasi bor — baholar saqlanib qolishi uchun uni o'chirib bo'lmaydi`
+}
 
 /* ── POST /content/:id/submit — talaba topshiradi ──────────────────── */
 router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Promise<void> => {
@@ -2761,7 +2800,13 @@ router.get("/content/:id/questions", async (req: AuthRequest, res: Response): Pr
   let shownIds: number[]
   let optionPerms: Record<number, number[]>
 
-  if (existingSession) {
+  // O'qituvchi savollarni qayta yuklagan bo'lsa, eski sessiyadagi savollar
+  // bazada yo'q — talaba bo'sh test ko'rib qotib qolardi. Yangi to'plam beriladi.
+  const currentIds = new Set(questions.map((q) => q.id))
+  const sessionUsable = !!existingSession &&
+    (content.isAdaptive || existingSession.questionIds.every((qid) => currentIds.has(qid)))
+
+  if (existingSession && sessionUsable) {
     // Mavjud sessiya (topshirmagan, savollar allaqachon ko'rsatilgan)
     const byId = new Map(questions.map(q => [q.id, q]))
     questions = existingSession.questionIds.map(id => byId.get(id)).filter(Boolean) as typeof questions
@@ -2929,10 +2974,23 @@ router.post("/content/:id/exam-submit", async (req: AuthRequest, res: Response):
 
   // Talabaga ko'rsatilgan savollar sessiyasi
   const session = await getExamSession(content.id, sId)
-  const sessionIds = session?.questionIds ?? null
-  const rawCount = sessionIds ? sessionIds.length : questionCount
+  // Savollar talaba ishlayotganda qayta yuklangan: javoblar eski savollarga —
+  // baholanmaydi, urinish sarflanmaydi, talaba testni qaytadan ochadi.
+  if (session && !content.isAdaptive) {
+    const currentIds = new Set((await listQuestions(content.id)).map((q) => q.id))
+    if (!session.questionIds.every((qid) => currentIds.has(qid))) {
+      await deleteExamSession(content.id, sId)
+      res.status(409).json({ success: false, message: "O'qituvchi savollarni yangiladi — testni qaytadan boshlang. Urinishingiz sarflanmadi." })
+      return
+    }
+  }
+  const rawCount = session ? session.questionIds.length : questionCount
   const displayCount = content.questionDisplayCount
   const expectedCount = (displayCount && displayCount > 0 && displayCount < rawCount) ? displayCount : rawCount
+  // Talaba sessiyaning faqat birinchi expectedCount savolini ko'rgan (GET
+  // shu tartibda kesadi) — baho ham shu savollardan hisoblanadi, butun
+  // sessiyadan emas (aks holda 20 ta javob 106 taga bo'linib ketardi).
+  const sessionIds = session ? session.questionIds.slice(0, expectedCount) : null
 
   const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
   const answers = Array.isArray(body.answers) ? body.answers.map((a) => numberValue(a) ?? -1) : null
