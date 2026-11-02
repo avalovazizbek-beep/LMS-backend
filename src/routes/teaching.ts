@@ -2873,6 +2873,13 @@ router.get("/content/:id/questions", async (req: AuthRequest, res: Response): Pr
     res.status(403).json({ success: false, message: `Urinishlar soni tugadi (${maxAttempts} ta)` })
     return
   }
+  // Testdan o'tgan talabaga keyingi urinish ochilmaydi (moslashuvchan testdagidek) —
+  // bilmasdan boshlangan urinish keraksiz. Admin/o'qituvchi alohida ruxsat bergan
+  // yoki mavzuni qayta ochgan bo'lsa ochiladi; baho baribir eng yuqori urinishdan.
+  if (prevSubmission && isExamPassed(normalizeGrade(prevSubmission.grade, content.maxScore), content.maxScore) && !activeGrant && !topicReopened) {
+    res.status(403).json({ success: false, message: "Siz bu testdan o'tgansiz — keyingi urinish ochilmaydi" })
+    return
+  }
 
   // Agar avvalgi sessiya mavjud bo'lsa va topshirilmagan (talaba savollarni ko'rgan lekin topshirmagan) —
   // o'sha sessiyani qaytaramiz. Aks holda yangi random sessiya yaratamiz.
@@ -3084,7 +3091,7 @@ router.post("/content/:id/exam-submit", async (req: AuthRequest, res: Response):
   }
   const sessionIds = session ? session.questionIds.slice(0, answeredFullSession ? rawCount : expectedCount) : null
 
-  const { submission } = await submitExamAnswers(content.id, sId, fullNameOf(req.user), studentGroupId(req.user), answers, sessionIds ?? undefined, session?.optionPerms, content.maxScore)
+  const { submission, score } = await submitExamAnswers(content.id, sId, fullNameOf(req.user), studentGroupId(req.user), answers, sessionIds ?? undefined, session?.optionPerms, content.maxScore)
 
   // Bir martalik qayta urinish ruxsati ishlatilgan bo'lsa — iste'mol qilindi deb belgilanadi
   if (activeGrant) {
@@ -3094,7 +3101,8 @@ router.post("/content/:id/exam-submit", async (req: AuthRequest, res: Response):
   // Sessiyani o'chirish — keyingi urinishda yangi random savollar keladi
   await deleteExamSession(content.id, sId)
 
-  res.status(201).json({ success: true, data: { submission, maxScore: content.maxScore } })
+  // submission.grade — hisobga olinadigan (eng yuqori) baho, attemptScore — shu urinishniki
+  res.status(201).json({ success: true, data: { submission, maxScore: content.maxScore, attemptScore: score } })
 })
 
 /* ── Moslashuvchan (adaptive) test: bitta-bittalab savol, talabaning

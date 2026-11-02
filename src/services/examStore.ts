@@ -192,6 +192,24 @@ export interface ExamSubmitResult {
   score: number
 }
 
+/* Qayta urinishda baho eng yuqori urinishdan olinadi: yangi natija pastroq
+   bo'lsa, oldingi (yaxshiroq) urinishning javoblari va bahosi qoladi — faqat
+   urinishlar soni oshadi. Bilmasdan boshlangan keyingi urinish bahoni
+   tushirmaydi. MySQL ON DUPLICATE KEY UPDATE ifodalarni chapdan o'ngga
+   hisoblaydi va keyingilari yangilangan qiymatni ko'radi — shu sabab `grade`
+   eng oxirida yoziladi. */
+const BETTER = "grade IS NULL OR VALUES(grade) >= grade"
+const BEST_ATTEMPT_UPDATE = `
+       student_full_name = VALUES(student_full_name),
+       submitted_at      = CURRENT_TIMESTAMP,
+       attempts_used     = attempts_used + 1,
+       answers           = IF(${BETTER}, VALUES(answers), answers),
+       feedback          = IF(${BETTER}, VALUES(feedback), feedback),
+       graded_at         = IF(${BETTER}, CURRENT_TIMESTAMP, graded_at),
+       graded_by_user_id = IF(${BETTER}, NULL, graded_by_user_id),
+       auto_graded       = IF(${BETTER}, 1, auto_graded),
+       question_ids      = IF(${BETTER}, VALUES(question_ids), question_ids)`
+
 export async function submitExamAnswers(
   contentId: number,
   studentUserId: number,
@@ -230,18 +248,9 @@ export async function submitExamAnswers(
       (content_id, student_user_id, student_full_name, group_id, comment, submitted_at,
        answers, grade, feedback, graded_at, graded_by_user_id, auto_graded, attempts_used, question_ids, option_perms)
      VALUES (?, ?, ?, ?, NULL, CURRENT_TIMESTAMP, ?, ?, ?, CURRENT_TIMESTAMP, NULL, 1, 1, ?, ?)
-     ON DUPLICATE KEY UPDATE
-       student_full_name = VALUES(student_full_name),
-       submitted_at      = CURRENT_TIMESTAMP,
-       answers           = VALUES(answers),
-       grade             = VALUES(grade),
-       feedback          = VALUES(feedback),
-       graded_at         = CURRENT_TIMESTAMP,
-       graded_by_user_id = NULL,
-       auto_graded       = 1,
-       attempts_used     = attempts_used + 1,
-       question_ids      = VALUES(question_ids),
-       option_perms      = VALUES(option_perms)`,
+     ON DUPLICATE KEY UPDATE${BEST_ATTEMPT_UPDATE},
+       option_perms      = IF(${BETTER}, VALUES(option_perms), option_perms),
+       grade             = IF(${BETTER}, VALUES(grade), grade)`,
     [contentId, studentUserId, studentFullName, groupId, JSON.stringify(answers), score, "Avtomatik baholandi", qIdsJson, permsJson]
   )
 
@@ -348,17 +357,9 @@ export async function finalizeAdaptiveExam(
       (content_id, student_user_id, student_full_name, group_id, comment, submitted_at,
        answers, grade, feedback, graded_at, graded_by_user_id, auto_graded, attempts_used, question_ids, option_perms)
      VALUES (?, ?, ?, ?, NULL, CURRENT_TIMESTAMP, ?, ?, ?, CURRENT_TIMESTAMP, NULL, 1, 1, ?, NULL)
-     ON DUPLICATE KEY UPDATE
-       student_full_name = VALUES(student_full_name),
-       submitted_at      = CURRENT_TIMESTAMP,
-       answers           = VALUES(answers),
-       grade             = VALUES(grade),
-       feedback          = VALUES(feedback),
-       graded_at         = CURRENT_TIMESTAMP,
-       graded_by_user_id = NULL,
-       auto_graded       = 1,
-       attempts_used     = attempts_used + 1,
-       question_ids      = VALUES(question_ids)`,
+     ON DUPLICATE KEY UPDATE${BEST_ATTEMPT_UPDATE},
+       option_perms      = IF(${BETTER}, NULL, option_perms),
+       grade             = IF(${BETTER}, VALUES(grade), grade)`,
     [contentId, studentUserId, studentFullName, groupId, JSON.stringify(answers), score, "Avtomatik baholandi (moslashuvchan test)", JSON.stringify(questionIds)]
   )
 
