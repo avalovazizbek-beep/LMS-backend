@@ -2136,11 +2136,18 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
   // uchun muzlatib qo'yiladi. Mavzuning O'Z deadline'ini esa o'qituvchi muddat
   // o'tgandan keyin ham uzaytira oladi (yangi muddat testga ham tarqaladi va
   // parametrlar yana ochiladi).
+  // Faqat haqiqatan o'zgargan parametr hisobga olinadi (forma har safar hammasini
+  // yuboradi), muddat esa so'rovdagi YANGI muddat bo'yicha tekshiriladi — shunda
+  // o'qituvchi muddati o'tgan nazoratni shu formaning o'zida uzaytira oladi.
+  const numberChanged = (key: "attemptsCount" | "questionDisplayCount" | "maxScore" | "durationMinutes") =>
+    key in body && numberValue(body[key]) !== existing[key]
   const isExamSettingsChange = existing.type === "exam" && (
-    "attemptsCount" in body || "questionDisplayCount" in body || "maxScore" in body ||
-    "durationMinutes" in body || "isAdaptive" in body
+    numberChanged("attemptsCount") || numberChanged("questionDisplayCount") || numberChanged("maxScore") ||
+    numberChanged("durationMinutes") || ("isAdaptive" in body && boolValue(body.isAdaptive) !== existing.isAdaptive)
   )
-  if (isExamSettingsChange && existing.deadline && new Date(existing.deadline).getTime() < Date.now()) {
+  const requestedDeadline = "deadline" in body ? textValue(body.deadline) : null
+  const effectiveDeadline = requestedDeadline && isValidDate(requestedDeadline) ? requestedDeadline : existing.deadline
+  if (isExamSettingsChange && effectiveDeadline && new Date(effectiveDeadline).getTime() < Date.now()) {
     res.status(403).json({ success: false, message: "Mavzu muddati tugagan — test parametrlarini o'zgartirish uchun avval mavzu muddatini uzaytiring" })
     return
   }
