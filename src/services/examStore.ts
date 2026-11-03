@@ -387,12 +387,50 @@ export async function recordExamViolation(input: {
   groupId: number | null
   violationType: ViolationType
   detail?: string | null
+  /** Face ID kadri (data:image/jpeg;base64,...) — chaqiruvchi hajmini tekshiradi */
+  snapshot?: string | null
 }): Promise<void> {
+  let snapshot = input.snapshot ?? null
+  if (snapshot) {
+    // Bitta talaba bitta imtihonda ko'pi bilan SNAPSHOT_LIMIT ta rasm — bazani shishirmaslik uchun
+    const [rows] = await pool.query<mysql.RowDataPacket[]>(
+      `SELECT COUNT(*) AS cnt FROM lms_exam_violations
+       WHERE content_id = ? AND student_user_id = ? AND snapshot IS NOT NULL`,
+      [input.contentId, input.studentUserId]
+    )
+    if (Number(rows[0]?.cnt ?? 0) >= SNAPSHOT_LIMIT) snapshot = null
+  }
   await pool.query(
-    `INSERT INTO lms_exam_violations (content_id, student_user_id, student_full_name, group_id, violation_type, detail)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [input.contentId, input.studentUserId, input.studentFullName, input.groupId, input.violationType, input.detail ?? null]
+    `INSERT INTO lms_exam_violations (content_id, student_user_id, student_full_name, group_id, violation_type, detail, snapshot)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [input.contentId, input.studentUserId, input.studentFullName, input.groupId, input.violationType, input.detail ?? null, snapshot]
   )
+}
+
+const SNAPSHOT_LIMIT = 15
+
+export interface ViolationDetailRow {
+  id: number
+  violationType: string
+  detail: string | null
+  snapshot: string | null
+  createdAt: string
+}
+
+/** Bitta talabaning shu imtihondagi barcha buzilishlari (rasmlari bilan), vaqt bo'yicha */
+export async function listStudentViolations(contentId: number, studentUserId: number): Promise<ViolationDetailRow[]> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT id, violation_type, detail, snapshot, created_at FROM lms_exam_violations
+     WHERE content_id = ? AND student_user_id = ? ORDER BY created_at ASC, id ASC LIMIT 500`,
+    [contentId, studentUserId]
+  )
+  return rows.map((r) => ({
+    id: Number(r.id),
+    violationType: String(r.violation_type),
+    detail: r.detail == null ? null : String(r.detail),
+    snapshot: r.snapshot == null ? null : String(r.snapshot),
+    createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+  }))
 }
 
 export interface ViolationSummaryRow {
@@ -401,11 +439,14 @@ export interface ViolationSummaryRow {
   counts: Record<string, number>
   total: number
   lastAt: string
+  /** Saqlangan Face ID rasmlari soni */
+  snapshots: number
 }
 
 export async function getExamViolationsSummary(contentId: number): Promise<ViolationSummaryRow[]> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    `SELECT student_user_id, student_full_name, violation_type, COUNT(*) AS cnt, MAX(created_at) AS last_at
+    `SELECT student_user_id, student_full_name, violation_type, COUNT(*) AS cnt, MAX(created_at) AS last_at,
+            SUM(snapshot IS NOT NULL) AS snaps
      FROM lms_exam_violations WHERE content_id = ?
      GROUP BY student_user_id, student_full_name, violation_type`,
     [contentId]
@@ -414,9 +455,10 @@ export async function getExamViolationsSummary(contentId: number): Promise<Viola
   for (const r of rows) {
     const sid = Number(r.student_user_id)
     if (!map.has(sid)) {
-      map.set(sid, { studentUserId: sid, studentFullName: String(r.student_full_name), counts: {}, total: 0, lastAt: String(r.last_at) })
+      map.set(sid, { studentUserId: sid, studentFullName: String(r.student_full_name), counts: {}, total: 0, lastAt: String(r.last_at), snapshots: 0 })
     }
     const entry = map.get(sid)!
+    entry.snapshots += Number(r.snaps ?? 0)
     entry.counts[String(r.violation_type)] = Number(r.cnt)
     entry.total += Number(r.cnt)
     if (String(r.last_at) > entry.lastAt) entry.lastAt = String(r.last_at)

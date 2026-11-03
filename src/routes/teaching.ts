@@ -97,6 +97,7 @@ import {
   finalizeAdaptiveExam,
   recordExamViolation,
   getExamViolationsSummary,
+  listStudentViolations,
   getStudentViolationCounts,
   isExamPassed,
   type ViolationType,
@@ -950,7 +951,7 @@ router.use(authMiddleware)
    foydalanuvchi o'qiy oladi, faqat admin panelida o'zgartirish mumkin. ── */
 router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
   const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
-    "SELECT key_name, value FROM lms_settings WHERE key_name IN ('face_block_threshold', 'test_max_attempts', 'attendance_mode', 'face_practice_required')"
+    "SELECT key_name, value FROM lms_settings WHERE key_name IN ('face_block_threshold', 'test_max_attempts', 'attendance_mode', 'face_practice_required', 'face_terminate')"
   )
   const raw: Record<string, string> = {}
   for (const r of rows) raw[String(r.key_name)] = String(r.value)
@@ -964,6 +965,9 @@ router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
       attendanceMode: raw.attendance_mode === "manual" ? "manual" : "auto",
       // Oraliq / mustaqil ish testidan oldin "Yuzni sinab ko'rish" majburiymi
       facePracticeRequired: raw.face_practice_required !== "0",
+      // Face ID chegaraga yetganda testni yakunlaydimi. O'chiq (standart, 2026-11-03):
+      // faqat qayd etiladi (rasm bilan), o'qituvchi/admin o'zi hal qiladi.
+      faceTerminate: raw.face_terminate === "1",
     },
   })
 })
@@ -3312,13 +3316,17 @@ router.post("/content/:id/violation", async (req: AuthRequest, res: Response): P
     res.status(400).json({ success: false, message: "violationType noto'g'ri" })
     return
   }
+  // Face ID kadri: faqat kichik JPEG data URL qabul qilinadi (~240p, 10-30 KB)
+  const rawSnap = typeof body.snapshot === "string" ? body.snapshot : ""
+  const snapshot = /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(rawSnap) && rawSnap.length <= 200_000 ? rawSnap : null
   await recordExamViolation({
     contentId: content.id,
     studentUserId: studentUserId(req.user),
     studentFullName: fullNameOf(req.user),
     groupId: studentGroupId(req.user),
     violationType,
-    detail: textValue(body.detail) || null,
+    detail: textValue(body.detail).slice(0, 255) || null,
+    snapshot,
   })
   res.status(201).json({ success: true })
 })
@@ -3339,6 +3347,24 @@ router.get("/content/:id/violations", async (req: AuthRequest, res: Response): P
     return
   }
   res.json({ success: true, data: await getExamViolationsSummary(content.id) })
+})
+
+/* GET /content/:id/violations/:studentUserId — bitta talabaning buzilishlari
+   (Face ID rasmlari bilan) — o'qituvchi (o'zining kontenti) yoki admin */
+router.get("/content/:id/violations/:studentUserId", async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = numberValue(req.params.id)
+  const sid = numberValue(req.params.studentUserId)
+  const content = id !== null ? await getTeacherContent(id) : null
+  if (!content || sid === null) {
+    res.status(404).json({ success: false, message: "Topilmadi" })
+    return
+  }
+  const isOwner = req.user?.role === "employee" && content.teacherUserId === teacherUserId(req.user)
+  if (!isOwner && !(await isAdminUser(req))) {
+    res.status(403).json({ success: false, message: "Sizga ruxsat yo'q" })
+    return
+  }
+  res.json({ success: true, data: await listStudentViolations(content.id, sid) })
 })
 
 /* ── Davomat (qo'lda) ───────────────────────────────────────────────── */

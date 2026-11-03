@@ -807,6 +807,8 @@ export async function initDatabase() {
       CONSTRAINT fk_exam_violations_content FOREIGN KEY (content_id) REFERENCES lms_teacher_content(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_exam_violations")
+  // Face ID buzilishi paytidagi kadr (kichik JPEG data URL) — o'qituvchi/admin ko'radi
+  await ensureColumn("lms_exam_violations", "snapshot", "MEDIUMTEXT NULL DEFAULT NULL")
 
   // ── Imtihonni qayta topshirish ruxsati: admin tomonidan yiqilgan talabaga beriladi ──
   await execSafe(`
@@ -1304,6 +1306,7 @@ export async function initDatabase() {
     INSERT IGNORE INTO lms_settings (key_name, value) VALUES
       ('face_block_threshold', '3'),
       ('face_practice_required', '1'),
+      ('face_terminate', '0'),
       ('test_max_attempts', '1'),
       ('attendance_mode', 'auto'),
       ('certificate_auto', '1'),
