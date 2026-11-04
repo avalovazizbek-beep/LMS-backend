@@ -22,3 +22,6 @@ storage/
 *.sql
 *.sql.gz
 *.dump
+
+# restore-auto-grades.ts --apply zaxira nusxalari
+restore-auto-grades-backup-*.json
