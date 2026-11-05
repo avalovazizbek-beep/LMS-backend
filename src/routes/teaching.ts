@@ -69,12 +69,13 @@ import {
   isControlExam,
   ORALIQ_SLOTS,
   teacherTrainingTypes,
+  syncTaskMaxScore,
   type ContentProgress,
   type SubmissionRecord,
 } from "../services/teachingStore"
 import {
   computePeriodCells, computeMiCells, normalizeGrade, gradeBudget, budgetError, journalScale,
-  PART_TOTAL, GRADE_PARTS, LECTURE_PART, MUSTAQIL_CONTROL,
+  slotPoints, PART_TOTAL, GRADE_PARTS, LECTURE_PART, MUSTAQIL_CONTROL,
 } from "../services/periodGrades"
 import { buildGradeJournal } from "../services/gradeJournal"
 import { SINOV_GROUP_ID, SINOV_SUBJECT } from "../services/sinovIds"
@@ -1972,7 +1973,7 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
       res.status(400).json({ success: false, message: `Ball 1 dan ${PART_TOTAL} gacha butun son bo'lishi kerak` })
       return
     }
-    if (meta.type === "assignment" && meta.maxScore === null) meta.maxScore = meta.gradePoints
+    if (meta.type === "assignment") meta.maxScore = meta.gradePoints
   }
   if (isMustaqil && meta.gradePoints !== null) {
     if (!(GRADE_PARTS as readonly string[]).includes(meta.gradePart)) meta.gradePart = LECTURE_PART
@@ -2222,16 +2223,11 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
       res.status(400).json({ success: false, message: error })
       return
     }
-    // Topshiriqni hali hech kim topshirmagan bo'lsa — maksimal ball yangi
-    // ballga moslanadi (eski ball bilan bir xil yoki umuman qo'yilmagan bo'lsa)
-    if (existing.type === "assignment" && patch.gradePoints != null && patch.maxScore === undefined &&
-      (existing.maxScore == null || existing.maxScore === existing.gradePoints)) {
-      const [[row]] = await pool.query<import("mysql2").RowDataPacket[]>(
-        "SELECT COUNT(*) AS n FROM lms_submissions WHERE content_id = ?", [existing.id]
-      )
-      if (Number(row?.n ?? 0) === 0) patch.maxScore = patch.gradePoints
-    }
   }
+  // Oraliq / mustaqil ish topshirig'ining maksimal bali doim baliga teng —
+  // yangilangandan keyin syncTaskMaxScore moslaydi (baholar ham shu nisbatda)
+  const scoredTask = existing.type === "assignment" && (isOraliqItem(existing) || isMustaqilItem)
+  if (scoredTask) delete patch.maxScore
   if (isOraliqItem(existing) && patch.kind !== undefined && patch.kind !== existing.kind) {
     if (!(ORALIQ_SLOTS as readonly string[]).includes(patch.kind ?? "")) {
       res.status(400).json({ success: false, message: "Oraliq nazorat qaysi ekanini tanlang: ON1 yoki ON2" })
@@ -2244,7 +2240,14 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
     }
   }
 
-  const updated = await updateTeacherContent(id!, patch)
+  let updated = await updateTeacherContent(id!, patch)
+  if (scoredTask && updated) {
+    const points = updated.gradePoints ?? (updated.kind === "ON1" || updated.kind === "ON2" ? slotPoints(updated, updated.kind) : null)
+    if (points != null && updated.maxScore !== points) {
+      await syncTaskMaxScore(updated.id, points)
+      updated = await getTeacherContent(updated.id)
+    }
+  }
   // Marker'ning deadline/turi mavzuning barcha qismlari uchun amal qiladi
   if (isTopicMarker && existing.topicKey && (patch.deadline !== undefined || patch.trainingType !== undefined)) {
     await updateTopicItems(existing.topicKey, existing.teacherUserId, {

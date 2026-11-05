@@ -46,6 +46,7 @@ import {
 } from "./services/meetingStore"
 import { publicResourcePath } from "./services/localResourceStore"
 import { initDatabase } from "./services/db"
+import { repairTaskMaxScores } from "./services/teachingStore"
 import { runFullHemisSync } from "./services/hemisSync"
 import { startCertificateSweep } from "./services/certificateStore"
 import { startVideoTranscoder } from "./services/videoTranscode"
@@ -747,6 +748,12 @@ async function start() {
   try {
     await initDatabase()
     console.log("✓ MySQL tayyor")
+    // Oraliq / MI topshirig'ining maksimal bali baliga tenglanadi (baholar shu nisbatda)
+    await repairTaskMaxScores()
+      .then((fixed) => {
+        for (const f of fixed) console.log(`✓ Topshiriq #${f.id}: maks. ball ${f.from ?? "—"} → ${f.to}, ${f.rescaled} ta baho qayta hisoblandi`)
+      })
+      .catch((err) => console.error("Topshiriq maks. balini tuzatishda xato:", err))
     // Dars va topshiriq muddati eslatmalari (har daqiqada)
     startNotificationScheduler()
     // Tashakkurnoma: shartga yetgan o'qituvchilarga orqa fonda beriladi (har 10 daqiqada)

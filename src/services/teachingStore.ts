@@ -850,6 +850,61 @@ export async function updateTeacherContent(id: number, patch: UpdateContentInput
   return getTeacherContent(id)
 }
 
+/* Oraliq / mustaqil ish topshirig'i 0..ball oralig'ida baholanadi — maksimal
+   bali doim jurnal baliga teng (ball qo'yilmagan eski oraliq: ON1 17, ON2 18).
+   Ball o'zgarganda qo'yilgan baholar shu nisbatda qayta hisoblanadi: foiz va
+   jurnaldagi ball o'zgarmaydi (12 ballikda 10 → 17 ballikda 14). */
+const TASK_POINTS_SQL = "COALESCE(grade_points, CASE kind WHEN 'ON1' THEN 17 WHEN 'ON2' THEN 18 END)"
+
+/** Topshiriqning maksimal balini `points` ga tenglaydi; qayta hisoblangan baholar soni */
+export async function syncTaskMaxScore(contentId: number, points: number): Promise<number> {
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+    const [[row]] = await conn.query<mysql.RowDataPacket[]>(
+      "SELECT max_score FROM lms_teacher_content WHERE id = ? FOR UPDATE", [contentId]
+    )
+    // Maksimal bali yo'q topshiriq jurnalda 100 ballik hisoblangan (examPct)
+    const from = row && Number(row.max_score) > 0 ? Number(row.max_score) : 100
+    if (!row || from === points) {
+      await conn.rollback()
+      return 0
+    }
+    // normalizeGrade: maksimal ball 100 dan kichik bo'lib baho undan katta — eski 0..100 foiz
+    const [res] = await conn.query<mysql.ResultSetHeader>(
+      `UPDATE lms_submissions
+          SET grade = LEAST(?, ROUND(grade * ? / IF(? < 100 AND grade > ?, 100, ?)))
+        WHERE content_id = ? AND grade IS NOT NULL`,
+      [points, points, from, from, from, contentId]
+    )
+    await conn.query("UPDATE lms_teacher_content SET max_score = ? WHERE id = ?", [points, contentId])
+    await conn.commit()
+    return res.affectedRows
+  } catch (err) {
+    await conn.rollback().catch(() => { /* e'tiborsiz */ })
+    throw err
+  } finally {
+    conn.release()
+  }
+}
+
+/** Maksimal bali balidan farq qiladigan oraliq / mustaqil ish topshiriqlarini tuzatadi
+    (ball baholangandan keyin o'zgartirilganda maksimal ball eskisida qolib ketardi) */
+export async function repairTaskMaxScores(): Promise<{ id: number; from: number | null; to: number; rescaled: number }[]> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT id, max_score, ${TASK_POINTS_SQL} AS points FROM lms_teacher_content
+      WHERE type = 'assignment' AND control_type IN ('oraliq', 'mustaqil')
+        AND ${TASK_POINTS_SQL} IS NOT NULL AND NOT (max_score <=> ${TASK_POINTS_SQL})`
+  )
+  const fixed: { id: number; from: number | null; to: number; rescaled: number }[] = []
+  for (const r of rows) {
+    const to = Number(r.points)
+    const rescaled = await syncTaskMaxScore(Number(r.id), to)
+    fixed.push({ id: Number(r.id), from: r.max_score == null ? null : Number(r.max_score), to, rescaled })
+  }
+  return fixed
+}
+
 export async function deleteTeacherContent(id: number): Promise<boolean> {
   const content = await getTeacherContent(id)
   if (!content) return false
