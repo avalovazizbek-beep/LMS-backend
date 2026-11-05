@@ -1483,6 +1483,16 @@ export async function getSubmissionsBulk(
   }))
 }
 
+/** Berilganlardan kamida bitta talaba topshirgan kontentlar */
+export async function contentIdsWithSubmissions(contentIds: number[]): Promise<Set<number>> {
+  if (!contentIds.length) return new Set()
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT DISTINCT content_id FROM lms_submissions WHERE content_id IN (?)",
+    [contentIds]
+  )
+  return new Set(rows.map(r => Number(r.content_id)))
+}
+
 /* ── Baholanmagan ishlar — o'qituvchi qaysi guruh/fan/topshiriqda yangi
    ish borligini bir qarashda ko'rishi uchun (yakunlangan topshiriq —
    baholab bo'lmaydi, hisobga kirmaydi). ─────────────────────────────── */

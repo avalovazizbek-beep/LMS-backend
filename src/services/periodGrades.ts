@@ -1,4 +1,4 @@
-import { getSubmissionsBulk, getPeriodGrades, ORALIQ_SLOTS, type TeacherContentRecord, type ContentType } from "./teachingStore"
+import { getSubmissionsBulk, getPeriodGrades, contentIdsWithSubmissions, ORALIQ_SLOTS, type TeacherContentRecord, type ContentType } from "./teachingStore"
 import { getActiveGrantKeys } from "./retakeStore"
 
 /* ── Davriy baholar (ON1 / ON2 / YN) ──────────────────────────────────
@@ -132,10 +132,13 @@ export const MUSTAQIL_CONTROL = "mustaqil"
     ball qo'yilgan test/topshiriq (control_type = "mustaqil", mavzusiz).
     Fan resurslaridagi eski "Mustaqil ish" mavzulari hisobga kirmaydi:
     ma'ruzaga yoki amaliyotga tegishli ekani noma'lum — kerak bo'lsa
-    o'qituvchi uni Nazoratlarda qayta yaratadi. */
+    o'qituvchi uni Nazoratlarda qayta yaratadi.
+    Nofaol (is_active = 0) mustaqil ish ham hisobga kiradi — oraliq kabi:
+    "Baholashni yakunlash" va o'qituvchining "Faol" tugmasi ham shu
+    belgini o'chiradi, qo'yilgan baholar esa jurnaldan yo'qolmasligi kerak. */
 export function pickMiItems(content: TeacherContentRecord[]): TeacherContentRecord[] {
   return content.filter((c) =>
-    c.isActive && !c.topicKey && c.controlType === MUSTAQIL_CONTROL &&
+    !c.topicKey && c.controlType === MUSTAQIL_CONTROL &&
     (c.type === "exam" || c.type === "assignment") && c.gradePoints != null && c.gradePoints > 0)
 }
 
@@ -226,12 +229,21 @@ export async function computeMiScores(
   if (!items.length || !studentIds.length) return out
 
   const ids = items.map((c) => c.id)
-  const [subs, grants] = await Promise.all([getSubmissionsBulk(ids, studentIds), getActiveGrantKeys(ids)])
+  const inactiveIds = items.filter((c) => !c.isActive).map((c) => c.id)
+  const [subs, grants, submittedTo] = await Promise.all([
+    getSubmissionsBulk(ids, studentIds),
+    getActiveGrantKeys(ids),
+    // Nofaol ishni talaba ko'rmaydi. Kimdir topshirgan bo'lsa — ish ochiq
+    // bo'lgan (keyin baholash yakunlangan), topshirmaganlar 0 oladi; hech kim
+    // topshirmagan nofaol ish (yashirilgan) — 0 qo'yilmaydi.
+    contentIdsWithSubmissions(inactiveIds),
+  ])
   const subMap = new Map(subs.map((s) => [`${s.contentId}:${s.studentUserId}`, s]))
   const reopened = new Set(content.filter((c) => c.type === "mavzu" && c.kind === "topic" && c.isReopened).map((c) => c.topicKey))
   const now = Date.now()
   // Savolsiz testni talaba yecha olmaydi — topshirmaganga 0 qo'yilmaydi
-  const takeable = (c: TeacherContentRecord) => c.type === "assignment" || c.questionCount > 0
+  const takeable = (c: TeacherContentRecord) =>
+    (c.type === "assignment" || c.questionCount > 0) && (c.isActive || submittedTo.has(c.id))
   const closed = (c: TeacherContentRecord) =>
     !!c.deadline && new Date(c.deadline).getTime() < now && !reopened.has(c.topicKey)
 

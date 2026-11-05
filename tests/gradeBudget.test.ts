@@ -97,3 +97,35 @@ test("Fan resurslaridagi eski \"Mustaqil ish\" mavzusi (ball qo'yilgan bo'lsa ha
   const old = item({ type: "assignment", topicKey: "old-mi", trainingType: "Mustaqil ish", gradePoints: 10, gradePart: "Ma'ruza" })
   assert.equal(gradeBudget([oraliq("ON1", 10), marker, old]).lecture.used, 10)
 })
+
+test("baholash yakunlangan (nofaol) mustaqil ish jurnaldan va taqsimotdan tushib qolmaydi", async () => {
+  const { miColumns } = await import("../src/services/periodGrades")
+  const done = item({ type: "assignment", controlType: "mustaqil", gradePoints: 10, gradePart: "Ma'ruza", isActive: false })
+  const content = [oraliq("ON1", 10), oraliq("ON2", 15), done]
+  assert.deepEqual(miColumns(content).map((c) => [c.id, c.label, c.points]), [[done.id, "MI-1", 10]])
+  assert.equal(gradeBudget(content).lecture.used, 35)
+  // Yakunlangan MI'ning bali band — yangi ma'ruza MI'siga joy yo'q
+  assert.notEqual(budgetError(content, item({ type: "assignment", controlType: "mustaqil", gradePoints: 5, gradePart: "Ma'ruza" })), null)
+})
+
+test("nofaol mustaqil ish: baho ko'rinadi; topshirmaganga 0 faqat ish kimgadir ochiq bo'lgan bo'lsa", async () => {
+  const { mock } = await import("node:test")
+  const { pool } = await import("../src/services/db")
+  const { computeMiScores } = await import("../src/services/periodGrades")
+  const past = "2026-10-10T00:00:00.000Z"
+  const done = item({ type: "assignment", controlType: "mustaqil", gradePoints: 10, gradePart: "Ma'ruza", isActive: false, deadline: past, maxScore: 10 })
+  const hidden = item({ type: "assignment", controlType: "mustaqil", gradePoints: 5, gradePart: "Ma'ruza", isActive: false, deadline: past, maxScore: 5 })
+  // Talaba 7 topshirgan (done'ga 8 ball), talaba 9 topshirmagan; hidden'ga hech kim topshirmagan
+  const query = mock.method(pool, "query", async (sql: string) => {
+    if (sql.includes("DISTINCT content_id")) return [[{ content_id: done.id }], []]
+    if (sql.includes("lms_submissions")) return [[{ content_id: done.id, student_user_id: 7, grade: 8, submitted_at: past }], []]
+    return [[], []]
+  })
+  try {
+    const scores = await computeMiScores([done, hidden], [7, 9])
+    assert.deepEqual(scores.get(7), { [done.id]: 8, [hidden.id]: null })
+    assert.deepEqual(scores.get(9), { [done.id]: 0, [hidden.id]: null })
+  } finally {
+    query.mock.restore()
+  }
+})
