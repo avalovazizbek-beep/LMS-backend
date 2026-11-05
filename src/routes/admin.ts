@@ -1837,7 +1837,7 @@ router.get("/hemis-students/:groupId/roster", adminOnly, async (req: AuthRequest
     `SELECT
        d.hemis_id, d.full_name, d.student_id_number,
        fr.registered_at AS face_registered_at,
-       (SELECT status FROM face_requests WHERE username = d.student_id_number AND initiated_by = 'admin' AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1) AS admin_request_status
+       (SELECT created_at FROM face_requests WHERE username = d.student_id_number AND initiated_by = 'admin' AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1) AS admin_request_at
      FROM hemis_students_directory d
      LEFT JOIN face_registrations fr ON fr.username = d.student_id_number
      WHERE d.is_active = 1 AND d.group_id = ?
@@ -1847,14 +1847,20 @@ router.get("/hemis-students/:groupId/roster", adminOnly, async (req: AuthRequest
 
   res.json({
     success: true,
-    students: rows.map(r => ({
-      hemisId: r.hemis_id,
-      fullName: r.full_name,
-      studentIdNumber: r.student_id_number,
-      faceRegistered: !!r.face_registered_at,
-      faceRegisteredAt: r.face_registered_at,
-      adminRequestPending: r.admin_request_status === "approved" || r.admin_request_status === "pending",
-    })),
+    students: rows.map(r => {
+      const registeredAtMs = r.face_registered_at ? new Date(r.face_registered_at).getTime() : null
+      // Ro'yxatdan o'tishdan OLDIN yuborilgan so'rov bajarilgan hisoblanadi —
+      // aks holda "So'rov yuborilgan" abadiy qolib, qayta o'tkazish tugmasi yashirinadi
+      const requestAt = r.admin_request_at == null ? null : Number(r.admin_request_at)
+      return {
+        hemisId: r.hemis_id,
+        fullName: r.full_name,
+        studentIdNumber: r.student_id_number,
+        faceRegistered: registeredAtMs !== null,
+        faceRegisteredAt: r.face_registered_at,
+        adminRequestPending: requestAt !== null && (registeredAtMs === null || requestAt > registeredAtMs),
+      }
+    }),
   })
 })
 

@@ -65,11 +65,15 @@ router.get("/status", async (req: AuthRequest, res: Response) => {
       "SELECT id FROM face_requests WHERE username = ? AND status = 'pending' LIMIT 1", [un]
     )
     const [approvedRows] = await pool.query<mysql.RowDataPacket[]>(
-      "SELECT id, initiated_by FROM face_requests WHERE username = ? AND status = 'approved' LIMIT 1", [un]
+      "SELECT id, initiated_by, created_at FROM face_requests WHERE username = ? AND status = 'approved' ORDER BY created_at DESC LIMIT 1", [un]
     )
     const hasPendingRequest = pendingRows.length > 0
     const hasApprovedRequest = approvedRows.length > 0
-    const adminRequestedReregister = approvedRows[0]?.initiated_by === "admin"
+    // Admin so'rovi ro'yxatdan o'tishdan OLDIN yuborilgan bo'lsa — u allaqachon
+    // bajarilgan (eski, yopilmay qolgan so'rovlar): talabaga qayta eslatilmaydi
+    const registeredAtMs = rows.length ? new Date(rows[0].registered_at).getTime() : null
+    const adminRequestedReregister = approvedRows[0]?.initiated_by === "admin" &&
+      (registeredAtMs === null || Number(approvedRows[0].created_at) > registeredAtMs)
 
     if (!rows.length) {
       res.json({ success: true, registered: false, hasPendingRequest, hasApprovedRequest, adminRequestedReregister })
@@ -117,11 +121,8 @@ router.post("/register", async (req: AuthRequest, res: Response) => {
           alreadyRegistered: true,
         }); return
       }
-      // Consume the approval
-      await pool.query(
-        "UPDATE face_requests SET status = 'rejected', admin_note = ? WHERE username = ? AND status = 'approved'",
-        ["(qayta ro'yxatdan o'tish tugallandi)", un]
-      )
+      // Ruxsat yozuv saqlangandan KEYIN yopiladi (pastda) — yuz boshqa
+      // hisobda topilib rad etilsa, talaba ruxsatini yo'qotmasin
     }
 
     // Reject if this face is already registered under a DIFFERENT account —
@@ -155,6 +156,14 @@ router.post("/register", async (req: AuthRequest, res: Response) => {
        VALUES (?, ?, ?)
        ON DUPLICATE KEY UPDATE display_name = VALUES(display_name), descriptors = VALUES(descriptors), registered_at = CURRENT_TIMESTAMP`,
       [un, displayName, JSON.stringify(descriptors)]
+    )
+    // Ruxsat/so'rov ishlatildi — birinchi ro'yxatdan o'tishda ham (admin
+    // "So'rash" bosgan talaba). Ilgari faqat qayta o'tishda yopilardi va admin
+    // ro'yxatida "So'rov yuborilgan" abadiy qolib, qayta o'tkazish tugmasi
+    // yashirinardi.
+    await pool.query(
+      "UPDATE face_requests SET status = 'rejected', admin_note = ? WHERE username = ? AND status = 'approved'",
+      ["(ro'yxatdan o'tish tugallandi)", un]
     )
 
     res.json({ success: true, message: "Yuz muvaffaqiyatli ro'yxatdan o'tdi" })
