@@ -33,7 +33,7 @@ import { pool, toMysqlDate } from "../src/services/db"
 const GROUP_BASE = 990000200
 const TEACHER_BASE = 990200000
 const STUDENT_BASE = 990100000
-const ID_MIN = 990000200
+const ID_MIN = 990100000   // foydalanuvchilar: talabalar 9901xxxxx, o'qituvchilar 9902xxxxx (990000201 = sinov talaba — tegilmaydi)
 const ID_MAX = 990299999
 const TITLE_PREFIX = "YUKLAMA SINOVI"
 const TOKENS_FILE = "/tmp/yuklama-tokens.json"
