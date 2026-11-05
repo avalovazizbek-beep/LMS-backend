@@ -2342,18 +2342,24 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
   if (controlType === "none") where.push("tc.control_type IS NULL")
   else if (controlTypes.length) { where.push(`tc.control_type IN (${controlTypes.map(() => "?").join(", ")})`); params.push(...controlTypes) }
 
+  // LIMIT yo'q: avval 300 bilan kesilardi — oraliqlar ko'paygach eskiroq
+  // sanalilari (masalan, boshqa guruhlarga tarqatilgan nusxalar) adminda
+  // umuman chiqmay qolardi. O'qituvchi ismi alohida so'rovda: hemis_users'da
+  // bitta teacher_user_id ikki qatorda bo'lsa, JOIN nazoratni ikki marta chiqarardi.
   const [rows] = await pool.query<RowDataPacket[]>(`
     SELECT tc.id, tc.type, tc.title, tc.subject_name, tc.group_id, g.name AS group_name, tc.control_type, tc.kind,
            tc.teacher_user_id, tc.max_score, tc.grade_points, tc.grade_part, tc.available_from, tc.deadline,
-           COALESCE(NULLIF(TRIM(hu.full_name),''), CONCAT('O\\'qituvchi #', tc.teacher_user_id)) AS teacher_name,
+           COALESCE(
+             (SELECT NULLIF(TRIM(hu.full_name),'') FROM hemis_users hu
+               WHERE hu.teacher_user_id = tc.teacher_user_id AND TRIM(COALESCE(hu.full_name,'')) <> ''
+               ORDER BY hu.id DESC LIMIT 1),
+             CONCAT('O\\'qituvchi #', tc.teacher_user_id)) AS teacher_name,
            (SELECT COUNT(*) FROM lms_submissions s WHERE s.content_id = tc.id) AS submission_count,
            (SELECT COUNT(*) FROM lms_exam_retake_grants rg WHERE rg.content_id = tc.id AND rg.status = 'active') AS grant_count
     FROM lms_teacher_content tc
     LEFT JOIN lms_groups g ON g.id = tc.group_id
-    LEFT JOIN hemis_users hu ON hu.teacher_user_id = tc.teacher_user_id
     WHERE ${where.join(" AND ")}
-    ORDER BY tc.available_from DESC
-    LIMIT 300
+    ORDER BY tc.available_from DESC, tc.id DESC
   `, params)
 
   res.json({ success: true, data: rows.map(r => ({
