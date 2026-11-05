@@ -1115,7 +1115,7 @@ router.get("/settings", adminOnly, async (_req: AuthRequest, res: Response): Pro
 router.put("/settings", requirePermission("settings", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   const updates = req.body as Record<string, unknown>
   const allowed = new Set([
-    "face_block_threshold", "face_practice_required", "face_terminate", "test_max_attempts", "meeting_attendance_minutes", "attendance_mode",
+    "face_block_threshold", "face_practice_required", "face_terminate", "tab_leave_limit", "test_max_attempts", "meeting_attendance_minutes", "attendance_mode",
     "certificate_auto", "certificate_topic_goal", "certificate_parts",
     "platform_attendance_minutes", "platform_meeting_percent",
     TELEGRAM_CHAT_KEY,
@@ -1149,6 +1149,13 @@ router.put("/settings", requirePermission("settings", "edit"), async (req: AuthR
         res.status(400).json({ success: false, message: key === "platform_meeting_percent"
           ? "Meeting foizi 1 dan 100 gacha bo'lishi kerak"
           : "Platformadagi vaqt 1 dan 600 daqiqagacha bo'lishi kerak" })
+        return
+      }
+    }
+    if (key === "tab_leave_limit") {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 1 || n > 20) {
+        res.status(400).json({ success: false, message: "Oynadan chiqish chegarasi 1 dan 20 gacha bo'lishi kerak" })
         return
       }
     }

@@ -127,11 +127,13 @@ export async function deleteExamSession(contentId: number, studentUserId: number
 export interface ExamSession {
   questionIds: number[]
   optionPerms: Record<number, number[]>
+  /** Shu urinish boshlangan vaqt — oynadan chiqishlar shundan beri sanaladi */
+  createdAt: Date
 }
 
 export async function getExamSession(contentId: number, studentUserId: number): Promise<ExamSession | null> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    "SELECT question_ids, option_perms FROM lms_exam_sessions WHERE content_id = ? AND student_user_id = ?",
+    "SELECT question_ids, option_perms, created_at FROM lms_exam_sessions WHERE content_id = ? AND student_user_id = ?",
     [contentId, studentUserId]
   )
   if (!rows.length) return null
@@ -144,7 +146,8 @@ export async function getExamSession(contentId: number, studentUserId: number): 
   if (rawPerms) {
     try { perms = typeof rawPerms === "string" ? JSON.parse(rawPerms) : rawPerms } catch { perms = {} }
   }
-  return { questionIds: ids.map(Number), optionPerms: perms }
+  const created = rows[0].created_at
+  return { questionIds: ids.map(Number), optionPerms: perms, createdAt: created instanceof Date ? created : new Date(String(created)) }
 }
 
 export async function replaceQuestions(contentId: number, questions: ExamQuestionInput[]): Promise<ExamQuestion[]> {
@@ -377,8 +380,10 @@ export type ViolationType =
   | "no_face"
   | "multi_face"
   | "liveness"
-  /** Face ID xatoliklari chegaraga yetib, test avtomatik yuborilgan */
+  /** Face ID xatoliklari chegaraga yetib, test avtomatik yuborilgan (2026-11-05 dan Face ID testni yakunlamaydi) */
   | "proctor_terminated"
+  /** Oynadan chiqish chegarasiga yetib, test yakunlangan — faqat server yozadi */
+  | "tab_limit"
 
 export async function recordExamViolation(input: {
   contentId: number
@@ -389,6 +394,8 @@ export async function recordExamViolation(input: {
   detail?: string | null
   /** Face ID kadri (data:image/jpeg;base64,...) — chaqiruvchi hajmini tekshiradi */
   snapshot?: string | null
+  /** Oynadan chiqish chegarasiga sanaladimi */
+  counted?: boolean
 }): Promise<void> {
   let snapshot = input.snapshot ?? null
   if (snapshot) {
@@ -401,10 +408,31 @@ export async function recordExamViolation(input: {
     if (Number(rows[0]?.cnt ?? 0) >= SNAPSHOT_LIMIT) snapshot = null
   }
   await pool.query(
-    `INSERT INTO lms_exam_violations (content_id, student_user_id, student_full_name, group_id, violation_type, detail, snapshot)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [input.contentId, input.studentUserId, input.studentFullName, input.groupId, input.violationType, input.detail ?? null, snapshot]
+    `INSERT INTO lms_exam_violations (content_id, student_user_id, student_full_name, group_id, violation_type, detail, snapshot, counted)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [input.contentId, input.studentUserId, input.studentFullName, input.groupId, input.violationType, input.detail ?? null, snapshot, input.counted ? 1 : 0]
   )
+}
+
+/** Shu urinishda (sessiya boshlanganidan beri) chegaraga sanalgan oynadan
+    chiqishlar soni, oxirgi oynadan chiqish vaqti va test shu sabab
+    yakunlanganmi. */
+export async function getTabLeaveState(contentId: number, studentUserId: number, since: Date): Promise<{ count: number; lastBlurAt: Date | null; limitRecorded: boolean }> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT COALESCE(SUM(violation_type = 'tab_blur' AND counted = 1), 0) AS cnt,
+            MAX(CASE WHEN violation_type = 'tab_blur' THEN created_at END) AS last_blur,
+            COALESCE(SUM(violation_type = 'tab_limit'), 0) AS lim
+     FROM lms_exam_violations
+     WHERE content_id = ? AND student_user_id = ? AND created_at >= ?`,
+    [contentId, studentUserId, since]
+  )
+  const r = rows[0] ?? {}
+  const last = r.last_blur
+  return {
+    count: Number(r.cnt ?? 0),
+    lastBlurAt: last ? (last instanceof Date ? last : new Date(String(last))) : null,
+    limitRecorded: Number(r.lim ?? 0) > 0,
+  }
 }
 
 const SNAPSHOT_LIMIT = 15

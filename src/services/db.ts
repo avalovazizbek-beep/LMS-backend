@@ -809,6 +809,9 @@ export async function initDatabase() {
   `, "lms_exam_violations")
   // Face ID buzilishi paytidagi kadr (kichik JPEG data URL) — o'qituvchi/admin ko'radi
   await ensureColumn("lms_exam_violations", "snapshot", "MEDIUMTEXT NULL DEFAULT NULL")
+  // Oynadan chiqish chegarasiga sanalgan chiqish (imtihon savollari ochiq paytda,
+  // takror hodisalarsiz). Chegaraga yetganda test yakunlanadi (2026-11-05)
+  await ensureColumn("lms_exam_violations", "counted", "TINYINT(1) NOT NULL DEFAULT 0")
 
   // ── Imtihonni qayta topshirish ruxsati: admin tomonidan yiqilgan talabaga beriladi ──
   await execSafe(`
@@ -1307,6 +1310,7 @@ export async function initDatabase() {
       ('face_block_threshold', '3'),
       ('face_practice_required', '1'),
       ('face_terminate', '0'),
+      ('tab_leave_limit', '3'),
       ('test_max_attempts', '1'),
       ('attendance_mode', 'auto'),
       ('certificate_auto', '1'),

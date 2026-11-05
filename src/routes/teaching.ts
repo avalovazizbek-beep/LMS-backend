@@ -97,6 +97,7 @@ import {
   pickAdaptiveQuestion,
   finalizeAdaptiveExam,
   recordExamViolation,
+  getTabLeaveState,
   getExamViolationsSummary,
   listStudentViolations,
   getStudentViolationCounts,
@@ -952,7 +953,7 @@ router.use(authMiddleware)
    foydalanuvchi o'qiy oladi, faqat admin panelida o'zgartirish mumkin. ── */
 router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
   const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
-    "SELECT key_name, value FROM lms_settings WHERE key_name IN ('face_block_threshold', 'test_max_attempts', 'attendance_mode', 'face_practice_required', 'face_terminate')"
+    "SELECT key_name, value FROM lms_settings WHERE key_name IN ('face_block_threshold', 'test_max_attempts', 'attendance_mode', 'face_practice_required')"
   )
   const raw: Record<string, string> = {}
   for (const r of rows) raw[String(r.key_name)] = String(r.value)
@@ -966,12 +967,23 @@ router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
       attendanceMode: raw.attendance_mode === "manual" ? "manual" : "auto",
       // Oraliq / mustaqil ish testidan oldin "Yuzni sinab ko'rish" majburiymi
       facePracticeRequired: raw.face_practice_required !== "0",
-      // Face ID chegaraga yetganda testni yakunlaydimi. O'chiq (standart, 2026-11-03):
-      // faqat qayd etiladi (rasm bilan), o'qituvchi/admin o'zi hal qiladi.
-      faceTerminate: raw.face_terminate === "1",
+      // Face ID testni hech qachon yakunlamaydi (2026-11-05, egasining qarori):
+      // xatolar faqat rasm bilan qayd etiladi. Eski klientlar uchun maydon qoldi.
+      faceTerminate: false,
+      // Test faqat shu marta oynadan chiqilganda (shu chiqishda) yakunlanadi
+      tabLeaveLimit: await getTabLeaveLimit(),
     },
   })
 })
+
+/** Oynadan chiqish chegarasi (Admin → Sozlamalar, standart 3) */
+async function getTabLeaveLimit(): Promise<number> {
+  const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
+    "SELECT value FROM lms_settings WHERE key_name = 'tab_leave_limit'"
+  )
+  const n = Number(rows[0]?.value)
+  return Number.isInteger(n) && n > 0 ? n : 3
+}
 
 /* Tashakkurnomaga yoziladigan "Familiya Ism" — token profilidan, bo'lmasa
    HEMIS xodimlar katalogidan. */
@@ -2899,6 +2911,25 @@ router.get("/content/:id/questions", async (req: AuthRequest, res: Response): Pr
   // o'sha sessiyani qaytaramiz. Aks holda yangi random sessiya yaratamiz.
   const existingSession = await getExamSession(content.id, sIdForSession)
 
+  // Oynadan chiqish chegarasiga yetgan urinish: klient javoblarni yubora
+  // olmagan (sahifa yopilgan) bo'lsa, urinish shu yerda bo'sh javoblar bilan
+  // yakunlanadi — sahifani yangilab testni davom ettirib bo'lmaydi.
+  if (existingSession && !content.isAdaptive) {
+    const tabState = await getTabLeaveState(content.id, sIdForSession, existingSession.createdAt)
+    if (tabState.limitRecorded) {
+      const shown = content.questionDisplayCount && content.questionDisplayCount > 0
+        ? existingSession.questionIds.slice(0, content.questionDisplayCount)
+        : existingSession.questionIds
+      await submitExamAnswers(content.id, sIdForSession, fullNameOf(req.user), studentGroupId(req.user),
+        shown.map(() => -1), shown, existingSession.optionPerms, content.maxScore)
+      // Qayta urinish ruxsati sarflanmaydi: admin uni aynan shu bloklangan
+      // urinishdan keyin bergan bo'lishi mumkin — keyingi "Boshlash" yangi urinish
+      await deleteExamSession(content.id, sIdForSession)
+      res.status(403).json({ success: false, message: `Oynadan ${tabState.count} marta chiqqaningiz uchun test yakunlandi` })
+      return
+    }
+  }
+
   let questions = await listQuestions(content.id)
   let shownIds: number[]
   let optionPerms: Record<number, number[]>
@@ -3322,11 +3353,42 @@ router.post("/content/:id/violation", async (req: AuthRequest, res: Response): P
   // Face ID kadri: faqat kichik JPEG data URL qabul qilinadi (~240p, 10-30 KB)
   const rawSnap = typeof body.snapshot === "string" ? body.snapshot : ""
   const snapshot = /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(rawSnap) && rawSnap.length <= 200_000 ? rawSnap : null
+  const sId = studentUserId(req.user)
+  const base = { contentId: content.id, studentUserId: sId, studentFullName: fullNameOf(req.user), groupId: studentGroupId(req.user) }
+
+  // Oynadan chiqish: savollar ochiq paytdagisi (counted) shu urinishda
+  // chegaraga sanaladi — sahifani yangilash hisobni nolga tushirmaydi.
+  // Chegaraga yetgan chiqishda test yakunlanadi (javoblarni klient yuboradi).
+  if (violationType === "tab_blur" && body.counted === true && content.type === "exam") {
+    const session = await getExamSession(content.id, sId)
+    const limit = await getTabLeaveLimit()
+    if (!session) {
+      await recordExamViolation({ ...base, violationType, detail: null })
+      res.status(201).json({ success: true, data: { tabLeaves: 0, tabLeaveLimit: limit, blocked: false } })
+      return
+    }
+    const state = await getTabLeaveState(content.id, sId, session.createdAt)
+    if (state.limitRecorded) {
+      res.status(201).json({ success: true, data: { tabLeaves: state.count, tabLeaveLimit: limit, blocked: true } })
+      return
+    }
+    // Bitta chiqishda blur + visibilitychange ikkalasi kelishi mumkin — 2 s
+    // ichidagi takror chiqish alohida sanalmaydi
+    const duplicate = !!state.lastBlurAt && Date.now() - state.lastBlurAt.getTime() < 2000
+    const count = duplicate ? state.count : state.count + 1
+    if (!duplicate) {
+      await recordExamViolation({ ...base, violationType, detail: `${count}/${limit}`, counted: true })
+    }
+    const blocked = count >= limit
+    if (blocked) {
+      await recordExamViolation({ ...base, violationType: "tab_limit", detail: `Oynadan ${count} marta chiqdi — test yakunlandi` })
+    }
+    res.status(201).json({ success: true, data: { tabLeaves: count, tabLeaveLimit: limit, blocked } })
+    return
+  }
+
   await recordExamViolation({
-    contentId: content.id,
-    studentUserId: studentUserId(req.user),
-    studentFullName: fullNameOf(req.user),
-    groupId: studentGroupId(req.user),
+    ...base,
     violationType,
     detail: textValue(body.detail).slice(0, 255) || null,
     snapshot,
