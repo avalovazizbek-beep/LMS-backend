@@ -9,7 +9,8 @@
  *        npx ts-node -P scripts/tsconfig.json scripts/meeting-yuklama.ts --setup --rooms 3 --students 120 --apply
  *      Tokenlar /tmp/yuklama-tokens.json ga yoziladi (8 soat amal qiladi).
  *   2) Sinov davomida server holati (har 5 s bir qator, oxirida xulosa):
- *        npx ts-node -P scripts/tsconfig.json scripts/meeting-yuklama.ts --monitor --seconds 1800
+ *        npx ts-node -P scripts/tsconfig.json scripts/meeting-yuklama.ts --monitor --seconds 1800 [--quiet]
+ *      Ctrl+C bilan to'xtatilsa ham oxirida xona/ishtirokchi bo'yicha xulosa jadvali chiqadi.
  *   3) Sinov tugagach — hammasini o'chirish:
  *        npx ts-node -P scripts/tsconfig.json scripts/meeting-yuklama.ts --cleanup --apply
  *
@@ -223,21 +224,50 @@ function udpSockets(): number {
   return n
 }
 
-async function testPeople(): Promise<number> {
+async function testPeople(): Promise<{ people: number; rooms: number }> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    `SELECT COUNT(DISTINCT a.user_id) AS n FROM lms_meeting_attendance_sessions s
+    `SELECT COUNT(DISTINCT a.user_id) AS n, COUNT(DISTINCT a.meeting_id) AS r FROM lms_meeting_attendance_sessions s
        JOIN lms_meeting_attendance a ON a.id = s.attendance_id
       WHERE s.left_at IS NULL AND a.user_id BETWEEN ? AND ?`, [ID_MIN, ID_MAX])
-  return Number(rows[0]?.n ?? 0)
+  return { people: Number(rows[0]?.n ?? 0), rooms: Number(rows[0]?.r ?? 0) }
+}
+
+type MonSample = { people: number; rooms: number; wSum: number; wMax: number; be: number; txM: number; rxM: number }
+
+/** Xulosa: "xona × ishtirokchi" guruhlari bo'yicha o'rtacha / maksimal yuk */
+function printSummary(samples: MonSample[], cores: number) {
+  if (!samples.length) return
+  const groups = new Map<string, MonSample[]>()
+  for (const s of samples) {
+    const key = s.people <= 0 ? "sinovsiz (fon)" : `${s.rooms} xona, ~${Math.round(s.people / 10) * 10} kishi`
+    const list = groups.get(key) ?? []
+    list.push(s)
+    groups.set(key, list)
+  }
+  const avg = (xs: number[]) => xs.reduce((a, x) => a + x, 0) / xs.length
+  const mx = (xs: number[]) => Math.max(...xs)
+  console.log(`
+── Xulosa (worker CPU: 100% = 1 yadro, jami ${cores} yadro; backend — bitta node jarayoni) ──`)
+  console.log("holat                    | namuna | worker CPU jami o'rt/max | eng band worker max | backend CPU o'rt/max | chiqish Mbit/s o'rt/max | kirish o'rt")
+  const order = [...groups.entries()].sort((a, b) => avg(a[1].map((x) => x.people)) - avg(b[1].map((x) => x.people)))
+  for (const [key, list] of order) {
+    const f = (k: keyof MonSample) => list.map((x) => x[k])
+    console.log(
+      `${key.padEnd(24)} | ${String(list.length).padStart(6)} | ${avg(f("wSum")).toFixed(0).padStart(6)}% / ${mx(f("wSum")).toFixed(0).padStart(4)}%       | ` +
+      `${mx(f("wMax")).toFixed(0).padStart(6)}%             | ${avg(f("be")).toFixed(0).padStart(6)}% / ${mx(f("be")).toFixed(0).padStart(4)}%     | ` +
+      `${avg(f("txM")).toFixed(1).padStart(8)} / ${mx(f("txM")).toFixed(1).padStart(7)}       | ${avg(f("rxM")).toFixed(1).padStart(6)}`
+    )
+  }
 }
 
 async function monitor() {
   const seconds = Math.max(10, Number(arg("--seconds") ?? 1800))
+  const quiet = has("--quiet")   // har 30 s bitta qator (xulosa baribir to'liq)
   const step = 5
   const cores = os.cpus().length
   let pids = findPids()
   console.log(`mediasoup-worker: ${pids.workers.length} ta, backend node: ${pids.backend.join(",") || "topilmadi"}, yadro: ${cores}`)
-  console.log("vaqt     | sinov | jonli(real) | worker CPU jami / eng band | backend CPU | tarmoq chiqish / kirish | UDP | load")
+  console.log("vaqt     | sinov(xona) | jonli(real) | worker CPU jami / eng band | backend CPU | tarmoq chiqish / kirish | UDP | load")
 
   let prevTicks = new Map<string, number>()
   const readTicks = () => {
@@ -251,11 +281,13 @@ async function monitor() {
   prevTicks = readTicks()
   let prevNet = netBytes()
   let prevAt = Date.now()
-  const samples: Array<{ people: number; wSum: number; wMax: number; be: number; txM: number; rxM: number }> = []
+  const samples: MonSample[] = []
+  let stop = false
+  process.once("SIGINT", () => { stop = true })   // Ctrl+C — xulosa baribir chiqadi
 
   const deadline = Date.now() + seconds * 1000
   let iter = 0
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !stop) {
     await new Promise((r) => setTimeout(r, step * 1000))
     if (++iter % 12 === 0) pids = findPids()   // PM2 qayta ishga tushirgan bo'lsa
     const ticks = readTicks()
@@ -271,27 +303,22 @@ async function monitor() {
     const be = pids.backend.map(pct).reduce((s, x) => s + x, 0)
     const txM = ((net.tx - prevNet.tx) * 8) / dt / 1e6
     const rxM = ((net.rx - prevNet.rx) * 8) / dt / 1e6
-    const people = await testPeople().catch(() => -1)
+    const { people, rooms } = await testPeople().catch(() => ({ people: -1, rooms: -1 }))
     const live = await liveNow().catch(() => ({ meetings: -1, people: -1 }))
-    samples.push({ people, wSum, wMax, be, txM, rxM })
-    const t = new Date().toTimeString().slice(0, 8)
-    console.log(
-      `${t} | ${String(people).padStart(5)} | ${String(live.meetings).padStart(3)} / ${String(live.people).padStart(4)}  | ` +
-      `${wSum.toFixed(0).padStart(5)}% / ${wMax.toFixed(0).padStart(3)}%          | ${be.toFixed(0).padStart(5)}%      | ` +
-      `${txM.toFixed(1).padStart(7)} / ${rxM.toFixed(1).padStart(6)} Mbit/s | ${String(udpSockets()).padStart(5)} | ${os.loadavg()[0].toFixed(1)}`
-    )
+    samples.push({ people, rooms, wSum, wMax, be, txM, rxM })
+    if (!quiet || iter % 6 === 0) {
+      const t = new Date().toTimeString().slice(0, 8)
+      console.log(
+        `${t} | ${String(people).padStart(5)} (${String(rooms).padStart(2)}) | ${String(live.meetings).padStart(3)} / ${String(live.people).padStart(4)}  | ` +
+        `${wSum.toFixed(0).padStart(5)}% / ${wMax.toFixed(0).padStart(3)}%          | ${be.toFixed(0).padStart(5)}%      | ` +
+        `${txM.toFixed(1).padStart(7)} / ${rxM.toFixed(1).padStart(6)} Mbit/s | ${String(udpSockets()).padStart(5)} | ${os.loadavg()[0].toFixed(1)}`
+      )
+    }
     prevTicks = ticks
     prevNet = net
     prevAt = Date.now()
   }
-
-  const peak = samples.reduce((m, s) => (s.people > m.people ? s : m), samples[0])
-  const max = (f: (s: typeof samples[0]) => number) => Math.max(...samples.map(f))
-  console.log("\n── Xulosa ──")
-  console.log(`Eng ko'p sinov ishtirokchisi: ${peak?.people ?? 0}`)
-  console.log(`Worker CPU (jami, ${cores} yadrodan 100% = 1 yadro): max ${max((s) => s.wSum).toFixed(0)}%, eng band worker max ${max((s) => s.wMax).toFixed(0)}%`)
-  console.log(`Backend (node) CPU max: ${max((s) => s.be).toFixed(0)}%  (100% = 1 yadro — socket.io/API bitta yadroda)`)
-  console.log(`Tarmoq chiqish max: ${max((s) => s.txM).toFixed(1)} Mbit/s, kirish max: ${max((s) => s.rxM).toFixed(1)} Mbit/s`)
+  printSummary(samples, cores)
 }
 
 async function main() {
