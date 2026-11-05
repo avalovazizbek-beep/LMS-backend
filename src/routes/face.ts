@@ -47,7 +47,11 @@ function averageDist(candidates: number[][], stored: number[][]): number {
 // Stricter than THRESHOLD (0.62, used for live verify) — a false positive
 // here blocks a legitimate registration, which is worse than a false
 // negative letting a genuine duplicate slip through.
-const DUPLICATE_THRESHOLD = 0.5
+// 0.5 juda bo'sh edi: 2026-11-05 bitta talabani 4 xil boshqa odam
+// (0.458–0.500 masofada) "to'sib", ro'yxatdan o'tkazmadi. Bir odamning
+// o'z yuzi boshqa hisobda bo'lsa masofa ancha past chiqadi.
+// .env: FACE_DUPLICATE_THRESHOLD bilan sozlanadi.
+const DUPLICATE_THRESHOLD = Number(process.env.FACE_DUPLICATE_THRESHOLD) > 0 ? Number(process.env.FACE_DUPLICATE_THRESHOLD) : 0.42
 
 /* ── GET /api/face/status ─────────────────────────────────────────── */
 router.get("/status", async (req: AuthRequest, res: Response) => {
