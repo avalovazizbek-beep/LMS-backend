@@ -19,6 +19,7 @@ import {
   type SemesterDirectoryRow,
 } from "./db"
 import { upsertGroups, type SyncedGroup } from "./teachingStore"
+import { CANCELLED_STATUS_CODE, saveCancelledStudents, type CancelledStudentInput } from "./studentCancellationStore"
 
 /* ── HEMIS to'liq talaba/xodim/guruh ro'yxati ────────────────────────────
  * Login ("password check") HEMIS'ning /v1/auth/login va /ver1/tutor/auth/login
@@ -251,6 +252,52 @@ export async function refreshStudentFromHemis(studentIdNumber: string): Promise<
   return row
 }
 
+/* ── "Bekor qilingan" talabalar (h_student_status = 17) ──────────────
+ * student-list sukut bo'yicha faqat 11 (o'qimoqda)ni beradi — bekor
+ * qilinganlar faqat _student_status=17 bilan so'ralganda chiqadi. Ro'yxat
+ * kichik (2026-11-06: 58 ta, 1 sahifa), shuning uchun to'liq sinxronizatsiyada
+ * birinchi yuradi va admin "HEMIS'dan yangilash" tugmasi bilan ham chaqiriladi. */
+let cancelledSyncInFlight: Promise<{ total: number; added: number; removed: number }> | null = null
+
+export function syncCancelledStudents(): Promise<{ total: number; added: number; removed: number }> {
+  if (cancelledSyncInFlight) return cancelledSyncInFlight
+  cancelledSyncInFlight = (async () => {
+    const runStartedAt = new Date()
+    const items = await fetchAllPages("/v1/data/student-list", { _student_status: CANCELLED_STATUS_CODE })
+    const rows: CancelledStudentInput[] = []
+    for (const raw of items) {
+      const r = asRecord(raw)
+      const sid = textValue(r.student_id_number)
+      const status = asRecord(r.studentStatus)
+      // Filtr e'tiborga olinmay qolsa ham faqat haqiqatan 17'lar yoziladi
+      if (!sid || textValue(status.code) !== CANCELLED_STATUS_CODE) continue
+      const group = asRecord(r.group)
+      const form = asRecord(r.educationForm)
+      const updatedSec = numberValue(r.updated_at)
+      rows.push({
+        student_id_number: sid,
+        hemis_id: numberValue(r.id),
+        full_name: textValue(r.full_name) || "Talaba",
+        group_id: numberValue(group.id),
+        group_name: textValue(group.name) ?? null,
+        department: textValue(asRecord(r.department).name, asRecord(r.faculty).name) ?? null,
+        specialty: textValue(asRecord(r.specialty).name) ?? null,
+        level_name: textValue(asRecord(r.level).name) ?? null,
+        education_form_code: textValue(form.code) ?? null,
+        education_form_name: textValue(form.name) ?? null,
+        payment_form: textValue(asRecord(r.paymentForm).name) ?? null,
+        status_code: textValue(status.code) ?? null,
+        status_name: textValue(status.name) ?? null,
+        hemis_updated_at: updatedSec ? new Date(updatedSec * 1000) : null,
+      })
+    }
+    const { added, removed } = await saveCancelledStudents(rows, runStartedAt)
+    if (added || removed) console.log(`[hemisSync] bekor qilingan talabalar: ${rows.length} (yangi ${added}, ro'yxatdan chiqqan ${removed})`)
+    return { total: rows.length, added, removed }
+  })().finally(() => { cancelledSyncInFlight = null })
+  return cancelledSyncInFlight
+}
+
 /* ── Xodimlar ──────────────────────────────────────────────────────── */
 export async function syncEmployeeDirectory(): Promise<number> {
   const runStartedAt = new Date()
@@ -433,6 +480,7 @@ export async function runFullHemisSync(): Promise<void> {
     const errors: string[] = []
     try {
       logId = await markHemisSyncStarted()
+      await syncOneResource("bekor qilingan", async () => (await syncCancelledStudents()).total, errors)
       const students    = await syncOneResource("talaba",          syncStudentDirectory,   errors)
       const employees   = await syncOneResource("xodim",            syncEmployeeDirectory,  errors)
       const groups      = await syncOneResource("guruh",            syncGroupDirectory,     errors)

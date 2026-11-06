@@ -25,7 +25,11 @@ import {
 import { fetchMasofaviyGroupsWithStudentCounts } from "./hemis"
 import { notifySafe } from "../services/notificationStore"
 import { getHemisSyncStatus, getHemisSyncLog } from "../services/db"
-import { runFullHemisSync } from "../services/hemisSync"
+import { runFullHemisSync, syncCancelledStudents } from "../services/hemisSync"
+import {
+  listCancelledMasofaviy, getCancelledStudent, updateCancelledStudent, lastCancellationSyncAt,
+  type CancellationUpdate,
+} from "../services/studentCancellationStore"
 import {
   getManagedRolePermissions,
   setRolePermission,
@@ -1830,6 +1834,73 @@ router.get("/hemis-students", adminOnly, async (req: AuthRequest, res: Response)
   } catch (err) {
     res.status(502).json({ success: false, message: err instanceof Error ? err.message : "Talabalar ro'yxatini olishda xato" })
   }
+})
+
+/* ── Bekor qilingan talabalar (HEMIS h_student_status = 17) ────────────
+   GET  /cancelled-students            — masofaviy, hozir HEMIS'da "Bekor qilingan"lar
+   POST /cancelled-students/sync       — HEMIS'dan hozir qayta olish (1–2 so'rov)
+   PUT  /cancelled-students/:sid       — bloklash/blokdan chiqarish, buyruq, izoh
+   Bloklangan talaba LMS'ga kira olmaydi va ochiq sessiyasi ham to'xtaydi
+   (authMiddleware → 403 code: student_cancelled). ── */
+async function cancelledStudentsPayload() {
+  const students = await listCancelledMasofaviy()
+  return {
+    success: true,
+    students,
+    total: students.length,
+    blocked: students.filter((s) => s.blocked).length,
+    lastSyncedAt: await lastCancellationSyncAt(),
+  }
+}
+
+router.get("/cancelled-students", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const payload = await cancelledStudentsPayload()
+    // Deploydan keyin to'liq sinxronizatsiya hali yetib kelmagan bo'lsa — fonda olib qo'yamiz
+    if (!payload.lastSyncedAt) void syncCancelledStudents().catch(() => undefined)
+    res.json(payload)
+  } catch (err) {
+    res.status(500).json({ success: false, message: err instanceof Error ? err.message : "Ro'yxatni olishda xato" })
+  }
+})
+
+router.post("/cancelled-students/sync", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const result = await syncCancelledStudents()
+    void logAudit(req, "cancelledStudents.sync", "students", null, result)
+    res.json({ ...(await cancelledStudentsPayload()), sync: result })
+  } catch (err) {
+    res.status(502).json({ success: false, message: `HEMIS'dan olib bo'lmadi: ${err instanceof Error ? err.message : "noma'lum xato"}` })
+  }
+})
+
+router.put("/cancelled-students/:sid", requirePermission("students", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const sid = String(req.params.sid ?? "").trim()
+  const existing = sid ? await getCancelledStudent(sid) : null
+  if (!existing) { res.status(404).json({ success: false, message: "Talaba bekor qilinganlar ro'yxatida topilmadi" }); return }
+
+  const body = asRecord(req.body)
+  const patch: CancellationUpdate = {}
+  if (typeof body.blocked === "boolean") patch.blocked = body.blocked
+  if ("decreeNumber" in body) patch.decreeNumber = typeof body.decreeNumber === "string" ? body.decreeNumber : null
+  if ("decreeDate" in body) {
+    const d = typeof body.decreeDate === "string" ? body.decreeDate.trim() : ""
+    if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) { res.status(400).json({ success: false, message: "Buyruq sanasi YYYY-MM-DD shaklida bo'lsin" }); return }
+    patch.decreeDate = d || null
+  }
+  if ("note" in body) patch.note = typeof body.note === "string" ? body.note : null
+
+  const updated = await updateCancelledStudent(sid, patch, {
+    id: String(req.user?.userId ?? req.user?.id ?? ""),
+    name: req.user?.fullName ?? null,
+  })
+  if (patch.blocked !== undefined) {
+    void logAudit(req, patch.blocked ? "student.block" : "student.unblock", "students", sid, { fullName: existing.fullName, groupName: existing.groupName })
+  }
+  if (patch.decreeNumber !== undefined || patch.decreeDate !== undefined || patch.note !== undefined) {
+    void logAudit(req, "student.cancelDecree", "students", sid, { decreeNumber: patch.decreeNumber ?? null, decreeDate: patch.decreeDate ?? null })
+  }
+  res.json({ success: true, student: updated })
 })
 
 /* ── GET /api/admin/hemis-students/:groupId/roster — guruhdagi talabalar

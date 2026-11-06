@@ -12,6 +12,7 @@ import { withHemisCache, upsertHemisUser, pool, clearUserCache, getHemisUser, ge
 import { encryptSecret, decryptSecret } from "../services/credentialCrypto"
 import { recordPlatformSession, type LoginMeta } from "../services/attendanceStore"
 import { refreshStudentFromHemis } from "../services/hemisSync"
+import { isStudentBlocked, isUnblockedCancelledMasofaviy, STUDENT_CANCELLED_CODE, STUDENT_CANCELLED_MESSAGE } from "../services/studentCancellationStore"
 import { isSafeFileName, resolveInside, existingFileInside } from "../services/safePath"
 import { isAllowedAppRedirect, isValidCodeChallenge, createMobileHandoff, redeemMobileHandoff, appRedirectUrl } from "../services/mobileAuth"
 import { withSinovControls } from "../services/sinovSandbox"
@@ -1470,6 +1471,23 @@ async function hemisOAuthUser(oauthBase: string, accessToken: string, role: OAut
 // sozlama" degan umumiy (bu holatda noto'g'ri va chalg'ituvchi) qo'shimcha
 // matnsiz, o'ziga xos aniq va chiroyli xabar ko'rsatadi.
 class NotMasofaviyError extends Error {}
+// HEMIS'da "Bekor qilingan" va LMS'da bloklangan talaba — o'z oynasi bor
+// (frontend: error=student_cancelled → "talabalar safidan chetlatilgansiz").
+class StudentCancelledError extends Error {}
+
+/** Parol/kesh orqali kirgan talaba bloklanganmi — JWT ichidagi login va
+ *  (OAuth bo'lsa) profil student_id_number'i bo'yicha. */
+async function isBlockedStudentToken(token: string): Promise<boolean> {
+  const claims = asRecord(jwt.decode(token))
+  if (claims.role !== "student") return false
+  const profileSid = textValue(asRecord(claims.studentProfile).student_id_number)
+  const loginSid = textValue(claims.hemisLogin)
+  return (await isStudentBlocked(profileSid)) || (await isStudentBlocked(loginSid))
+}
+
+function sendStudentCancelled(res: Response) {
+  res.status(403).json({ success: false, code: STUDENT_CANCELLED_CODE, message: STUDENT_CANCELLED_MESSAGE })
+}
 
 // HEMIS'da jonli tekshirilib masofaviy emasligi tasdiqlangan talabalar —
 // rad etilgan kunduzgi talaba qayta-qayta urinsa HEMIS'ga har safar
@@ -1484,6 +1502,8 @@ async function isMasofaviyStudent(studentIdNumber?: string): Promise<boolean> {
     [studentIdNumber]
   )
   if (rows[0]?.education_form_code === "16") return true
+  // HEMIS'da "Bekor qilingan", lekin admin blokdan chiqargan masofaviy talaba
+  if (await isUnblockedCancelledMasofaviy(studentIdNumber)) return true
 
   // Katalog 6 soatda bir yangilanadi — HEMIS'da endigina Masofaviyga
   // ko'chirilgan (yoki yangi qabul qilingan) talaba shu yerda hali eski
@@ -1515,6 +1535,9 @@ async function createOAuthSession(requestedRole: OAuthRole, code: string, redire
 
   if (role === "student") {
     const studentIdNumber = textValue(oauthUser.student_id_number, asRecord(oauthUser.student).student_id_number, oauthProfile.student_id_number)
+    if (await isStudentBlocked(studentIdNumber)) {
+      throw new StudentCancelledError(STUDENT_CANCELLED_MESSAGE)
+    }
     if (!(await isMasofaviyStudent(studentIdNumber))) {
       throw new NotMasofaviyError("Bu platforma faqat Masofaviy ta'lim yo'nalishi talabalari uchun mo'ljallangan. Sizning ta'lim shaklingiz (Kunduzgi/Kechki/Sirtqi) bu tizimga kirish huquqini bermaydi.")
     }
@@ -3274,6 +3297,7 @@ router.post("/login", async (req, res: Response) => {
     const result = local
       ? { success: true as const, token: local.token, role: "student" as const, source: "cache" }
       : await createStudentPasswordSession(String(login).trim(), String(password))
+    if (await isBlockedStudentToken(result.token)) { sendStudentCancelled(res); return }
     if (!local) void saveUserToDb(result.token, "student", String(password))
     recordStudentLogin(result.token, loginMeta(req), String(login))
     res.json(result)
@@ -3329,6 +3353,7 @@ router.post("/auto-login", async (req, res: Response) => {
   // umuman tegmasdan kirish (800+ talaba bir vaqtda kirganda ham) ──
   const local = await tryLocalStudentLogin(login, password)
   if (local) {
+    if (await isBlockedStudentToken(local.token)) { sendStudentCancelled(res); return }
     res.json({ success: true, token: local.token, role: "student", source: "cache" })
     return
   }
@@ -3339,6 +3364,7 @@ router.post("/auto-login", async (req, res: Response) => {
   let studentRetryAfterSec: number | null = null
   try {
     const result = await createStudentPasswordSession(login, password)
+    if (await isBlockedStudentToken(result.token)) { sendStudentCancelled(res); return }
     void saveUserToDb(result.token, "student", password)
     res.json(result)
     return
@@ -3552,8 +3578,14 @@ router.post("/oauth/exchange/:role", async (req, res: Response) => {
     res.json({ redirect: callbackUrl.toString() })
   } catch (err) {
     if (mobileRedirect) {
-      const error = err instanceof NotMasofaviyError ? "not_masofaviy" : "oauth_failed"
+      const error = err instanceof StudentCancelledError ? STUDENT_CANCELLED_CODE
+        : err instanceof NotMasofaviyError ? "not_masofaviy" : "oauth_failed"
       res.json({ redirect: appRedirectUrl(mobileRedirect, { error, message: extractMessage(err, "HEMIS OAuth orqali kirishda xatolik") }) })
+      return
+    }
+    if (err instanceof StudentCancelledError) {
+      callbackUrl.searchParams.set("error", STUDENT_CANCELLED_CODE)
+      res.json({ redirect: callbackUrl.toString() })
       return
     }
     if (err instanceof NotMasofaviyError) {
@@ -3601,6 +3633,7 @@ router.post("/oauth/callback", async (req, res: Response) => {
     }
     res.json({ success: true, ...result })
   } catch (err) {
+    if (err instanceof StudentCancelledError) { sendStudentCancelled(res); return }
     console.error("[HEMIS oauth]", extractMessage(err), (err as AxiosError)?.response?.data)
     res.status(401).json({
       success: false,
@@ -3846,6 +3879,9 @@ router.post("/refresh", async (req, res: Response) => {
     res.status(401).json({ success: false, message: "Sessiya tugadi, qaytadan kiring" })
     return
   }
+
+  // Bloklangan talabaga yangi token berilmaydi (HEMIS'ga ham so'rov ketmaydi)
+  if (role === "student" && await isBlockedStudentToken(rawToken)) { sendStudentCancelled(res); return }
 
   const row = await getHemisUser(hemisId)
   const password = row?.password_enc ? decryptSecret(row.password_enc) : null

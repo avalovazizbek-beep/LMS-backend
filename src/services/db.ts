@@ -1304,6 +1304,43 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "hemis_sync_log")
 
+  // ── HEMIS'da "Bekor qilingan" (h_student_status = 17) talabalar —
+  // studentCancellationStore.ts. Yangi kelgani avtomatik bloklanadi
+  // (blocked = 1), admin blokdan chiqarishi/qayta bloklashi mumkin. HEMIS
+  // ro'yxatidan tushib qolsa (tiklangan) in_hemis_list = 0 — blok amal
+  // qilmaydi. Buyruq raqami/sanasi HEMIS API'da yo'q, admin qo'lda yozadi. ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_student_cancellations (
+      student_id_number    VARCHAR(32) PRIMARY KEY,
+      hemis_id             INT NULL,
+      full_name            VARCHAR(255) NOT NULL,
+      group_id             INT NULL,
+      group_name           VARCHAR(120) NULL,
+      department           VARCHAR(255) NULL,
+      specialty            VARCHAR(255) NULL,
+      level_name           VARCHAR(60) NULL,
+      education_form_code  VARCHAR(20) NULL,
+      education_form_name  VARCHAR(100) NULL,
+      payment_form         VARCHAR(100) NULL,
+      status_code          VARCHAR(10) NULL,
+      status_name          VARCHAR(100) NULL,
+      hemis_updated_at     DATETIME NULL,
+      in_hemis_list        TINYINT(1) NOT NULL DEFAULT 1,
+      blocked              TINYINT(1) NOT NULL DEFAULT 1,
+      block_source         VARCHAR(10) NOT NULL DEFAULT 'auto',
+      block_changed_by     VARCHAR(64) NULL,
+      block_changed_by_name VARCHAR(255) NULL,
+      block_changed_at     DATETIME NULL,
+      decree_number        VARCHAR(120) NULL,
+      decree_date          DATE NULL,
+      note                 VARCHAR(500) NULL,
+      first_seen_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      synced_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_cancel_form (education_form_code),
+      INDEX idx_cancel_blocked (blocked, in_hemis_list)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_student_cancellations")
+
   // Default sozlamalar
   await pool.query(`
     INSERT IGNORE INTO lms_settings (key_name, value) VALUES

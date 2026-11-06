@@ -48,6 +48,7 @@ import { publicResourcePath } from "./services/localResourceStore"
 import { initDatabase } from "./services/db"
 import { repairTaskMaxScores } from "./services/teachingStore"
 import { runFullHemisSync } from "./services/hemisSync"
+import { reloadBlockedStudents } from "./services/studentCancellationStore"
 import { startCertificateSweep } from "./services/certificateStore"
 import { startVideoTranscoder } from "./services/videoTranscode"
 import * as mediasoupService from "./services/mediasoupService"
@@ -748,6 +749,8 @@ async function start() {
   try {
     await initDatabase()
     console.log("✓ MySQL tayyor")
+    // HEMIS'da "Bekor qilingan" va bloklangan talabalar keshi (authMiddleware)
+    await reloadBlockedStudents()
     // Oraliq / MI topshirig'ining maksimal bali baliga tenglanadi (baholar shu nisbatda)
     await repairTaskMaxScores()
       .then((fixed) => {

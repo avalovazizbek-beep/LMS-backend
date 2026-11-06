@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express"
 import jwt from "jsonwebtoken"
 import type { RowDataPacket } from "mysql2"
 import { pool } from "../services/db"
+import { isBlockedCached, STUDENT_CANCELLED_CODE, STUDENT_CANCELLED_MESSAGE } from "../services/studentCancellationStore"
 
 export interface AuthUser {
   id?: string | number
@@ -67,6 +68,10 @@ function hasLegacyGroupId(user: AuthUser) {
 
 /** Tokenni middleware'siz tekshiradigan joylar (fayl havolalari) uchun */
 export async function withFixedGroupId(user: AuthUser): Promise<AuthUser> {
+  // Fayl havolalari (?token=) ham bloklangan talabaga ochilmasin — chaqiruvchilar xatoni "token yo'q" deb oladi
+  if (user.role === "student" && isBlockedCached([user.studentProfile?.student_id_number, user.hemisLogin])) {
+    throw new Error(STUDENT_CANCELLED_MESSAGE)
+  }
   if (hasLegacyGroupId(user)) await fixLegacyGroupId(user).catch(() => {})
   return user
 }
@@ -84,6 +89,13 @@ export function authMiddleware(req: AuthRequest, res: Response, next: NextFuncti
 
   try {
     const decoded = jwt.verify(raw, process.env.JWT_SECRET || "secret") as AuthUser
+    // HEMIS'da "Bekor qilingan" va admin bloklagan talaba — tokeni hali
+    // amal qilsa ham (7–30 kun) hech qaysi sahifa ochilmaydi. Frontend shu
+    // `code` bo'yicha "talabalar safidan chetlatilgansiz" oynasini ko'rsatadi.
+    if (decoded.role === "student" && isBlockedCached([decoded.studentProfile?.student_id_number, decoded.hemisLogin])) {
+      res.status(403).json({ success: false, code: STUDENT_CANCELLED_CODE, message: STUDENT_CANCELLED_MESSAGE })
+      return
+    }
     req.user = decoded
     if (hasLegacyGroupId(decoded)) {
       void withFixedGroupId(decoded).then(() => next())
