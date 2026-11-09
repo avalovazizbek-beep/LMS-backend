@@ -1520,7 +1520,8 @@ export async function getPendingGrading(teacherUserId: number): Promise<PendingG
      ORDER BY last_at DESC`,
     [teacherUserId]
   )
-  return rows.map(r => ({
+  // Baholash sahifasidagi guruh tanlovi bilan bir xil — kunduzgi guruh chiqmasin
+  return rows.filter(r => r.group_name == null || isMasofaviyGroupName(String(r.group_name))).map(r => ({
     contentId: Number(r.content_id),
     title: String(r.title ?? ""),
     groupId: r.group_id != null ? Number(r.group_id) : null,

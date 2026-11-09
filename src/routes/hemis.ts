@@ -297,6 +297,43 @@ function isMasofaviyGroupName(name: string): boolean {
   return /-M-|\(M\)/i.test(name)
 }
 
+function groupNameOf(value: unknown): string | undefined {
+  return typeof value === "string" ? textValue(value) : textValue(asRecord(value).name)
+}
+
+/** HEMIS elementidagi guruh nomlari (group / groups[] / group_name). */
+function itemGroupNames(item: unknown): string[] {
+  const record = asRecord(item)
+  const names: string[] = []
+  if (Array.isArray(record.groups)) record.groups.forEach((g) => { const n = groupNameOf(g); if (n) names.push(n) })
+  const single = groupNameOf(record.group) ?? textValue(record.group_name)
+  if (single) names.push(single)
+  return names
+}
+
+/** O'qituvchi sahifalaridagi HEMIS ro'yxatlari (nazoratlar, jurnallar,
+ *  topshiriqlar...) o'qituvchining BUTUN yuklamasini qaytaradi — kunduzgi
+ *  guruhlar ham. LMS faqat masofaviy uchun: guruhi ma'lum va birortasi ham
+ *  masofaviy bo'lmagan element tashlanadi; guruhsiz (fan, reja) elementlar
+ *  o'zgarmaydi; aralash `groups` ro'yxatidan kunduzgilari olib tashlanadi. */
+function masofaviyOnlyItems<T>(items: T[]): T[] {
+  const out: T[] = []
+  for (const item of items) {
+    const names = itemGroupNames(item)
+    if (!names.length) { out.push(item); continue }
+    if (!names.some(isMasofaviyGroupName)) continue
+    const record = asRecord(item)
+    if (Array.isArray(record.groups) && record.groups.some((g) => !isMasofaviyGroupName(groupNameOf(g) ?? ""))) {
+      const groups = record.groups.filter((g) => isMasofaviyGroupName(groupNameOf(g) ?? ""))
+      const group = isMasofaviyGroupName(groupNameOf(record.group) ?? "") ? record.group : (groups[0] ?? record.group)
+      out.push({ ...record, groups, group } as T)
+      continue
+    }
+    out.push(item)
+  }
+  return out
+}
+
 /**
  * O'qituvchining berilgan bitta o'quv yilida dars bergan guruhlarini HEMIS'dan
  * so'raydi (tutor API'dan farqli — u faqat joriy yuklamani beradi). Boshqa
@@ -2056,12 +2093,6 @@ async function employeeDataFirstItems(path: string, params: Record<string, strin
   return Array.isArray(page.items) ? page.items : normalizeDataItems(page.items)
 }
 
-async function employeeDataTotal(path: string, params: Record<string, string>, user?: AuthRequest["user"]) {
-  const data = await hemisGet(HEMIS_BASE, path, HEMIS_TOKEN, employeeDataParams(path, { ...params, page: "1", limit: "1" }, user), false)
-  const totalCount = numberValue(unwrapHemisPagination(data).totalCount)
-  return totalCount ?? itemCount(unwrapHemisData(data))
-}
-
 function normalizeDataItems(value: unknown) {
   if (Array.isArray(value)) return value
   const record = asRecord(value)
@@ -2446,8 +2477,8 @@ function itemMatchesEmployeeFilters(item: unknown, params: Record<string, string
 }
 
 async function attendanceJournalCount(params: Record<string, string>, user?: AuthRequest["user"]) {
-  const items = (await employeeDataAllItems("/v1/data/attendance-control-list", params, user))
-    .filter((item) => itemMatchesEmployeeFilters(item, params))
+  const items = masofaviyOnlyItems((await employeeDataAllItems("/v1/data/attendance-control-list", params, user))
+    .filter((item) => itemMatchesEmployeeFilters(item, params)))
   return attendanceJournalItems(items).length || items.length
 }
 
@@ -2477,8 +2508,8 @@ export function controlKind(item: unknown): "midterm" | "final" | "other" {
 }
 
 async function controlItems(params: Record<string, string>, user?: AuthRequest["user"]) {
-  return (await employeeDataAllItems("/v1/data/subject-exam-list", params, user))
-    .filter((item) => itemMatchesEmployeeFilters(item, params))
+  return masofaviyOnlyItems((await employeeDataAllItems("/v1/data/subject-exam-list", params, user))
+    .filter((item) => itemMatchesEmployeeFilters(item, params)))
 }
 
 async function subjectTaskCountForRow(taskParams: Record<string, string>, user?: AuthRequest["user"]) {
@@ -2960,31 +2991,26 @@ async function controlDashboardData(params: Record<string, string>, user?: AuthR
   )
 }
 
-function itemCount(value: unknown) {
-  if (Array.isArray(value)) return value.length
-  const record = asRecord(value)
-  const items = record.items
-  if (Array.isArray(items)) return items.length
-  return Object.keys(record).length ? 1 : 0
-}
-
-async function safeEmployeeDataCount(path: string, params: Record<string, string>, user?: AuthRequest["user"]) {
+/** Dars jadvali soni — faqat masofaviy guruhlardagi darslar (Dars jadvali
+ *  sahifasi ham shularni ko'rsatadi; HEMIS totalCount kunduzgilarni ham sanaydi). */
+async function masofaviyScheduleCount(params: Record<string, string>, user?: AuthRequest["user"]) {
   try {
-    return employeeDataTotal(path, params, user)
+    return masofaviyOnlyItems(await employeeDataAllItems("/v1/data/schedule-list", { ...params, limit: "200" }, user)).length
   } catch (err) {
-    console.warn("[HEMIS employee dashboard] %s:", path, extractMessage(err))
+    console.warn("[HEMIS employee dashboard] schedule:", extractMessage(err))
     return 0
   }
 }
 
 async function employeeDashboardData(params: Record<string, string>, user?: AuthRequest["user"]) {
+  const scheduleCount = masofaviyScheduleCount(params, user)
   const [attendanceJournal, schedule, lessonList, controls] = await Promise.all([
     attendanceJournalCount(params, user).catch((err) => {
       console.warn("[HEMIS employee dashboard] attendance journal:", extractMessage(err))
       return 0
     }),
-    safeEmployeeDataCount("/v1/data/schedule-list", params, user),
-    safeEmployeeDataCount("/v1/data/schedule-list", params, user),
+    scheduleCount,
+    scheduleCount,
     controlDashboardData(params, user).catch((err) => {
       console.warn("[HEMIS employee dashboard] controls:", extractMessage(err))
       return { midterm: 0, final: 0, other: 0 }
@@ -3987,6 +4013,9 @@ router.get("/employee/:resource", async (req: AuthRequest, res: Response) => {
       req.user?.employeeHemisBase || HEMIS_EMPLOYEE,
       req.user
     )
+    // Kunduzgi/sirtqi guruhlar o'qituvchi sahifalarida chiqmasin (Oraliq
+    // nazorat, jurnallar, topshiriqlar...) — har bir resurs uchun bitta joyda.
+    if (Array.isArray(result.data)) result.data = masofaviyOnlyItems(result.data)
     // Sinov guruhi HEMIS'da yo'q — uning oraliqlari nazoratlar ro'yxatiga qo'shiladi
     res.json({ success: true, ...(await withSinovControls(resource, teacherUserId(req.user), result)) })
   } catch (err) {
