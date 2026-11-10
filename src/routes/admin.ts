@@ -2413,7 +2413,11 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
   // bo'ladi; qolganlari — faqat test.
   const controlTypes = controlType && controlType !== "none" ? controlType.split(",").map(s => s.trim()).filter(Boolean) : []
   const withTasks = controlTypes.some(c => c === "oraliq" || c === MUSTAQIL_CONTROL)
-  const where: string[] = [withTasks ? "tc.type IN ('exam','assignment')" : "tc.type = 'exam'", "tc.is_active = 1"]
+  // Nofaol (is_active = 0) ham chiqadi: o'qituvchi "Faol" tugmasini o'chirsa
+  // yoki "Baholashni yakunlash"ni bossa ham talaba ishni ko'radi, jurnal uni
+  // hisoblaydi (pickPeriodExams / pickMiItems) — admin ko'rmay qolardi.
+  // Kartada "Nofaol" belgisi bilan ajratiladi.
+  const where: string[] = [withTasks ? "tc.type IN ('exam','assignment')" : "tc.type = 'exam'"]
   const params: unknown[] = []
   if (groupId) { where.push("tc.group_id = ?"); params.push(groupId) }
   if (subject) { where.push("LOWER(tc.subject_name) = LOWER(?)"); params.push(subject) }
@@ -2426,11 +2430,14 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
   // bitta teacher_user_id ikki qatorda bo'lsa, JOIN nazoratni ikki marta chiqarardi.
   const [rows] = await pool.query<RowDataPacket[]>(`
     SELECT tc.id, tc.type, tc.title, tc.subject_name, tc.group_id, g.name AS group_name, tc.control_type, tc.kind,
-           tc.teacher_user_id, tc.max_score, tc.grade_points, tc.grade_part, tc.available_from, tc.deadline,
+           tc.teacher_user_id, tc.max_score, tc.grade_points, tc.grade_part, tc.available_from, tc.deadline, tc.is_active,
            COALESCE(
              (SELECT NULLIF(TRIM(hu.full_name),'') FROM hemis_users hu
                WHERE hu.teacher_user_id = tc.teacher_user_id AND TRIM(COALESCE(hu.full_name,'')) <> ''
                ORDER BY hu.id DESC LIMIT 1),
+             -- Talaba kartasidagi ism shu katalogdan olinadi (withTeacherNames)
+             (SELECT NULLIF(TRIM(ed.full_name),'') FROM hemis_employees_directory ed
+               WHERE ed.hemis_id = tc.teacher_user_id LIMIT 1),
              CONCAT('O\\'qituvchi #', tc.teacher_user_id)) AS teacher_name,
            (SELECT COUNT(*) FROM lms_submissions s WHERE s.content_id = tc.id) AS submission_count,
            (SELECT COUNT(*) FROM lms_exam_retake_grants rg WHERE rg.content_id = tc.id AND rg.status = 'active') AS grant_count
@@ -2454,6 +2461,7 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
     availableFrom: r.available_from, deadline: r.deadline,
     submissionCount: Number(r.submission_count ?? 0),
     grantCount: Number(r.grant_count ?? 0),
+    isActive: Number(r.is_active) === 1,
   })) })
 })
 
