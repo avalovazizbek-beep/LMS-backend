@@ -46,6 +46,7 @@ import {
   removeStoredFile,
   listSubmissions,
   getSubmissionForStudent,
+  listStudentSubmissions,
   getSubmissionById,
   getProgressBulk,
   getSubmissionsBulk,
@@ -2562,6 +2563,31 @@ router.get("/content/:id/submissions/me", async (req: AuthRequest, res: Response
   // (masalan "yuz ko'rinmadi" — test nega to'xtaganini tushunishi uchun)
   const violationCounts = submission ? await getStudentViolationCounts(id, sId) : null
   res.json({ success: true, data: submission ? { ...submission, violationCounts } : null })
+})
+
+/* ── GET /submissions/mine?ids=1,2,3 — talabaning bir nechta ishdagi o'z
+   natijasi bir so'rovda (Imtihonlar sahifasi: topshirildi / tekshirilmoqda /
+   baho). Faqat holat uchun kerakli maydonlar — fayl va javoblar emas. ── */
+router.get("/submissions/mine", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role === "employee") {
+    res.status(403).json({ success: false, message: "Faqat talaba uchun" })
+    return
+  }
+  const ids = [...new Set(textValue(req.query.ids).split(",").map(Number)
+    .filter((n) => Number.isInteger(n) && n > 0))].slice(0, 500)
+  const submissions = await listStudentSubmissions(studentUserId(req.user), ids)
+  const seen = new Set<number>()
+  const data = submissions
+    .filter((s) => !seen.has(s.contentId) && !!seen.add(s.contentId))
+    .map((s) => ({
+      contentId: s.contentId,
+      grade: s.grade,
+      submittedAt: s.submittedAt,
+      gradedAt: s.gradedAt,
+      attemptsUsed: s.attemptsUsed,
+      retakeGranted: s.retakeGranted,
+    }))
+  res.json({ success: true, data })
 })
 
 /* ── GET /content/:id/submissions — o'qituvchi uchun ro'yxat ───────── */

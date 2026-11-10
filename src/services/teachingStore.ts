@@ -1302,6 +1302,21 @@ export async function getSubmissionForStudent(contentId: number, studentUserId: 
   return rows.length ? mapSubmissionRow(rows[0]) : null
 }
 
+/** Talabaning berilgan ishlardagi o'z natijalari — Imtihonlar sahifasi har bir
+    karta uchun alohida so'rov yubormasin */
+export async function listStudentSubmissions(studentUserId: number, contentIds: number[]): Promise<SubmissionRecord[]> {
+  if (!contentIds.length) return []
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT s.*, g.id AS active_grant_id, g.granted_at AS active_grant_at
+     FROM lms_submissions s
+     LEFT JOIN lms_exam_retake_grants g
+       ON g.content_id = s.content_id AND g.student_user_id = s.student_user_id AND g.status = 'active'
+     WHERE s.student_user_id = ? AND s.content_id IN (?)`,
+    [studentUserId, contentIds]
+  )
+  return rows.map(mapSubmissionRow)
+}
+
 export async function getSubmissionById(id: number): Promise<SubmissionRecord | null> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>("SELECT * FROM lms_submissions WHERE id = ?", [id])
   return rows.length ? mapSubmissionRow(rows[0]) : null
