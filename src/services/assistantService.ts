@@ -24,9 +24,13 @@ const TIMEOUT_MS = Number(process.env.ASSISTANT_TIMEOUT_MS || 300_000)
 const THINK = process.env.ASSISTANT_THINK === "1"
 // OLLAMA_NUM_GPU=0 — faqat protsessorda ishlatish. Serverda Ollama kuchsiz o'rnatilgan
 // videochipni "GPU" deb topib, modelning 82% ini unga yuklagan va javob qotib qolgan (2026-11-11).
-const GPU_OPTION: Record<string, number> = /^\d+$/.test(process.env.OLLAMA_NUM_GPU ?? "")
-  ? { num_gpu: Number(process.env.OLLAMA_NUM_GPU) }
-  : {}
+// OLLAMA_NUM_THREAD — model nechta protsessor oqimida ishlasin. Server Proxmox konteyneri:
+// xost 128 oqimli, konteynerga 32 tasi berilgan, Ollama esa xostga qarab 64 oqim ochadi —
+// oqimlar bir-biriga xalaqit berib, javob deyarli to'xtab qoladi (2026-11-11). 16 qo'ying.
+const GPU_OPTION: Record<string, number> = {
+  ...(/^\d+$/.test(process.env.OLLAMA_NUM_GPU ?? "") ? { num_gpu: Number(process.env.OLLAMA_NUM_GPU) } : {}),
+  ...(/^[1-9]\d*$/.test(process.env.OLLAMA_NUM_THREAD ?? "") ? { num_thread: Number(process.env.OLLAMA_NUM_THREAD) } : {}),
+}
 
 export interface ChatTurn {
   role: "user" | "assistant"
@@ -215,7 +219,8 @@ const CHAT_SYSTEM = [
   STYLE,
   "",
   "SAHIFALAR:",
-  ...TEACHER_PAGES.map((p) => `- ${p.title}: ${p.purpose}`),
+  // Qisqa: protsessorda har 100 token ~2 soniya — sahifaning faqat birinchi gapi
+  ...TEACHER_PAGES.map((p) => `- ${p.title.split(" (")[0]}: ${p.purpose.split(/[.:;]/)[0].slice(0, 110)}`),
   "",
   "QOIDALAR:",
   "- Guruhlar va dars jadvali HEMIS'dan olinadi; mavzular, materiallar, testlar, topshiriqlar va baholar LMS'da saqlanadi.",
