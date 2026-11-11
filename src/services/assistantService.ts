@@ -22,6 +22,11 @@ const OLLAMA_URL = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(
 export const ASSISTANT_MODEL = process.env.OLLAMA_MODEL || "qwen3:8b"
 const TIMEOUT_MS = Number(process.env.ASSISTANT_TIMEOUT_MS || 300_000)
 const THINK = process.env.ASSISTANT_THINK === "1"
+// OLLAMA_NUM_GPU=0 — faqat protsessorda ishlatish. Serverda Ollama kuchsiz o'rnatilgan
+// videochipni "GPU" deb topib, modelning 82% ini unga yuklagan va javob qotib qolgan (2026-11-11).
+const GPU_OPTION: Record<string, number> = /^\d+$/.test(process.env.OLLAMA_NUM_GPU ?? "")
+  ? { num_gpu: Number(process.env.OLLAMA_NUM_GPU) }
+  : {}
 
 export interface ChatTurn {
   role: "user" | "assistant"
@@ -49,7 +54,10 @@ async function ollamaChat(body: Record<string, unknown>, onDelta?: OnDelta): Pro
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
-        body: JSON.stringify({ model: ASSISTANT_MODEL, stream: true, think: false, keep_alive: "2h", ...body }),
+        body: JSON.stringify({
+          model: ASSISTANT_MODEL, stream: true, think: false, keep_alive: "2h", ...body,
+          options: { ...(body.options as Record<string, unknown> | undefined), ...GPU_OPTION },
+        }),
       })
       if (!res.ok || !res.body) throw new Error(`Ollama ${res.status}: ${(await res.text()).slice(0, 200)}`)
       // Ollama oqimi: har qatorda bitta JSON ({ message: { content }, done })
