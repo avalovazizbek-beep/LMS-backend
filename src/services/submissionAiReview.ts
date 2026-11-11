@@ -57,8 +57,27 @@ const clamp = (v: unknown): number | null => {
   return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : null
 }
 
+const GENERIC_TITLE_WORDS = new Set([
+  "topshiriq", "topshirig", "vazifa", "amaliy", "mustaqil", "nazorat", "oraliq", "yakuniy", "test", "mavzu", "dars", "sinov",
+  "задание", "тест", "task",
+])
+
+/** Topshiriq nomi va tavsifi mavzuni bildiradimi. "dfedvc", "1-topshiriq", "test" kabi nomlar
+    bilan moslikni baholab bo'lmaydi — model baribir yuqori foiz to'qib chiqaradi (2026-11-11). */
+export function topicIsClear(title: string, description: string | null): boolean {
+  const words = `${title} ${description ?? ""}`.toLowerCase().replace(/[`´‘’ʻʼ']/g, "").match(/[\p{L}]{4,}/gu) ?? []
+  const meaningful = words.filter((w) =>
+    !GENERIC_TITLE_WORDS.has(w)
+    && /[aeiouаеёиоуыэюяў]/u.test(w)               // unlisi bor
+    && !/[^aeiouаеёиоуыэюяў]{5,}/u.test(w))        // ketma-ket 5+ undosh yo'q (tasodifiy harflar emas)
+  // Umumiy bo'lmagan, so'zga o'xshash kamida 2 ta har xil so'z
+  return new Set(meaningful).size >= 2
+}
+
 async function reviewText(topic: { title: string; description: string | null; subject: string }, text: string): Promise<Omit<AiReview, "status">> {
+  const clear = topicIsClear(topic.title, topic.description)
   const task = [
+    clear ? "" : "DIQQAT: topshiriq nomi mavzuni bildirmaydi. relevance ni 0 qo'y (u hisobga olinmaydi) va grade ni faqat ishning o'z sifatiga qarab ber: mazmun to'liqligi, dalillar, tuzilishi.",
     `Fan: ${topic.subject}`,
     `Topshiriq: ${topic.title}`,
     topic.description?.trim() ? `Topshiriq tavsifi: ${topic.description.trim().slice(0, 800)}` : "",
@@ -70,12 +89,13 @@ async function reviewText(topic: { title: string; description: string | null; su
     messages: [{ role: "system", content: SYSTEM }, { role: "user", content: task }],
     format: SCHEMA,
     options: { temperature: 0.1, num_ctx: 4096, num_predict: 200 },
-  })
+  }, undefined, "low")
   const obj = JSON.parse(raw) as { relevance?: unknown; grade?: unknown; comment?: unknown }
   const relevance = clamp(obj.relevance)
   const grade = clamp(obj.grade)
   if (relevance === null || grade === null) throw new Error("model javobi to'liq emas")
-  return { relevance, grade, comment: typeof obj.comment === "string" ? obj.comment.trim().slice(0, 600) : null }
+  // Mavzu aniq bo'lmasa moslik foizi berilmaydi (null) — frontend buni alohida ko'rsatadi
+  return { relevance: clear ? relevance : null, grade, comment: typeof obj.comment === "string" ? obj.comment.trim().slice(0, 600) : null }
 }
 
 /* ── Navbat (xotirada) — bitta ishchi, model bitta ───────────────────── */

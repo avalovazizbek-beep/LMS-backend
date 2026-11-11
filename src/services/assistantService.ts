@@ -46,10 +46,49 @@ export interface AssistantAnswer {
 /** Javob bo'lagi kelganda chaqiriladi (oqim) */
 export type OnDelta = (text: string) => void
 
-// Bitta model — so'rovlar navbat bilan
-let queue: Promise<unknown> = Promise.resolve()
+/* ── Navbat: bir vaqtda ASSISTANT_PARALLEL ta so'rov (standart 1) ─────────
+ * Ikki ustuvorlik: "high" — o'qituvchi yozib turgan savol (yordamchi oynasi),
+ * "low" — fondagi ish (antiplagiatdagi AI tavsiya). Fondagi ishlar hech qachon
+ * hamma joyni egallamaydi: ASSISTANT_PARALLEL >= 2 bo'lsa bitta joy doim
+ * o'qituvchi savollari uchun bo'sh turadi; navbatda esa "high" doim oldinda.
+ * Serverda Ollama ham shuncha parallel so'rovga sozlangan bo'lishi kerak
+ * (OLLAMA_NUM_PARALLEL), aks holda u o'zi navbatga qo'yadi. */
+export type ChatPriority = "high" | "low"
+const PARALLEL = Math.max(1, Math.min(8, Number(process.env.ASSISTANT_PARALLEL) || 1))
+const LOW_MAX = Math.max(1, PARALLEL - 1)
+let active = 0
+let activeLow = 0
+const waitHigh: Array<() => void> = []
+const waitLow: Array<() => void> = []
 
-export async function ollamaChat(body: Record<string, unknown>, onDelta?: OnDelta): Promise<string> {
+function pump() {
+  while (active < PARALLEL) {
+    const next = waitHigh.shift() ?? (activeLow < LOW_MAX ? waitLow.shift() : undefined)
+    if (!next) return
+    next()
+  }
+}
+
+function acquire(priority: ChatPriority): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const start = () => { active += 1; if (priority === "low") activeLow += 1; resolve() }
+    ;(priority === "high" ? waitHigh : waitLow).push(start)
+    pump()
+  })
+}
+
+function release(priority: ChatPriority) {
+  active -= 1
+  if (priority === "low") activeLow -= 1
+  pump()
+}
+
+/** Hozir navbatda kutayotgan o'qituvchi savollari soni (holat uchun) */
+export function assistantQueue(): { parallel: number; active: number; waiting: number } {
+  return { parallel: PARALLEL, active, waiting: waitHigh.length }
+}
+
+export async function ollamaChat(body: Record<string, unknown>, onDelta?: OnDelta, priority: ChatPriority = "high"): Promise<string> {
   const run = async () => {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
@@ -86,9 +125,12 @@ export async function ollamaChat(body: Record<string, unknown>, onDelta?: OnDelt
       clearTimeout(timer)
     }
   }
-  const job = queue.then(run)
-  queue = job.catch(() => undefined)
-  return job
+  await acquire(priority)
+  try {
+    return await run()
+  } finally {
+    release(priority)
+  }
 }
 
 /* ── 1) Buyruqlarni kod bilan aniqlash ─────────────────────────────── */
