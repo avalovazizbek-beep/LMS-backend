@@ -4,14 +4,16 @@ import { pool } from "./db"
 import type { SubmissionRecord, TeacherContentRecord } from "./teachingStore"
 import { getSubmissionText, type TextSource } from "./submissionText"
 import { getAiReviews, queueAiReviews, type AiReview } from "./submissionAiReview"
+import { ensureCorpus, findCandidates } from "./plagiarismCorpus"
 
 /* ── Antiplagiat ─────────────────────────────────────────────────────────
  * 1) Har bir ishning matni (services/submissionText.ts): oddiy fayldan
  *    to'g'ridan-to'g'ri, rasm / skaner / qo'lyozma rasmidan — OCR orqali.
  *    Fonda oldindan tayyorlanadi, shuning uchun tugma bosilganda tez.
- * 2) O'zaro solishtirish: shu topshiriqdagi ishlar + shu o'qituvchining
- *    boshqa guruhlarga tarqatilgan AYNAN shu topshirig'idagi ishlar.
- * 3) Internet (ixtiyoriy, Google kaliti bo'lsa).
+ * 2) O'zaro solishtirish: shu topshiriqdagi ishlar + saytdagi BARCHA boshqa
+ *    topshirilgan ishlar (hamma fan, guruh, o'qituvchi) — services/plagiarismCorpus.ts.
+ * 3) Internet — O'CHIRILGAN (egasining qarori, 2026-11-11: Google Custom Search
+ *    loyihaga ruxsat bermadi). Yoqish: PLAGIARISM_INTERNET=1 (Wikipedia + Google kaliti bo'lsa).
  * 4) AI tavsiya (services/submissionAiReview.ts): mavzuga moslik va
  *    100 ballik tavsiya baho — fonda, navbat bilan. ─────────────────── */
 
@@ -45,7 +47,7 @@ function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
 interface Doc {
   submissionId: number
   studentName: string
-  /** Boshqa guruhdagi ish bo'lsa — guruh nomi */
+  /** Boshqa topshiriqdagi ish bo'lsa — qayerdan: "guruh · fan · topshiriq nomi" */
   groupName: string | null
   source: TextSource
   words: number
@@ -129,8 +131,10 @@ async function checkWikipedia(text: string): Promise<{ ok: boolean; matches: Int
   return { ok, matches }
 }
 
+const INTERNET_ENABLED = process.env.PLAGIARISM_INTERNET === "1"
+
 export async function checkInternet(text: string): Promise<{ enabled: boolean; matches: InternetMatch[] }> {
-  if (!text.trim()) return { enabled: false, matches: [] }
+  if (!INTERNET_ENABLED || !text.trim()) return { enabled: false, matches: [] }
   const [wiki, google] = await Promise.all([
     WIKI_ENABLED ? checkWikipedia(text) : Promise.resolve({ ok: false, matches: [] as InternetMatch[] }),
     checkGoogle(text),
@@ -181,7 +185,7 @@ export interface PlagiarismResult {
   maxSimilarityPct: number
   matchedSubmissionId: number | null
   matchedStudentName: string | null
-  /** Eng o'xshash ish boshqa guruhda bo'lsa — o'sha guruh nomi */
+  /** Eng o'xshash ish boshqa topshiriqda bo'lsa — qayerdan: "guruh · fan · topshiriq nomi" */
   matchedGroupName: string | null
   /** Matn qayerdan olindi: "text" — fayldan, "ocr" — rasm/skanerdan o'qildi, "none" — o'qib bo'lmadi */
   textSource: TextSource
@@ -193,23 +197,24 @@ export interface PlagiarismResult {
   ai: AiReview | null
 }
 
-/** Shu o'qituvchining boshqa guruhlarga tarqatilgan AYNAN shu topshirig'idagi ishlar
-    (faqat matni allaqachon tayyorlanganlari — fondagi ishchi tayyorlab turadi) */
-async function siblingDocs(content: TeacherContentRecord): Promise<Doc[]> {
+/** Saytdagi boshqa ishlardan nomzodlarning to'liq matni (aniq foiz shular bilan hisoblanadi).
+    Doc.groupName — qayerdan ekani: "guruh · fan · topshiriq nomi". */
+async function loadCandidateDocs(ids: number[]): Promise<Map<number, Doc>> {
+  const map = new Map<number, Doc>()
+  if (!ids.length) return map
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    `SELECT s.id, s.student_full_name, s.extracted_text, s.text_source, g.name AS group_name
+    `SELECT s.id, s.student_full_name, s.extracted_text, s.text_source,
+            c.title, c.subject_name, g.name AS group_name
      FROM lms_submissions s
      JOIN lms_teacher_content c ON c.id = s.content_id
      LEFT JOIN lms_groups g ON g.id = c.group_id
-     WHERE c.id <> ? AND c.teacher_user_id = ? AND c.type = ? AND c.title = ? AND c.subject_name = ?
-       AND s.extracted_text IS NOT NULL AND s.extracted_text <> ''
-     ORDER BY s.id DESC LIMIT 600`,
-    [content.id, content.teacherUserId, content.type, content.title, content.subjectName]
+     WHERE s.id IN (?)`, [ids]
   )
-  return rows.map((r) => toDoc(
-    Number(r.id), String(r.student_full_name), r.group_name ? String(r.group_name) : null,
-    String(r.extracted_text), (r.text_source as TextSource) ?? "text"
-  ))
+  for (const r of rows) {
+    const where = [r.group_name, r.subject_name, r.title].filter(Boolean).map(String).join(" · ").slice(0, 250)
+    map.set(Number(r.id), toDoc(Number(r.id), String(r.student_full_name), where || null, String(r.extracted_text ?? ""), (r.text_source as TextSource) ?? "text"))
+  }
+  return map
 }
 
 async function inChunks<T, R>(items: T[], size: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -226,7 +231,11 @@ export async function runPlagiarismCheck(content: TeacherContentRecord, submissi
   const texts = await inChunks(submissions, 4, async (sub) => ({ sub, ...(await getSubmissionText(sub.id)) }))
   const docs = new Map<number, Doc>()
   for (const t of texts) docs.set(t.sub.id, toDoc(t.sub.id, t.sub.studentFullName, null, t.text, t.source))
-  const others = await siblingDocs(content)
+  // Saytdagi barcha boshqa ishlar: indeksdan har bir ish uchun eng o'xshash nomzodlar
+  await ensureCorpus()
+  const candidateIds = new Map<number, number[]>()
+  for (const t of texts) candidateIds.set(t.sub.id, findCandidates(t.text, t.sub.studentUserId, content.id))
+  const candidateDocs = await loadCandidateDocs([...new Set([...candidateIds.values()].flat())])
 
   const internet = await inChunks(texts, 5, (t) => checkInternet(t.text))
 
@@ -235,7 +244,8 @@ export async function runPlagiarismCheck(content: TeacherContentRecord, submissi
     const mine = docs.get(sub.id)!
     let best = 0
     let bestDoc: Doc | null = null
-    for (const other of [...docs.values(), ...others]) {
+    const outside = (candidateIds.get(sub.id) ?? []).map((id) => candidateDocs.get(id)).filter((d): d is Doc => !!d)
+    for (const other of [...docs.values(), ...outside]) {
       if (other.submissionId === sub.id) continue
       const sim = similarity(mine, other)
       if (sim > best) { best = sim; bestDoc = other }
