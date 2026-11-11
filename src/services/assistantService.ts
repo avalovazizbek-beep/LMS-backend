@@ -1,23 +1,27 @@
-import { TEACHER_PAGES, TEACHER_PATHS, teacherGuideText, type GuidePage } from "./assistantGuide"
+import { TEACHER_PAGES, type GuidePage } from "./assistantGuide"
 
 /* ── O'qituvchi yordamchisi: o'z serverimizdagi model (Ollama) bilan suhbat ──
  * Bepul va ma'lumot tashqariga chiqmaydi: so'rov faqat OLLAMA_URL ga ketadi.
- *   OLLAMA_URL    — standart http://127.0.0.1:11434 (GPU'li boshqa server bo'lsa — uning manzili)
- *   OLLAMA_MODEL  — standart qwen3:8b
+ *   OLLAMA_URL       — standart http://127.0.0.1:11434
+ *   OLLAMA_MODEL     — standart qwen3:8b
+ *   ASSISTANT_THINK  — "1": material yaratishda modelning "o'ylash" rejimi
+ *                      (sifatliroq, lekin 2–3 barobar sekin — GPU bo'lsa yoqing)
  *
- * Kichik (7–8B) model hamma ishni bitta so'rovda ishonchli qila olmaydi
- * (sinovda: so'ramasdan sahifa ochdi, qo'llanmada yo'q narsani o'ylab topdi).
- * Shuning uchun ish bo'lingan:
- *   1) model faqat NIYAT va SAHIFAni aniqlaydi (qat'iy JSON);
- *   2) "tushuntir" / "ochaymi?" javoblari qo'llanmadan (assistantGuide.ts) aynan
- *      olinadi — model matn to'qimaydi, xato bo'lmaydi;
- *   3) "och" buyrug'i kod bilan aniqlanadi — sahifa faqat so'ralganda ochiladi;
- *   4) material yaratish (topshiriq namunasi, test savollari) va erkin savollar —
- *      alohida, erkin matnli so'rov. */
+ * Server GPU'siz (protsessorda) ishlaydi, kichik (8B) model esa hamma ishni
+ * ishonchli qila olmaydi. Shuning uchun modelga iloji boricha kam ish qoladi:
+ *   1) "och" / "ha" / "tushuntir", salomlashish, sahifani topish (kalit so'zlar) —
+ *      kod bilan, modelsiz, bir zumda;
+ *   2) tushuntirish matni qo'llanmadan (assistantGuide.ts) aynan olinadi —
+ *      model matn to'qimaydi, xato bo'lmaydi;
+ *   3) faqat erkin savol va material yaratish (topshiriq namunasi, test
+ *      savollari) modelga boradi. Tizim ko'rsatmasi qisqa va O'ZGARMAS
+ *      (Ollama uni keshlaydi — protsessorda har safar qayta o'qimaydi);
+ *   4) javob oqim bilan (so'zma-so'z) qaytadi — o'qituvchi kutib o'tirmaydi. */
 
 const OLLAMA_URL = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/+$/, "")
 export const ASSISTANT_MODEL = process.env.OLLAMA_MODEL || "qwen3:8b"
-const TIMEOUT_MS = Number(process.env.ASSISTANT_TIMEOUT_MS || 120_000)
+const TIMEOUT_MS = Number(process.env.ASSISTANT_TIMEOUT_MS || 300_000)
+const THINK = process.env.ASSISTANT_THINK === "1"
 
 export interface ChatTurn {
   role: "user" | "assistant"
@@ -30,12 +34,13 @@ export interface AssistantAnswer {
   openNow: boolean
 }
 
-type Intent = "open" | "howto" | "create" | "chat" | "offtopic"
+/** Javob bo'lagi kelganda chaqiriladi (oqim) */
+export type OnDelta = (text: string) => void
 
-// Bitta GPU — so'rovlar navbat bilan
+// Bitta model — so'rovlar navbat bilan
 let queue: Promise<unknown> = Promise.resolve()
 
-async function ollamaChat(body: Record<string, unknown>): Promise<string> {
+async function ollamaChat(body: Record<string, unknown>, onDelta?: OnDelta): Promise<string> {
   const run = async () => {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
@@ -44,11 +49,27 @@ async function ollamaChat(body: Record<string, unknown>): Promise<string> {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
-        body: JSON.stringify({ model: ASSISTANT_MODEL, stream: false, think: false, keep_alive: "30m", ...body }),
+        body: JSON.stringify({ model: ASSISTANT_MODEL, stream: true, think: false, keep_alive: "2h", ...body }),
       })
-      if (!res.ok) throw new Error(`Ollama ${res.status}: ${(await res.text()).slice(0, 200)}`)
-      const data = (await res.json()) as { message?: { content?: string } }
-      return data.message?.content ?? ""
+      if (!res.ok || !res.body) throw new Error(`Ollama ${res.status}: ${(await res.text()).slice(0, 200)}`)
+      // Ollama oqimi: har qatorda bitta JSON ({ message: { content }, done })
+      const decoder = new TextDecoder()
+      let buffer = ""
+      let full = ""
+      for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+        buffer += decoder.decode(chunk, { stream: true })
+        let nl: number
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim()
+          buffer = buffer.slice(nl + 1)
+          if (!line) continue
+          try {
+            const piece = (JSON.parse(line) as { message?: { content?: string } }).message?.content ?? ""
+            if (piece) { full += piece; onDelta?.(piece) }
+          } catch { /* to'liq bo'lmagan qator — o'tkazib yuboriladi */ }
+        }
+      }
+      return full
     } finally {
       clearTimeout(timer)
     }
@@ -105,53 +126,19 @@ function keywordPage(text: string): GuidePage | null {
   return bestScore > 0 && !tie ? best : null
 }
 
-/* ── 2) Niyat va sahifa — model (qat'iy JSON) ──────────────────────── */
-
-const CLASSIFY_SCHEMA = {
-  type: "object",
-  properties: {
-    intent: { type: "string", enum: ["open", "howto", "chat", "offtopic"] },
-    page: { type: ["string", "null"], enum: [...TEACHER_PATHS, null] },
-  },
-  required: ["intent", "page"],
-}
-
-function classifyPrompt(currentPage: string | null): string {
-  const pages = TEACHER_PAGES.map((p) => `${p.path} — ${p.title}: ${p.purpose}`).join("\n")
-  return [
-    "Sen LMS (masofaviy ta'lim tizimi) o'qituvchi yordamchisining yo'naltiruvchi qismisan. O'qituvchining oxirgi xabarini tasnifla va JSON qaytar.",
-    "",
-    "intent qiymatlari:",
-    "- open: sahifani ochishni so'rayapti (\"baholash sahifasini och\", \"davomatga o't\").",
-    "- howto: saytda biror ishni qilmoqchi yoki qanday qilinishini so'rayapti (\"topshiriqlarni baholashim kerak\", \"test qanday yaratiladi\", \"davomat qayerda\").",
-    "- chat: salomlashish, yordamchi haqida savol yoki LMS/ta'lim haqida umumiy savol.",
-    "- offtopic: LMS va ta'limga aloqasi yo'q (ob-havo, siyosat, sport va h.k.).",
-    "",
-    "page — xabarga eng mos sahifa manzili (faqat ro'yxatdan) yoki null. chat va offtopic uchun null.",
-    "",
-    "SAHIFALAR:",
-    pages,
-    currentPage ? `\nO'qituvchi hozir shu sahifada: ${currentPage} (\"bu sahifa\", \"shu yerda\" desa — shu).` : "",
-  ].join("\n")
-}
-
-async function classify(history: ChatTurn[], currentPage: string | null): Promise<{ intent: Intent; page: string | null }> {
-  const raw = await ollamaChat({
-    messages: [{ role: "system", content: classifyPrompt(currentPage) }, ...history.slice(-4)],
-    format: CLASSIFY_SCHEMA,
-    options: { temperature: 0, num_ctx: 4096, num_predict: 80 },
-  })
-  try {
-    const obj = JSON.parse(raw) as { intent?: string; page?: unknown }
-    const intent = (["open", "howto", "chat", "offtopic"] as const).find((i) => i === obj.intent) ?? "chat"
-    const page = typeof obj.page === "string" && TEACHER_PATHS.includes(obj.page) ? obj.page : null
-    return { intent, page }
-  } catch {
-    return { intent: "chat", page: null }
+/** Model javobida nomi tilga olingan sahifa — tagiga "ochish" tugmasi chiqadi */
+function pageMentioned(reply: string): GuidePage | null {
+  const t = norm(reply)
+  let best: GuidePage | null = null
+  let bestLen = 0
+  for (const p of TEACHER_PAGES) {
+    const name = norm(p.title.split(" (")[0])
+    if (name.length > 5 && name.length > bestLen && t.includes(name)) { best = p; bestLen = name.length }
   }
+  return best
 }
 
-/* ── 3) Qo'llanmadan aynan olinadigan javoblar ─────────────────────── */
+/* ── 2) Qo'llanmadan aynan olinadigan va tayyor javoblar ───────────── */
 
 const findPage = (path: string | null): GuidePage | null => TEACHER_PAGES.find((p) => p.path === path) ?? null
 
@@ -168,7 +155,23 @@ function openedReply(p: GuidePage): string {
   return `«${p.title}» sahifasini ochdim.`
 }
 
-/* ── 4) Erkin matnli so'rovlar ─────────────────────────────────────── */
+const HELLO_REPLY = "Assalomu alaykum! Men LMS yordamchiman. Saytdan foydalanishni tushuntiraman, kerakli sahifani ochib beraman, mavzu bo'yicha topshiriq namunasi yoki test savollari tayyorlab beraman. Nima qilmoqchisiz?"
+const ABOUT_REPLY = "Men uch xil ishda yordam beraman:\n1) Saytni tushuntiraman: masalan \"davomatni qanday belgilayman?\"\n2) Sahifani ochib beraman: masalan \"baholash sahifasini och\"\n3) Material tayyorlayman: masalan \"Marketing asoslari mavzusidan 5 ta test savoli tuzib ber\"\nBaho qo'yish yoki o'chirish kabi amallarni o'zim bajarmayman — sahifani ochib, qanday qilinishini aytaman."
+const THANKS_REPLY = "Arzimaydi! Yana savol bo'lsa, yozing."
+const MODEL_DOWN_REPLY = "Model serveri hozir ishlamayapti, shuning uchun bu savolga javob bera olmayman. Sahifalar bo'yicha yordam bera olaman — sahifa nomini yozing, masalan: \"baholash\", \"davomat\", \"oraliq nazorat\", \"meeting\"."
+const EMPTY_REPLY = "Javob bera olmadim, savolni boshqacha yozib ko'ring."
+
+/** Salomlashish, "nima qila olasan", rahmat — modelsiz */
+function cannedReply(text: string): string | null {
+  const t = norm(text).replace(/[.!?,]+/g, " ").trim()
+  const words = t.split(" ").length
+  if (words <= 5 && /^(salom|assalom|assalomu alaykum|va alaykum|hayrli|xayrli|hello|hi|привет|здравствуйте)/.test(t)) return HELLO_REPLY
+  if (words <= 8 && /(nima qila olasan|nimalar qila olasan|kimsan|sen kim|nima uchun kerak|qanday yordam|yordam bera olasan|что ты умеешь|what can you do)/.test(t)) return ABOUT_REPLY
+  if (words <= 4 && /^(rahmat|raxmat|katta rahmat|tashakkur|спасибо|thanks|thank you)/.test(t)) return THANKS_REPLY
+  return null
+}
+
+/* ── 3) Model: erkin savol va material yaratish ────────────────────── */
 
 const STYLE = "Javobni o'zbek tilida, lotin yozuvida yoz. Markdown ishlatma (yulduzcha, panjara, jadval yo'q). Ro'yxat kerak bo'lsa \"1) ...\" ko'rinishida, har bandni yangi qatordan yoz."
 
@@ -178,56 +181,74 @@ function cleanText(text: string): string {
     .replace(/\*\*(.+?)\*\*/g, "$1")
     .replace(/^#{1,6}\s*/gm, "")
     .replace(/^\s*[*-]\s+/gm, "• ")
+    .replace(/[ \t]+$/gm, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim()
 }
 
-async function createMaterial(history: ChatTurn[]): Promise<string> {
-  const system = [
-    "Sen oliy ta'lim muassasasida ishlaydigan tajribali o'qituvchi-metodistsan. O'qituvchi so'ragan o'quv materialini tayyorlab ber: amaliy topshiriq namunasi, test savollari, dars rejasi, baholash mezoni, e'lon matni va shunga o'xshashlar.",
-    "Talablar:",
-    "- So'ralgan narsaning o'zini to'liq yoz; ortiqcha kirish so'zisiz boshlа.",
-    "- Topshiriq namunasi: sarlavha, maqsad, topshiriq sharti (aniq, bajarsa bo'ladigan), bajarish tartibi, topshirish shakli, baholash mezoni (ballarda).",
-    "- Test savollari: har savolda 4 ta HAR XIL variant (A, B, C, D), faqat bittasi to'g'ri, va alohida qatorda \"To'g'ri javob: ...\". Savollar bir-birini takrorlamasin, mavzuga oid va faktik jihatdan to'g'ri bo'lsin.",
-    "- Fakt yoki sonni aniq bilmasang, o'ylab topma — umumiyroq yoz.",
-    STYLE,
-  ].join("\n")
+// O'ZGARMAS tizim ko'rsatmalari: Ollama boshini keshlaydi — protsessorda har safar qayta o'qilmaydi.
+// (O'zgaruvchan narsa — joriy sahifa — tizim ko'rsatmasiga emas, savolning o'ziga qo'shiladi.)
+
+const CREATE_SYSTEM = [
+  "Sen oliy ta'lim muassasasida ishlaydigan tajribali o'qituvchi-metodistsan. O'qituvchi so'ragan o'quv materialini tayyorlab ber: amaliy topshiriq namunasi, test savollari, dars rejasi, baholash mezoni, e'lon matni va shunga o'xshashlar.",
+  "Talablar:",
+  "- So'ralgan narsaning o'zini yoz; kirish so'zisiz boshla, so'ralmagan narsani qo'shma.",
+  "- Topshiriq namunasi: sarlavha, maqsad, topshiriq sharti (aniq, bajarsa bo'ladigan), bajarish tartibi, topshirish shakli, baholash mezoni (ballarda).",
+  "- Test savollari: har savolda 4 ta HAR XIL variant (A, B, C, D), faqat bittasi to'g'ri, va alohida qatorda \"To'g'ri javob: ...\". Savollar bir-birini takrorlamasin, mavzuga oid va faktik jihatdan to'g'ri bo'lsin.",
+  "- Fakt yoki sonni aniq bilmasang, o'ylab topma — umumiyroq yoz.",
+  STYLE,
+].join("\n")
+
+const CHAT_SYSTEM = [
+  "Sen SamISI LMS (masofaviy ta'lim tizimi) ichidagi o'qituvchi yordamchisisan. Isming — LMS yordamchi.",
+  "Sayt haqidagi savolga FAQAT quyidagi ma'lumot asosida javob ber. Javob unda bo'lmasa, aynan shunday de: \"Bu haqda aniq ma'lumotim yo'q. Yo'riqnoma bo'limiga qarang yoki adminga murojaat qiling.\" Hech narsani o'ylab topma.",
+  "Qaysi sahifada qilinishini aytganda sahifa nomini aynan yoz. LMS va ta'limga aloqasi yo'q savolga: \"Men faqat LMS va dars materiallari bo'yicha yordam bera olaman.\"",
+  "Qisqa javob ber (ko'pi bilan 4 gap).",
+  STYLE,
+  "",
+  "SAHIFALAR:",
+  ...TEACHER_PAGES.map((p) => `- ${p.title}: ${p.purpose}`),
+  "",
+  "QOIDALAR:",
+  "- Guruhlar va dars jadvali HEMIS'dan olinadi; mavzular, materiallar, testlar, topshiriqlar va baholar LMS'da saqlanadi.",
+  "- Ma'ruza qismi = ON1 + ON2 + mustaqil ishlar; Amaliyot qismi = JN (amaliy topshiriqlar) + mustaqil ishlar; oxirida yakuniy nazorat (YN).",
+  "- Test ballari avtomatik qo'yiladi; topshiriq fayllarini o'qituvchi Baholash sahifasida baholaydi.",
+  "- Davomat saqlangach qulflanadi; o'zgartirish uchun tahrirlash so'rovi yuboriladi va admin tasdiqlaydi.",
+  "- Test va oraliq nazoratda talaba Face ID tekshiruvidan o'tadi.",
+].join("\n")
+
+async function createMaterial(history: ChatTurn[], onDelta?: OnDelta): Promise<string> {
   const raw = await ollamaChat({
-    messages: [{ role: "system", content: system }, ...history.slice(-6)],
-    // O'ylash rejimi (sinovda: variantlar takrorlanmaydi, mazmun ancha to'g'ri) — sekinroq, lekin sifatliroq
-    think: true,
-    options: { temperature: 0.5, num_ctx: 8192, num_predict: 2400, repeat_penalty: 1.15 },
-  })
+    // Faqat oxirgi so'rov (va undan oldingi bitta juftlik — "yana 3 ta qo'sh" kabi davom uchun)
+    messages: [{ role: "system", content: CREATE_SYSTEM }, ...history.slice(-3)],
+    think: THINK,
+    options: { temperature: 0.5, num_ctx: 4096, num_predict: 1400, repeat_penalty: 1.15 },
+  }, onDelta)
   return cleanText(raw)
 }
 
-async function freeChat(history: ChatTurn[], currentPage: string | null): Promise<string> {
-  const system = [
-    "Sen SamISI LMS (masofaviy ta'lim tizimi) ichidagi o'qituvchi yordamchisisan. Isming — LMS yordamchi.",
-    "Nima qila olasan: saytdan foydalanishni tushuntirasan, kerakli sahifani ochib berasan, mavzu bo'yicha topshiriq namunasi yoki test savollari tayyorlab berasan. Baho qo'yish, o'chirish kabi amallarni o'zing bajarmaysan.",
-    "Sayt haqidagi savolga FAQAT quyidagi qo'llanma asosida javob ber. Qo'llanmada javob bo'lmasa, aynan shunday de: \"Bu haqda aniq ma'lumotim yo'q. Yo'riqnoma bo'limiga qarang yoki adminga murojaat qiling.\" Hech narsani o'ylab topma.",
-    "Qisqa javob ber (ko'pi bilan 5 gap).",
-    STYLE,
-    currentPage ? `O'qituvchi hozir shu sahifada: ${currentPage}` : "",
-    "",
-    "QO'LLANMA:",
-    teacherGuideText(),
-  ].join("\n")
+async function freeChat(history: ChatTurn[], currentPage: string | null, onDelta?: OnDelta): Promise<string> {
+  const recent = history.slice(-4)
+  const here = findPage(currentPage)
+  // Joriy sahifa — savolga qo'shiladi (tizim ko'rsatmasi o'zgarmasin: kesh ishlashi uchun)
+  if (here) {
+    const last = recent[recent.length - 1]
+    recent[recent.length - 1] = { ...last, content: `${last.content}\n(Men hozir «${here.title}» sahifasidaman.)` }
+  }
   const raw = await ollamaChat({
-    messages: [{ role: "system", content: system }, ...history.slice(-6)],
-    options: { temperature: 0.2, num_ctx: 8192, num_predict: 400 },
-  })
+    messages: [{ role: "system", content: CHAT_SYSTEM }, ...recent],
+    options: { temperature: 0.2, num_ctx: 4096, num_predict: 260 },
+  }, onDelta)
   return cleanText(raw)
 }
-
-const OFFTOPIC_REPLY = "Men faqat LMS'dan foydalanish va dars materiallari bo'yicha yordam bera olaman. Masalan: \"topshiriqlarni qanday baholayman?\" yoki \"mavzu bo'yicha test savollari tuzib ber\"."
-const MODEL_DOWN_REPLY = "Model serveri hozir ishlamayapti, shuning uchun bu savolga javob bera olmayman. Sahifalar bo'yicha yordam bera olaman — sahifa nomini yozing, masalan: \"baholash\", \"davomat\", \"oraliq nazorat\", \"meeting\"."
-const EMPTY_REPLY ="Javob bera olmadim, savolni boshqacha yozib ko'ring."
 
 /**
  * @param lastPage oldingi javobda taklif qilingan sahifa — "och" / "ha" / "tushuntir" shunga tegishli
+ * @param onDelta  model javobi bo'laklab kelganda (oqim); tayyor javoblarda chaqirilmaydi
  */
-export async function askAssistant(history: ChatTurn[], currentPage: string | null, lastPage: string | null): Promise<AssistantAnswer> {
+export async function askAssistant(
+  history: ChatTurn[], currentPage: string | null, lastPage: string | null, onDelta?: OnDelta
+): Promise<AssistantAnswer> {
   const text = history[history.length - 1].content
   const last = findPage(lastPage)
   const short = norm(text).split(" ").length <= 4
@@ -240,51 +261,35 @@ export async function askAssistant(history: ChatTurn[], currentPage: string | nu
   if (last && bareOpen) return { reply: openedReply(last), page: last.path, openNow: true }
   if (last && bareExplain) return { reply: explainReply(last), page: last.path, openNow: false }
 
-  // Material yozib berish so'rovi — to'g'ridan-to'g'ri yaratishga
-  if (isCreateRequest(text)) {
-    const reply = await createMaterial(history)
-    const forResources = /(test|savol|topshiriq)/.test(norm(text))
-    return { reply: reply || EMPTY_REPLY, page: forResources ? "/oqituvchi-kabineti/fan-resurslari" : null, openNow: false }
-  }
+  const canned = cannedReply(text)
+  if (canned) return { reply: canned, page: null, openNow: false }
 
-  // Sahifa: avval so'zlar bo'yicha (tez va aniq), topilmasa — model
-  const byKeyword = keywordPage(text)
-  let intent: Intent = isOpenCommand(text) ? "open" : "howto"
-  let target = byKeyword
-  if (!target) {
-    try {
-      const c = await classify(history, currentPage)
-      intent = c.intent
-      target = findPage(c.page)
-    } catch (err) {
-      // Model serveri ishlamayapti: sahifalar bo'yicha yordam (so'z bo'yicha) baribir ishlaydi
-      console.warn("[assistant] model javob bermadi:", err instanceof Error ? err.message : err)
-      return { reply: MODEL_DOWN_REPLY, page: null, openNow: false }
+  try {
+    // Material yozib berish so'rovi — to'g'ridan-to'g'ri yaratishga
+    if (isCreateRequest(text)) {
+      const reply = await createMaterial(history, onDelta)
+      const forResources = /(test|savol|topshiriq)/.test(norm(text))
+      return { reply: reply || EMPTY_REPLY, page: forResources ? "/oqituvchi-kabineti/fan-resurslari" : null, openNow: false }
     }
+
+    // Sahifa so'zlar bo'yicha topildi — modelsiz
+    const target = keywordPage(text)
+    if (target) {
+      if (isOpenCommand(text)) return { reply: openedReply(target), page: target.path, openNow: true }
+      return isExplainCommand(text)
+        ? { reply: explainReply(target), page: target.path, openNow: false }
+        : { reply: choiceReply(target), page: target.path, openNow: false }
+    }
+
+    // Qolgan hammasi — erkin savol; javobda tilga olingan sahifaga tugma chiqadi
+    const reply = await freeChat(history, currentPage, onDelta)
+    const unknown = /ma'lumotim yo'q|faqat lms/.test(norm(reply))
+    const mentioned = unknown ? null : pageMentioned(reply)
+    return { reply: reply || EMPTY_REPLY, page: mentioned?.path ?? null, openNow: false }
+  } catch (err) {
+    console.warn("[assistant] model javob bermadi:", err instanceof Error ? err.message : err)
+    return { reply: MODEL_DOWN_REPLY, page: null, openNow: false }
   }
-
-  if (intent === "offtopic") return { reply: OFFTOPIC_REPLY, page: null, openNow: false }
-
-  if ((intent === "open" || isOpenCommand(text)) && target) {
-    return { reply: openedReply(target), page: target.path, openNow: true }
-  }
-
-  // Sahifani model taxmin qilgan bo'lsa (so'z bo'yicha topilmagan) — qo'llanma matnini
-  // ko'r-ko'rona bermaymiz: savolga qo'llanma asosida javob, bilmasa "ma'lumotim yo'q"
-  if (intent === "howto" && target && !byKeyword) {
-    const reply = await freeChat(history, currentPage)
-    const unknown = /ma'lumotim yo'q/.test(norm(reply))
-    return { reply: reply || EMPTY_REPLY, page: unknown ? null : target.path, openNow: false }
-  }
-
-  if (intent === "howto" && target) {
-    return isExplainCommand(text)
-      ? { reply: explainReply(target), page: target.path, openNow: false }
-      : { reply: choiceReply(target), page: target.path, openNow: false }
-  }
-
-  const reply = await freeChat(history, currentPage)
-  return { reply: reply || EMPTY_REPLY, page: null, openNow: false }
 }
 
 /** Model serveri ishlayaptimi va model yuklab olinganmi */
@@ -298,4 +303,16 @@ export async function assistantHealth(): Promise<{ ok: boolean; reason?: string 
   } catch {
     return { ok: false, reason: "Ollama serveriga ulanib bo'lmadi" }
   }
+}
+
+/** Server ishga tushganda modelni xotiraga yuklab, tizim ko'rsatmasini keshlab qo'yadi —
+    birinchi savol uzoq kutmasin (protsessorda model yuklash 20–60 s oladi). Xato bo'lsa jim. */
+export function warmUpAssistant(): void {
+  void assistantHealth().then((h) => {
+    if (!h.ok) return
+    return ollamaChat({
+      messages: [{ role: "system", content: CHAT_SYSTEM }, { role: "user", content: "Salom" }],
+      options: { temperature: 0, num_ctx: 4096, num_predict: 1 },
+    }).then(() => console.log(`✓ Yordamchi modeli tayyor (${ASSISTANT_MODEL})`))
+  }).catch(() => undefined)
 }

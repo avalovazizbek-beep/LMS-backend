@@ -31,6 +31,7 @@ import { sinovGuard } from "./services/sinovSandbox"
 import sinovRoutes from "./routes/sinov"
 import ttsRoutes from "./routes/tts"
 import assistantRoutes from "./routes/assistant"
+import { warmUpAssistant } from "./services/assistantService"
 import { startNotificationScheduler } from "./services/notificationScheduler"
 import googleMeetRoutes from "./routes/googleMeet"
 import {
@@ -767,6 +768,8 @@ async function start() {
     startCertificateSweep()
     // Yuklangan videolarni telefonlarda ochiladigan MP4 ga keltirish (ffmpeg, fonda)
     startVideoTranscoder()
+    // AI yordamchi modeli xotiraga oldindan yuklanadi (Ollama bor bolsa) — fonda
+    warmUpAssistant()
 
     // HEMIS to'liq talaba/xodim/guruh ro'yxati — login blokidan mustaqil
     // admin-token orqali fon rejimida sinxronlanadi (services/hemisSync.ts).
