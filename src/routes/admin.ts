@@ -40,6 +40,10 @@ import {
 } from "../services/permissionsStore"
 import { logAudit, listAuditLog } from "../services/auditLog"
 import {
+  listAccessibilityStudents, getAccessibilityStudent, saveAccessibilityStudent, removeAccessibilityStudent,
+  searchCandidates, findCandidate, clampTimePercent,
+} from "../services/accessibilityStore"
+import {
   TELEGRAM_TOKEN_KEY, TELEGRAM_CHAT_KEY, getTelegramConfig, saveTelegramToken, maskTelegramToken,
   isValidTelegramToken, isValidTelegramChatId, sendTelegramTestMessage, findTelegramChats,
 } from "../services/telegramConfig"
@@ -1901,6 +1905,62 @@ router.put("/cancelled-students/:sid", requirePermission("students", "edit"), as
     void logAudit(req, "student.cancelDecree", "students", sid, { decreeNumber: patch.decreeNumber ?? null, decreeDate: patch.decreeDate ?? null })
   }
   res.json({ success: true, student: updated })
+})
+
+/* ── Maxsus ehtiyojli (ko'zi ojiz / zaif ko'ruvchi) talabalar ───────────
+   GET    /accessibility-students            — belgilanganlar ro'yxati
+   GET    /accessibility-students/search?q=  — talaba qidirish (ism / ID raqam)
+   PUT    /accessibility-students/:id        — belgilash yoki sozlamani o'zgartirish
+   DELETE /accessibility-students/:id        — belgini olib tashlash
+   (services/accessibilityStore.ts; test sahifasi shu belgiga qarab moslashadi) ── */
+router.get("/accessibility-students", adminOnly, async (_req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    res.json({ success: true, students: await listAccessibilityStudents() })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err instanceof Error ? err.message : "Ro'yxatni olishda xato" })
+  }
+})
+
+router.get("/accessibility-students/search", adminOnly, async (req: AuthRequest, res: Response): Promise<void> => {
+  const q = typeof req.query.q === "string" ? req.query.q.slice(0, 100) : ""
+  try {
+    res.json({ success: true, students: await searchCandidates(q) })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err instanceof Error ? err.message : "Qidiruvda xato" })
+  }
+})
+
+router.put("/accessibility-students/:id", requirePermission("students", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ success: false, message: "Talaba ID noto'g'ri" }); return }
+  const candidate = await findCandidate(id)
+  if (!candidate) { res.status(404).json({ success: false, message: "Talaba topilmadi" }); return }
+
+  const body = asRecord(req.body)
+  const existing = await getAccessibilityStudent(id)
+  const student = await saveAccessibilityStudent({
+    studentUserId: id,
+    fullName: candidate.fullName,
+    studentIdNumber: candidate.studentIdNumber,
+    groupName: candidate.groupName,
+    timePercent: clampTimePercent(body.timePercent, existing?.timePercent ?? 200),
+    skipFace: typeof body.skipFace === "boolean" ? body.skipFace : existing?.skipFace ?? true,
+    noTabLimit: typeof body.noTabLimit === "boolean" ? body.noTabLimit : existing?.noTabLimit ?? true,
+    note: "note" in body ? (typeof body.note === "string" && body.note.trim() ? body.note.trim() : null) : existing?.note ?? null,
+  }, { id: String(req.user?.userId ?? req.user?.id ?? ""), name: req.user?.fullName ?? null })
+  void logAudit(req, existing ? "accessibility.update" : "accessibility.mark", "students", String(id), {
+    fullName: student.fullName, timePercent: student.timePercent, skipFace: student.skipFace, noTabLimit: student.noTabLimit,
+  })
+  res.json({ success: true, student })
+})
+
+router.delete("/accessibility-students/:id", requirePermission("students", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  const existing = Number.isInteger(id) && id > 0 ? await getAccessibilityStudent(id) : null
+  if (!existing) { res.status(404).json({ success: false, message: "Talaba ro'yxatda topilmadi" }); return }
+  await removeAccessibilityStudent(id)
+  void logAudit(req, "accessibility.unmark", "students", String(id), { fullName: existing.fullName })
+  res.json({ success: true })
 })
 
 /* ── GET /api/admin/hemis-students/:groupId/roster — guruhdagi talabalar

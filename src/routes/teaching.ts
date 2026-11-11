@@ -80,6 +80,7 @@ import {
 } from "../services/periodGrades"
 import { buildGradeJournal } from "../services/gradeJournal"
 import { SINOV_GROUP_ID, SINOV_SUBJECT } from "../services/sinovIds"
+import { getAccessibilityProfile, NO_ACCESSIBILITY } from "../services/accessibilityStore"
 import {
   listQuestions,
   replaceQuestions,
@@ -952,7 +953,11 @@ router.use(authMiddleware)
 /* ── GET /exam-settings — admin sozlagan global qiymatlar (Face ID
    bloklash chegarasi, standart urinishlar soni) — istalgan login qilgan
    foydalanuvchi o'qiy oladi, faqat admin panelida o'zgartirish mumkin. ── */
-router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
+router.get("/exam-settings", async (req: AuthRequest, res: Response) => {
+  // Maxsus ehtiyojli talaba (admin belgilagan): qo'shimcha vaqt, Face ID'siz, chiqish chegarasisiz
+  const accessibility = req.user?.role === "employee"
+    ? NO_ACCESSIBILITY
+    : await getAccessibilityProfile(studentUserId(req.user))
   const [rows] = await pool.query<import("mysql2").RowDataPacket[]>(
     "SELECT key_name, value FROM lms_settings WHERE key_name IN ('face_block_threshold', 'test_max_attempts', 'attendance_mode', 'face_practice_required')"
   )
@@ -973,6 +978,7 @@ router.get("/exam-settings", async (_req: AuthRequest, res: Response) => {
       faceTerminate: false,
       // Test faqat shu marta oynadan chiqilganda (shu chiqishda) yakunlanadi
       tabLeaveLimit: await getTabLeaveLimit(),
+      accessibility,
     },
   })
 })
@@ -3388,6 +3394,13 @@ router.post("/content/:id/violation", async (req: AuthRequest, res: Response): P
   if (violationType === "tab_blur" && body.counted === true && content.type === "exam") {
     const session = await getExamSession(content.id, sId)
     const limit = await getTabLeaveLimit()
+    // Maxsus ehtiyojli talaba: ekran o'quvchi dastur oynalari fokusni olib
+    // qo'yadi — chiqish faqat qayd etiladi, sanalmaydi va testni yakunlamaydi
+    if ((await getAccessibilityProfile(sId)).noTabLimit) {
+      await recordExamViolation({ ...base, violationType, detail: "Maxsus ehtiyojli talaba — chegaraga sanalmaydi" })
+      res.status(201).json({ success: true, data: { tabLeaves: 0, tabLeaveLimit: limit, blocked: false } })
+      return
+    }
     if (!session) {
       await recordExamViolation({ ...base, violationType, detail: null })
       res.status(201).json({ success: true, data: { tabLeaves: 0, tabLeaveLimit: limit, blocked: false } })

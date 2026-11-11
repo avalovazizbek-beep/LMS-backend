@@ -1035,6 +1035,25 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_settings")
 
+  // ── Maxsus ehtiyojli (ko'zi ojiz / zaif ko'ruvchi) talabalar — admin belgilaydi
+  // (services/accessibilityStore.ts): test vaqti foizi, Face ID'siz, oynadan chiqish chegarasisiz ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_accessibility_students (
+      student_user_id   INT PRIMARY KEY,
+      full_name         VARCHAR(255) NOT NULL,
+      student_id_number VARCHAR(100) NULL,
+      group_name        VARCHAR(255) NULL,
+      time_percent      INT NOT NULL DEFAULT 200,
+      skip_face         TINYINT(1) NOT NULL DEFAULT 1,
+      no_tab_limit      TINYINT(1) NOT NULL DEFAULT 1,
+      note              VARCHAR(500) NULL,
+      created_by_id     VARCHAR(64) NULL,
+      created_by_name   VARCHAR(255) NULL,
+      created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_accessibility_students")
+
   // ── E'lonlar (admin tomonidan yaratiladigan, talaba/xodim/hammaga mo'ljallangan) ──
   await exec(`
     CREATE TABLE IF NOT EXISTS lms_announcements (
