@@ -73,17 +73,81 @@ function similarity(a: Doc, b: Doc): number {
    necha eng uzun, o'ziga xos jumla qidiriladi. */
 export interface InternetMatch { sentence: string; title: string; link: string; snippet: string }
 
+/** Matndan qidirish uchun bir nechta eng uzun, o'ziga xos jumla */
+function pickSentences(text: string, count: number): string[] {
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .map(s => s.replace(/\s+/g, " ").trim())
+    .filter(s => s.split(" ").length >= 8)
+    .sort((a, b) => b.length - a.length)
+    .slice(0, count)
+}
+
+/* ── Wikipedia (bepul, kalitsiz) ─────────────────────────────────────────
+   Google Custom Search yangi loyihalarga berilmay qo'ygan ("This project does
+   not have the access to Custom Search JSON API", 2026-11-11). Wikipedia'ning
+   rasmiy qidiruv API'si kalit ham, kunlik limit ham talab qilmaydi va talabalar
+   eng ko'p ko'chiradigan manbalardan biri. Har jumladan 9 so'zli ibora aynan
+   (qo'shtirnoq ichida) qidiriladi. O'chirish: PLAGIARISM_WIKIPEDIA=0 */
+const WIKI_ENABLED = process.env.PLAGIARISM_WIKIPEDIA !== "0"
+const WIKI_PHRASE_WORDS = 9
+
+async function checkWikipedia(text: string): Promise<{ ok: boolean; matches: InternetMatch[] }> {
+  const matches: InternetMatch[] = []
+  let ok = false
+  for (const sentence of pickSentences(text, 4)) {
+    const words = sentence.replace(/["«»“”]/g, "").split(" ")
+    // Jumla o'rtasidan (boshi ko'pincha umumiy kirish so'zlari)
+    const start = Math.max(0, Math.floor((words.length - WIKI_PHRASE_WORDS) / 2))
+    const phrase = words.slice(start, start + WIKI_PHRASE_WORDS).join(" ")
+    // Kirill yozuvi — ruscha va o'zbekcha; lotin — o'zbekcha va inglizcha Wikipedia
+    const langs = /[Ѐ-ӿ]/.test(phrase) ? ["ru", "uz"] : ["uz", "en"]
+    for (const lang of langs) {
+      try {
+        const res = await axios.get(`https://${lang}.wikipedia.org/w/api.php`, {
+          params: { action: "query", list: "search", srsearch: `"${phrase}"`, srlimit: 2, srprop: "snippet", format: "json" },
+          headers: { "User-Agent": "LMS-antiplagiat/1.0" },
+          timeout: 8000,
+        })
+        ok = true
+        const items: unknown[] = Array.isArray(res.data?.query?.search) ? res.data.query.search : []
+        for (const item of items) {
+          const r = item as Record<string, unknown>
+          const title = typeof r.title === "string" ? r.title : ""
+          if (!title) continue
+          matches.push({
+            sentence,
+            title: `Wikipedia: ${title}`,
+            link: `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}`,
+            snippet: typeof r.snippet === "string" ? r.snippet.replace(/<[^>]+>/g, "").replace(/&quot;/g, '"').replace(/&amp;/g, "&") : "",
+          })
+        }
+        if (items.length) break // shu jumla topildi — boshqa tilda qidirish shart emas
+      } catch { /* tarmoq xatosi — keyingisi */ }
+    }
+  }
+  return { ok, matches }
+}
+
 export async function checkInternet(text: string): Promise<{ enabled: boolean; matches: InternetMatch[] }> {
+  if (!text.trim()) return { enabled: false, matches: [] }
+  const [wiki, google] = await Promise.all([
+    WIKI_ENABLED ? checkWikipedia(text) : Promise.resolve({ ok: false, matches: [] as InternetMatch[] }),
+    checkGoogle(text),
+  ])
+  // Bir xil havola ikki marta chiqmasin
+  const seen = new Set<string>()
+  const matches = [...google.matches, ...wiki.matches].filter((m) => (seen.has(m.link) ? false : (seen.add(m.link), true)))
+  return { enabled: wiki.ok || google.enabled, matches }
+}
+
+async function checkGoogle(text: string): Promise<{ enabled: boolean; matches: InternetMatch[] }> {
   const key = process.env.GOOGLE_CSE_KEY
   const cx = process.env.GOOGLE_CSE_CX
-  if (!key || !cx || !text.trim()) return { enabled: false, matches: [] }
+  if (!key || !cx) return { enabled: false, matches: [] }
 
-  const sentences = text
-    .split(/(?<=[.!?])\s+/)
-    .map(s => s.trim())
-    .filter(s => s.split(/\s+/).length >= 8)
-    .sort((a, b) => b.length - a.length)
-    .slice(0, 3)
+  const sentences = pickSentences(text, 3)
+  let answered = false
 
   const matches: InternetMatch[] = []
   for (const sentence of sentences) {
@@ -92,6 +156,7 @@ export async function checkInternet(text: string): Promise<{ enabled: boolean; m
         params: { key, cx, q: `"${sentence.slice(0, 300)}"` },
         timeout: 8000,
       })
+      answered = true
       const items: unknown[] = Array.isArray(res.data?.items) ? res.data.items : []
       for (const item of items.slice(0, 2)) {
         const r = item as Record<string, unknown>
@@ -104,7 +169,9 @@ export async function checkInternet(text: string): Promise<{ enabled: boolean; m
       }
     } catch { /* bitta jumla so'rovi xato bo'lsa ham qolganlari davom etadi */ }
   }
-  return { enabled: true, matches }
+  // Kalit bor, lekin Google hamma so'rovni rad etsa (ruxsat yo'q / limit tugagan) —
+  // "tekshirildi, topilmadi" deb ko'rsatilmaydi
+  return { enabled: answered || sentences.length === 0, matches }
 }
 
 export interface PlagiarismResult {
