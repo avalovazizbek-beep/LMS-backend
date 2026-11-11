@@ -2,10 +2,12 @@ import { Router, Response } from "express"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { studentUserId } from "../services/teachingStore"
 import { getAccessibilityProfile } from "../services/accessibilityStore"
+import { assistantAllowed } from "./assistant"
 import { normalizeTtsText, ttsAudio, ttsVoiceFor } from "../services/ttsService"
 
 /* ── POST /api/tts — ovozli yordamchi: matn → MP3 (services/ttsService.ts).
-   Faqat admin "maxsus ehtiyojli" deb belgilagan talaba uchun — boshqalarga
+   Faqat admin "maxsus ehtiyojli" deb belgilagan talaba va AI yordamchi
+   yoqilgan o'qituvchi (routes/assistant.ts) uchun — boshqalarga
    403 (tashqi xizmatga keraksiz so'rov ketmasin). ───────────────────── */
 const router = Router()
 router.use(authMiddleware)
@@ -27,12 +29,12 @@ function rateLimited(userId: number): boolean {
 }
 
 router.post("/", async (req: AuthRequest, res: Response): Promise<void> => {
-  if (req.user?.role === "employee") {
-    res.status(403).json({ success: false, message: "Faqat talaba uchun" })
-    return
-  }
   const sId = studentUserId(req.user)
-  if (!(await getAccessibilityProfile(sId)).enabled) {
+  // Xodim: faqat AI yordamchi yoqilgan o'qituvchi (yordamchi javobini ovozda o'qish uchun)
+  const allowed = req.user?.role === "employee"
+    ? await assistantAllowed(req)
+    : (await getAccessibilityProfile(sId)).enabled
+  if (!allowed) {
     res.status(403).json({ success: false, message: "Ovozli yordamchi siz uchun yoqilmagan" })
     return
   }

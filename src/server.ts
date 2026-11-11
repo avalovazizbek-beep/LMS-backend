@@ -30,6 +30,7 @@ import { zoomReviewGuard } from "./services/zoomReview"
 import { sinovGuard } from "./services/sinovSandbox"
 import sinovRoutes from "./routes/sinov"
 import ttsRoutes from "./routes/tts"
+import assistantRoutes from "./routes/assistant"
 import { startNotificationScheduler } from "./services/notificationScheduler"
 import googleMeetRoutes from "./routes/googleMeet"
 import {
@@ -128,6 +129,7 @@ app.use("/api/reedu", reeduRoutes)
 app.use("/api/plagiarism", plagiarismRoutes)
 app.use("/api/support", supportRoutes)
 app.use("/api/tts", ttsRoutes)
+app.use("/api/assistant", assistantRoutes)
 app.use("/api/photos", photosRoutes)
 app.use("/api/integrations/zoom", zoomRoutes)
 app.use("/api/integrations/google", googleMeetRoutes)
