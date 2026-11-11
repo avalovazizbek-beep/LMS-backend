@@ -10,6 +10,9 @@
  * Sinov talabasi (talaba tomonini ko'rish uchun) — har safar yangi parol
  * chiqaradi, eskisi ishlamay qoladi; kirish: /sinov-login:
  *   npx ts-node -P scripts/tsconfig.json scripts/sinov-guruh.ts --student --apply
+ * Maxsus imkoniyatlar (ko'zi ojiz talaba) sinovi uchun 5 savolli tayyor test —
+ * sinov talabasi bilan birga; chiqqan havola orqali ochiladi:
+ *   npx ts-node -P scripts/tsconfig.json scripts/sinov-guruh.ts --student --demo-test --apply
  * Qaytadan boshlash — guruh, fan, asos mavzular, sinov talabasi (paroli,
  * Face ID) qoladi; o'qituvchi yaratgan hamma narsa (mavzular, test,
  * topshiriq, oraliq, mustaqil ish), talaba ishlari, baholar, davomat o'chadi:
@@ -35,6 +38,7 @@ import crypto from "crypto"
 import type mysql from "mysql2/promise"
 import { pool } from "../src/services/db"
 import { recordPlatformSession } from "../src/services/attendanceStore"
+import { replaceQuestions } from "../src/services/examStore"
 import {
   addTeacherGroups, createTeacherContent, deleteTeacherContent, listTeacherContent, upsertGroups,
 } from "../src/services/teachingStore"
@@ -52,6 +56,11 @@ const apply = process.argv.includes("--apply")
 const remove = process.argv.includes("--remove")
 const student = process.argv.includes("--student")
 const reset = process.argv.includes("--reset")
+const demoTest = process.argv.includes("--demo-test")
+
+const DEMO_TEST_TITLE = "Maxsus imkoniyatlar sinov testi"
+// Testning egasi: --teacher berilmasa — HEMIS'da uchramaydigan ID (hech kimning kabinetida ko'rinmaydi)
+const DEMO_TEST_OWNER = 990000301
 
 function argValue(name: string): string | null {
   const i = process.argv.indexOf(name)
@@ -211,16 +220,44 @@ async function removeAll() {
   console.log("\nSinov guruhi, sinov talabasi va hamma narsa o'chirildi.")
 }
 
+/** Sinov guruhida 5 savolli test (10 daqiqa) — bor bo'lsa qayta yaratilmaydi */
+async function createDemoTest(teacherId: number | null) {
+  const existing = (await listTeacherContent({ groupId: SINOV_GROUP_ID })).find((c) => c.type === "exam" && c.title === DEMO_TEST_TITLE)
+  console.log(`\nSinov testi: "${DEMO_TEST_TITLE}" — ${existing ? `bor (#${existing.id})` : "yaratiladi"}, 5 savol, 10 daqiqa`)
+  if (!apply) {
+    console.log("KO'RISH rejimi — hech narsa o'zgarmadi. Bajarish uchun oxiriga --apply qo'shing.")
+    return
+  }
+  await upsertGroups([{ id: SINOV_GROUP_ID, name: SINOV_GROUP_NAME }])
+  const content = existing ?? await createTeacherContent({
+    type: "exam", teacherUserId: teacherId ?? DEMO_TEST_OWNER, groupId: SINOV_GROUP_ID, subjectName: SINOV_SUBJECT,
+    title: DEMO_TEST_TITLE, trainingType: "Amaliyot",
+    availableFrom: new Date(Date.now() - 3600_000).toISOString(),
+    deadline: new Date(Date.now() + 30 * 86400_000).toISOString(),
+    maxScore: 100, attemptsCount: 20, durationMinutes: 10,
+  })
+  await replaceQuestions(content.id, [
+    { questionText: "O'zbekiston poytaxti qaysi shahar?", options: ["Samarqand", "Toshkent", "Buxoro", "Xiva"], correctIndex: 1, points: 1 },
+    { questionText: "2 + 2 nechaga teng?", options: ["3", "4", "5", "22"], correctIndex: 1, points: 1 },
+    { questionText: "Bir yilda necha oy bor?", options: ["10", "11", "12", "13"], correctIndex: 2, points: 1 },
+    { questionText: "LMS qisqartmasi nimani anglatadi?", options: ["Ta'limni boshqarish tizimi", "Kutubxona tizimi", "Elektron pochta", "Brauzer"], correctIndex: 0, points: 1 },
+    { questionText: "Ekran o'quvchi dasturga misol qaysi?", options: ["Excel", "NVDA", "Paint", "Zoom"], correctIndex: 1, points: 1 },
+  ])
+  console.log(`\n  Test havolasi (sinov talabasi bilan kirgandan keyin): https://lms.sies.uz/imtihonlar/${content.id}\n`)
+}
+
 async function main() {
   if (remove) {
     await removeAll()
     return
   }
   if (reset) await resetContent()
-  if (argValue("--teacher") || !student) {
-    const teacherId = await resolveTeacher()
+  let teacherId: number | null = null
+  if (argValue("--teacher") || (!student && !demoTest)) {
+    teacherId = await resolveTeacher()
     if (teacherId !== null) await attach(teacherId)
   }
+  if (demoTest) await createDemoTest(teacherId)
   if (student) await createStudent()
 }
 
