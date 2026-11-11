@@ -49,7 +49,7 @@ export type OnDelta = (text: string) => void
 // Bitta model — so'rovlar navbat bilan
 let queue: Promise<unknown> = Promise.resolve()
 
-async function ollamaChat(body: Record<string, unknown>, onDelta?: OnDelta): Promise<string> {
+export async function ollamaChat(body: Record<string, unknown>, onDelta?: OnDelta): Promise<string> {
   const run = async () => {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)

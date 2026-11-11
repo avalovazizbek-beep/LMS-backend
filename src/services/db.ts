@@ -698,6 +698,9 @@ export async function initDatabase() {
   // Antiplagiat: fayl/izohdan ajratib olingan matn — LibreOffice orqali bir marta
   // ajratilib keshlanadi (har safar qayta konvertatsiya qilinmasligi uchun)
   await ensureColumn("lms_submissions", "extracted_text", "MEDIUMTEXT NULL DEFAULT NULL")
+  // Matn qayerdan olingani (text / ocr / none) va qaysi fayl uchun (fayl almashsa qayta o'qiladi) — services/submissionText.ts
+  await ensureColumn("lms_submissions", "text_source", "VARCHAR(10) NULL DEFAULT NULL")
+  await ensureColumn("lms_submissions", "text_sig", "VARCHAR(600) NULL DEFAULT NULL")
 
   // ── lms_meetings: fan nomi (subjectName) ──
   await ensureColumn("lms_meetings", "subject_name", "VARCHAR(255) NULL")
@@ -953,6 +956,25 @@ export async function initDatabase() {
       CONSTRAINT fk_plag_content FOREIGN KEY (content_id) REFERENCES lms_teacher_content(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_plagiarism_checks")
+  await ensureColumn("lms_plagiarism_checks", "matched_group_name", "VARCHAR(255) NULL DEFAULT NULL")
+  await ensureColumn("lms_plagiarism_checks", "text_source", "VARCHAR(10) NULL DEFAULT NULL")
+  await ensureColumn("lms_plagiarism_checks", "word_count", "INT NULL DEFAULT NULL")
+
+  // ── AI tavsiya: ish mavzuga qanchalik mos va 100 ballik tavsiya baho (services/submissionAiReview.ts).
+  // Faqat tavsiya — jurnaldagi bahoga ta'sir qilmaydi ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_submission_ai_reviews (
+      submission_id INT PRIMARY KEY,
+      content_id    INT NOT NULL,
+      text_sig      VARCHAR(80) NOT NULL,
+      status        VARCHAR(10) NOT NULL,
+      relevance     INT NULL,
+      grade         INT NULL,
+      comment       TEXT NULL,
+      reviewed_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_ai_review_content (content_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_submission_ai_reviews")
 
   // ── Admin ruxsatnomalar: kimga qanday LMS roli berilgan ──
   await execSafe(`

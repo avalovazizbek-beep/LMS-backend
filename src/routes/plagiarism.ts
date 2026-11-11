@@ -44,7 +44,7 @@ router.post("/content/:id/check", async (req: AuthRequest, res: Response): Promi
     return
   }
   try {
-    const results = await runPlagiarismCheck(content.id, submissions)
+    const results = await runPlagiarismCheck(content, submissions)
     res.json({ success: true, data: results })
   } catch (err) {
     res.status(500).json({ success: false, message: err instanceof Error ? err.message : "Tekshirishda xatolik yuz berdi" })

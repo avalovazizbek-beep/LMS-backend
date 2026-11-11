@@ -32,6 +32,7 @@ import sinovRoutes from "./routes/sinov"
 import ttsRoutes from "./routes/tts"
 import assistantRoutes from "./routes/assistant"
 import { warmUpAssistant } from "./services/assistantService"
+import { startSubmissionTextWorker } from "./services/submissionText"
 import { startNotificationScheduler } from "./services/notificationScheduler"
 import googleMeetRoutes from "./routes/googleMeet"
 import {
@@ -770,6 +771,8 @@ async function start() {
     startVideoTranscoder()
     // AI yordamchi modeli xotiraga oldindan yuklanadi (Ollama bor bolsa) — fonda
     warmUpAssistant()
+    // Talaba ishlaridan matnni (kerak bo'lsa OCR bilan) oldindan ajratib turadi — antiplagiat tez ishlashi uchun
+    startSubmissionTextWorker()
 
     // HEMIS to'liq talaba/xodim/guruh ro'yxati — login blokidan mustaqil
     // admin-token orqali fon rejimida sinxronlanadi (services/hemisSync.ts).
