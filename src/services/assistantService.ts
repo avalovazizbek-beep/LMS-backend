@@ -1,5 +1,6 @@
 import { TEACHER_PAGES, type GuidePage } from "./assistantGuide"
 import { diagnoseProgress, pendingGrading, summarizeContent } from "./assistantDiagnostics"
+import { alreadyExplained, gradingAnswer, gradingQuestion } from "./assistantKnowledge"
 
 /* ── O'qituvchi yordamchisi: o'z serverimizdagi model (Ollama) bilan suhbat ──
  * Bepul va ma'lumot tashqariga chiqmaydi: so'rov faqat OLLAMA_URL ga ketadi.
@@ -375,6 +376,17 @@ export async function askAssistant(
   history: ChatTurn[], currentPage: string | null, lastPage: string | null, onDelta?: OnDelta, teacherId?: number, isAdmin = false
 ): Promise<AssistantAnswer> {
   const text = history[history.length - 1].content
+
+  // Baholash qoidalari ("amaliyot qanday baholanadi", "necha ballik") — koddagi qoidadan aniq javob
+  // + o'qituvchining o'z fanlaridagi sonlar. Mavzu aytilmasa, oldingi savollardan olinadi.
+  const previousUser = history.slice(0, -1).filter((m) => m.role === "user").map((m) => m.content)
+  const gradeTopic = gradingQuestion(text, previousUser)
+  if (gradeTopic) {
+    // Shu mavzu hozirgina to'liq tushuntirilgan bo'lsa — takrorlamay, qisqa aniq javob
+    const lastAnswer = [...history].reverse().find((m) => m.role === "assistant")?.content
+    const answer = await gradingAnswer(gradeTopic, teacherId, alreadyExplained(gradeTopic, lastAnswer))
+    return { reply: answer.reply, page: answer.page, openNow: false }
+  }
 
   // O'qituvchining o'z ma'lumotiga oid savol — bazadan tekshirib javob beriladi (modelsiz)
   if (teacherId) {
