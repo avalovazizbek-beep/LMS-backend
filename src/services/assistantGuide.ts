@@ -7,6 +7,8 @@
 export interface GuidePage {
   path: string
   title: string
+  /** Faqat admin huquqi bor foydalanuvchiga taklif qilinadi / ochiladi */
+  adminOnly?: boolean
   /** Yon menyudagi bo'lim */
   menu: string
   /** Savolda uchrasa shu sahifa nazarda tutiladigan so'z o'zaklari (kichik harfda) */
@@ -89,7 +91,7 @@ export const TEACHER_PAGES: GuidePage[] = [
     purpose: "O'tiladigan darslar ro'yxati; darsni boshlash va o'tilgan deb belgilash.",
   },
   {
-    path: "/xodim/davomat-jurnali", keywords: ["davomat","yo'qlama","keldi-kelmadi"], title: "Davomat jurnali", menu: "Mashg'ulotlar",
+    path: "/xodim/davomat-jurnali", keywords: ["davomat","davomat jurnal","yo'qlama","keldi-kelmadi"], title: "Davomat jurnali", menu: "Mashg'ulotlar",
     purpose: "Talabalar davomatini belgilash va ko'rish.",
     steps: [
       "Guruh va fanni tanlang.",
@@ -130,6 +132,64 @@ export const TEACHER_PAGES: GuidePage[] = [
   {
     path: "/yoriqnoma", keywords: ["yo'riqnoma","qo'llanma","video darslik"], title: "Yo'riqnoma", menu: "Yo'riqnoma",
     purpose: "Tizimdan foydalanish bo'yicha video darsliklar va materiallar.",
+  },
+
+  // ── Admin panel (faqat admin huquqi bor foydalanuvchiga taklif qilinadi) ──
+  {
+    path: "/admin/dashboard", adminOnly: true, keywords: ["admin panel", "admin", "boshqaruv panel admin"], title: "Admin panel", menu: "Admin panel",
+    purpose: "Admin boshqaruv paneli: umumiy statistika va barcha admin bo'limlari.",
+  },
+  {
+    path: "/admin/foydalanuvchilar", adminOnly: true, keywords: ["foydalanuvchilar", "admin foydalanuvchi", "rol ber"], title: "Foydalanuvchilar (admin)", menu: "Admin panel",
+    purpose: "Foydalanuvchilar ro'yxati va ularga rol berish.",
+  },
+  {
+    path: "/admin/talabalar", adminOnly: true, keywords: ["talabalar ro'yxati", "chetlatilgan", "maxsus ehtiyoj", "admin talaba"], title: "Talabalar ro'yxati (admin)", menu: "Admin panel",
+    purpose: "Guruhlar bo'yicha talabalar, Face ID holati, chetlatilgan va maxsus ehtiyojli talabalar.",
+  },
+  {
+    path: "/admin/oqituvchilar", adminOnly: true, keywords: ["o'qituvchi hisobot", "o'qituvchilar hisobot", "admin o'qituvchi"], title: "O'qituvchi hisoboti (admin)", menu: "Admin panel",
+    purpose: "O'qituvchilar faoliyati hisoboti: yuklangan mavzular va materiallar.",
+  },
+  {
+    path: "/admin/hisobot", adminOnly: true, keywords: ["natijalar jurnali", "admin hisobot", "admin natija"], title: "Natijalar jurnali (admin)", menu: "Admin panel",
+    purpose: "Barcha guruhlar bo'yicha natijalar jurnali.",
+  },
+  {
+    path: "/admin/davomatlar", adminOnly: true, keywords: ["admin davomat", "davomatlar", "davomat so'rov", "tahrirlash so'rov"], title: "Davomatlar (admin)", menu: "Admin panel",
+    purpose: "Barcha guruhlar davomati va o'qituvchilarning davomatni tahrirlash so'rovlarini tasdiqlash.",
+  },
+  {
+    path: "/admin/baholash", adminOnly: true, keywords: ["admin bahola", "baholashlar"], title: "Baholashlar (admin)", menu: "Admin panel",
+    purpose: "Barcha o'qituvchilarning baholash holati.",
+  },
+  {
+    path: "/admin/qayta-urinish", adminOnly: true, keywords: ["qayta urinish", "urinish ber", "muddatni uzaytir"], title: "Qayta urinish (admin)", menu: "Admin panel",
+    purpose: "Talabaga testga qo'shimcha urinish berish va mavzu muddatlarini o'zgartirish.",
+  },
+  {
+    path: "/admin/oraliqlar", adminOnly: true, keywords: ["oraliqlar", "admin oraliq"], title: "Oraliqlar (admin)", menu: "Admin panel",
+    purpose: "Barcha oraliq nazorat va mustaqil ishlar ro'yxati.",
+  },
+  {
+    path: "/admin/face-id", adminOnly: true, keywords: ["face id so'rov", "face id", "yuz so'rov"], title: "Face ID so'rovlari (admin)", menu: "Admin panel",
+    purpose: "Talabalarning Face ID'ni qayta ro'yxatdan o'tkazish so'rovlari.",
+  },
+  {
+    path: "/admin/elonlar", adminOnly: true, keywords: ["e'lon", "elon"], title: "E'lonlar (admin)", menu: "Admin panel",
+    purpose: "Talaba va xodimlarga e'lon yaratish.",
+  },
+  {
+    path: "/admin/ruxsatlar", adminOnly: true, keywords: ["ruxsatlar", "ruxsat boshqaruv"], title: "Ruxsatlar boshqaruvi (admin)", menu: "Admin panel",
+    purpose: "Rollar bo'yicha ruxsatlarni sozlash.",
+  },
+  {
+    path: "/admin/tashakkurnomalar", adminOnly: true, keywords: ["tashakkurnoma", "sertifikat"], title: "Tashakkurnomalar (admin)", menu: "Admin panel",
+    purpose: "O'qituvchilarga berilgan tashakkurnomalar.",
+  },
+  {
+    path: "/admin/sozlamalar", adminOnly: true, keywords: ["sozlamalar", "sozlama", "telegram"], title: "Sozlamalar (admin)", menu: "Admin panel",
+    purpose: "Tizim sozlamalari: Face ID chegarasi, urinishlar soni, Telegram va boshqalar.",
   },
 ]
 

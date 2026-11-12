@@ -143,6 +143,8 @@ function isOpenCommand(text: string): boolean {
   const t = norm(text)
   return /(^|\s)(och|ochib|ochgin|oching|ochaver|ochib ber|ochib yubor|o'tkaz|olib bor)(\s|$|[.!,])/.test(t)
     || /(sahifa|bo'lim)(ni|ga|siga|sini)?\s.*(o't|kir|och)/.test(t)
+    // "admin panelga o't", "davomatga ot", "jurnalga kir", "baholashga bor"
+    || /[a-z']+(ga|ka|qa)\s+(o't|ot|o'tgin|o'taylik|o'tib ber|kir|kirgin|bor|olib bor)[\s.!]*$/.test(t)
     || /(открой|открыть|перейди|open)/.test(t)
 }
 
@@ -167,18 +169,47 @@ function isCreateRequest(text: string): boolean {
 }
 
 /** Savoldagi so'zlar bo'yicha sahifa (assistantGuide.ts keywords). Bitta aniq g'olib bo'lsa — o'sha */
-function keywordPage(text: string): GuidePage | null {
+function keywordPage(text: string, allowAdmin = false): GuidePage | null {
   const t = norm(text)
+  const pages = TEACHER_PAGES.filter((p) => allowAdmin || !p.adminOnly)
+  // Aniq mos kelish — to'liq ball; imlo xatosiga chidamli mos kelish ("panlega", "davomt",
+  // ovozdan noto'g'ri tanilgan so'z) — 0.8 ball. Uzunroq (aniqroq) ibora ko'proq ball oladi.
+  const words = t.split(" ")
   let best: GuidePage | null = null
   let bestScore = 0
   let tie = false
-  for (const p of TEACHER_PAGES) {
-    // Uzunroq (aniqroq) ibora ko'proq ball
-    const score = (p.keywords ?? []).reduce((sum, k) => (t.includes(k) ? sum + k.length : sum), 0)
+  for (const p of pages) {
+    const score = (p.keywords ?? []).reduce((sum, k) => {
+      if (t.includes(k)) return sum + k.length
+      return k.split(" ").every((kw) => words.some((w) => fuzzyStem(kw, w))) ? sum + k.length * 0.8 : sum
+    }, 0)
     if (score > bestScore) { best = p; bestScore = score; tie = false }
     else if (score === bestScore && score > 0) tie = true
   }
   return bestScore > 0 && !tie ? best : null
+}
+
+/** Damerau–Levenshtein masofasi (qo'shni harflar almashishi — bitta xato) */
+function editDistance(a: string, b: string): number {
+  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array<number>(b.length).fill(0)])
+  for (let j = 0; j <= b.length; j++) d[0][j] = j
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1)
+    }
+  }
+  return d[a.length][b.length]
+}
+
+/** Kalit so'z (o'zak) matndagi so'zning boshiga bitta xato bilan mos keladimi: "panel" ~ "panlega", "anelga" */
+function fuzzyStem(keyword: string, word: string): boolean {
+  if (keyword.length < 5) return word.startsWith(keyword)
+  for (const len of [keyword.length - 1, keyword.length, keyword.length + 1]) {
+    if (len <= word.length + 1 && editDistance(keyword, word.slice(0, len)) <= 1) return true
+  }
+  return false
 }
 
 /** Model javobida nomi tilga olingan sahifa — tagiga "ochish" tugmasi chiqadi */
@@ -187,6 +218,7 @@ function pageMentioned(reply: string): GuidePage | null {
   let best: GuidePage | null = null
   let bestLen = 0
   for (const p of TEACHER_PAGES) {
+    if (p.adminOnly) continue
     const name = norm(p.title.split(" (")[0])
     if (name.length > 5 && name.length > bestLen && t.includes(name)) { best = p; bestLen = name.length }
   }
@@ -242,7 +274,16 @@ const HELLO_REPLY = "Assalomu alaykum! Men LMS yordamchiman. Saytdan foydalanish
 const ABOUT_REPLY = "Men uch xil ishda yordam beraman:\n1) Saytni tushuntiraman: masalan \"davomatni qanday belgilayman?\"\n2) Sahifani ochib beraman: masalan \"baholash sahifasini och\"\n3) Material tayyorlayman: masalan \"Marketing asoslari mavzusidan 5 ta test savoli tuzib ber\"\nBaho qo'yish yoki o'chirish kabi amallarni o'zim bajarmayman — sahifani ochib, qanday qilinishini aytaman."
 const THANKS_REPLY = "Arzimaydi! Yana savol bo'lsa, yozing."
 const MODEL_DOWN_REPLY = "Model serveri hozir ishlamayapti, shuning uchun bu savolga javob bera olmayman. Sahifalar bo'yicha yordam bera olaman — sahifa nomini yozing, masalan: \"baholash\", \"davomat\", \"oraliq nazorat\", \"meeting\"."
-const EMPTY_REPLY = "Javob bera olmadim, savolni boshqacha yozib ko'ring."
+const WHICH_PAGE_REPLY = "Qaysi sahifani ochay? Nomini ayting, masalan: baholash, davomat jurnali, mavzu va resurslar, oraliq nazorat, meeting, admin panel."
+const NOT_UNDERSTOOD_REPLY = "Tushunmadim, qaytadan ayting yoki yozing."
+
+/** Ma'noli so'zi yo'q kirish: faqat raqamlar/belgilar yoki 3 harfdan kam */
+function isGibberish(text: string): boolean {
+  const letters = (text.match(/\p{L}/gu) ?? []).length
+  return letters < 3 || letters < text.replace(/\s/g, "").length * 0.4
+}
+
+const EMPTY_REPLY ="Javob bera olmadim, savolni boshqacha yozib ko'ring."
 
 /** Salomlashish, "nima qila olasan", rahmat — modelsiz */
 function cannedReply(text: string): string | null {
@@ -291,7 +332,7 @@ const CHAT_SYSTEM = [
   "",
   "SAHIFALAR:",
   // Qisqa: protsessorda har 100 token ~2 soniya — sahifaning faqat birinchi gapi
-  ...TEACHER_PAGES.map((p) => `- ${p.title.split(" (")[0]}: ${p.purpose.split(/[.:;]/)[0].slice(0, 110)}`),
+  ...TEACHER_PAGES.filter((p) => !p.adminOnly).map((p) => `- ${p.title.split(" (")[0]}: ${p.purpose.split(/[.:;]/)[0].slice(0, 110)}`),
   "",
   "QOIDALAR:",
   "- Guruhlar va dars jadvali HEMIS'dan olinadi; mavzular, materiallar, testlar, topshiriqlar va baholar LMS'da saqlanadi.",
@@ -331,7 +372,7 @@ async function freeChat(history: ChatTurn[], currentPage: string | null, onDelta
  * @param onDelta  model javobi bo'laklab kelganda (oqim); tayyor javoblarda chaqirilmaydi
  */
 export async function askAssistant(
-  history: ChatTurn[], currentPage: string | null, lastPage: string | null, onDelta?: OnDelta, teacherId?: number
+  history: ChatTurn[], currentPage: string | null, lastPage: string | null, onDelta?: OnDelta, teacherId?: number, isAdmin = false
 ): Promise<AssistantAnswer> {
   const text = history[history.length - 1].content
 
@@ -359,7 +400,7 @@ export async function askAssistant(
   // Xabarda boshqa sahifa yoki boshqa savol bo'lsa (masalan "ob-havo qanday?") — bu emas.
   const t = norm(text).replace(/[.!?,]+$/g, "")
   const bareExplain = /^(ha,? )?(tushuntir\w*( ber\w*)?|tushuntirib ber\w*|qanday( qilinadi| qilaman)?|o'rgat\w*|ko'rsat\w*|объясни|explain)$/.test(t)
-  const bareOpen = short && (isYes(text) || isOpenCommand(text)) && !keywordPage(text)
+  const bareOpen = short && (isYes(text) || isOpenCommand(text)) && !keywordPage(text, isAdmin)
   if (last && bareOpen) return { reply: openedReply(last), page: last.path, openNow: true }
   if (last && bareExplain) return { reply: explainReply(last), page: last.path, openNow: false }
 
@@ -375,13 +416,18 @@ export async function askAssistant(
     }
 
     // Sahifa so'zlar bo'yicha topildi — modelsiz
-    const target = keywordPage(text)
+    const target = keywordPage(text, isAdmin)
     if (target) {
       if (isOpenCommand(text)) return { reply: openedReply(target), page: target.path, openNow: true }
       return isExplainCommand(text)
         ? { reply: explainReply(target), page: target.path, openNow: false }
         : { reply: choiceReply(target), page: target.path, openNow: false }
     }
+
+    // "…ga o't / och" deyilgan, lekin qaysi sahifa ekani tushunilmadi — model to'qib javob bermasin
+    if (isOpenCommand(text)) return { reply: WHICH_PAGE_REPLY, page: null, openNow: false }
+    // Tushunarsiz kirish (ovozdan noto'g'ri tanilgan: faqat raqamlar, bitta-ikkita harf)
+    if (isGibberish(text)) return { reply: NOT_UNDERSTOOD_REPLY, page: null, openNow: false }
 
     // Qolgan hammasi — erkin savol; javobda tilga olingan sahifaga tugma chiqadi
     const reply = await freeChat(history, currentPage, onDelta)

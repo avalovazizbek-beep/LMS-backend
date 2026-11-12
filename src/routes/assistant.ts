@@ -72,6 +72,7 @@ router.post("/chat", async (req: AuthRequest, res: Response): Promise<void> => {
   const page = typeof req.body?.page === "string" && /^\/[\w\-/]{0,120}$/.test(req.body.page) ? req.body.page : null
   // Oldingi javobda taklif qilingan sahifa — "och" / "ha" / "tushuntir" shunga tegishli
   const lastPage = typeof req.body?.lastPage === "string" ? req.body.lastPage : null
+  const isAdmin = (await getUserAdminRole(req)) !== null
   // Oqim rejimi (frontend shuni ishlatadi): javob so'zma-so'z ketadi, har qatorda bitta JSON.
   //   {type:"delta",text} — model yozgan bo'lak; {type:"ping"} — ulanish uzilmasin (model o'ylayapti);
   //   {type:"done",...}   — yakuniy javob (tozalangan matn + ochiladigan sahifa).
@@ -84,7 +85,7 @@ router.post("/chat", async (req: AuthRequest, res: Response): Promise<void> => {
     const send = (obj: Record<string, unknown>) => { if (!res.writableEnded) res.write(`${JSON.stringify(obj)}\n`) }
     const ping = setInterval(() => send({ type: "ping" }), 10_000)
     try {
-      const answer = await askAssistant(history, page, lastPage, (text) => send({ type: "delta", text }), teacherUserId(req.user))
+      const answer = await askAssistant(history, page, lastPage, (text) => send({ type: "delta", text }), teacherUserId(req.user), isAdmin)
       send({ type: "done", ...answer, pageTitle: pageTitle(answer.page) })
     } catch (err) {
       console.warn("[assistant] model xatosi:", err instanceof Error ? err.message : err)
@@ -96,7 +97,7 @@ router.post("/chat", async (req: AuthRequest, res: Response): Promise<void> => {
     return
   }
   try {
-    const answer = await askAssistant(history, page, lastPage, undefined, teacherUserId(req.user))
+    const answer = await askAssistant(history, page, lastPage, undefined, teacherUserId(req.user), isAdmin)
     res.json({ success: true, data: { ...answer, pageTitle: pageTitle(answer.page) } })
   } catch (err) {
     console.warn("[assistant] model xatosi:", err instanceof Error ? err.message : err)
