@@ -7,7 +7,7 @@ import { pool } from "./db"
 import { getTeacherSchedule, privateStorageRoot, storedFilePath, type TeacherContentRecord } from "./teachingStore"
 import { loadCourses, type Course, type Topic } from "./assistantDiagnostics"
 import { extractFileText, getSubmissionText } from "./submissionText"
-import { reviewText } from "./submissionAiReview"
+import { loadTopicReference, NoTopicError, reviewText } from "./submissionAiReview"
 import { convertWithLibreOffice } from "./officeConvert"
 
 /* ── AI yordamchi: bajaradigan ishlar ─────────────────────────────────────
@@ -35,11 +35,12 @@ const RESOURCES = "/oqituvchi-kabineti/fan-resurslari"
 interface SubRow {
   id: number; name: string; title: string; description: string | null; subject: string
   maxScore: number | null; group: string | null; grade: number | null; submittedAt: string
+  groupId: number; topicKey: string | null
 }
 
 async function teacherSubmissions(teacherId: number): Promise<SubRow[]> {
   const [rows] = await pool.query<mysql.RowDataPacket[]>(
-    `SELECT s.id, s.student_full_name, s.grade, s.submitted_at, c.title, c.description, c.subject_name, c.max_score, g.name AS group_name
+    `SELECT s.id, s.student_full_name, s.grade, s.submitted_at, c.title, c.description, c.subject_name, c.max_score, c.group_id, c.topic_key, g.name AS group_name
      FROM lms_submissions s
      JOIN lms_teacher_content c ON c.id = s.content_id
      LEFT JOIN lms_groups g ON g.id = c.group_id
@@ -51,6 +52,7 @@ async function teacherSubmissions(teacherId: number): Promise<SubRow[]> {
     subject: String(r.subject_name), maxScore: r.max_score != null ? Number(r.max_score) : null,
     group: r.group_name ? String(r.group_name) : null, grade: r.grade != null ? Number(r.grade) : null,
     submittedAt: r.submitted_at instanceof Date ? r.submitted_at.toISOString() : String(r.submitted_at),
+    groupId: Number(r.group_id), topicKey: r.topic_key ? String(r.topic_key) : null,
   }))
 }
 
@@ -98,8 +100,19 @@ export async function reviewStudentWork(teacherId: number, text: string): Promis
   }
   let review
   try {
-    review = await reviewText({ title: sub.title, description: sub.description, subject: sub.subject }, extracted.text, "high")
-  } catch {
+    // Ish topshiriq nomi, mavzu nomi va mavzuga yuklangan material bilan solishtiriladi
+    const reference = await loadTopicReference({ groupId: sub.groupId, subjectName: sub.subject, topicKey: sub.topicKey })
+      .catch(() => ({ topicTitle: null as string | null, material: "" }))
+    review = await reviewText(
+      { title: sub.title, description: sub.description, subject: sub.subject, topicTitle: reference.topicTitle, material: reference.material },
+      extracted.text, "high")
+  } catch (err) {
+    if (err instanceof NoTopicError) {
+      return {
+        page: "/oqituvchi-kabineti/baholash-page",
+        reply: `${head}\n\nIshni ochib o'qidim (${wordCount} ta so'z), lekin baho tavsiya qila olmayman: topshiriq nomi va tavsifi mavzuni bildirmaydi, mavzuga taqdimot yoki qo'llanma ham yuklanmagan — ishni nima bilan solishtirishni bilmayman. Topshiriqqa aniq nom yoki tavsif yozing.${others}`,
+      }
+    }
     return { page: "/oqituvchi-kabineti/baholash-page", reply: `${head}\n\nIshni ochib o'qidim (${wordCount} ta so'z), lekin model hozir javob bermadi. Birozdan keyin qayta so'rang.${others}` }
   }
   const max = sub.maxScore && sub.maxScore > 0 ? sub.maxScore : 100
