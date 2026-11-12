@@ -74,7 +74,7 @@ export function topicIsClear(title: string, description: string | null): boolean
   return new Set(meaningful).size >= 2
 }
 
-async function reviewText(topic: { title: string; description: string | null; subject: string }, text: string): Promise<Omit<AiReview, "status">> {
+export async function reviewText(topic: { title: string; description: string | null; subject: string }, text: string, priority: "high" | "low" = "low"): Promise<Omit<AiReview, "status">> {
   const clear = topicIsClear(topic.title, topic.description)
   const task = [
     clear ? "" : "DIQQAT: topshiriq nomi mavzuni bildirmaydi. relevance ni 0 qo'y (u hisobga olinmaydi) va grade ni faqat ishning o'z sifatiga qarab ber: mazmun to'liqligi, dalillar, tuzilishi.",
@@ -89,7 +89,7 @@ async function reviewText(topic: { title: string; description: string | null; su
     messages: [{ role: "system", content: SYSTEM }, { role: "user", content: task }],
     format: SCHEMA,
     options: { temperature: 0.1, num_ctx: 4096, num_predict: 200 },
-  }, undefined, "low")
+  }, undefined, priority)
   const obj = JSON.parse(raw) as { relevance?: unknown; grade?: unknown; comment?: unknown }
   const relevance = clamp(obj.relevance)
   const grade = clamp(obj.grade)

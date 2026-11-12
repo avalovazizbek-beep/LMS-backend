@@ -26,13 +26,13 @@ const VIDEO_EXT = /\.(mp4|mov|m4v|webm|mkv|avi|wmv|flv|3gp)$/i
 const AUDIO_EXT = /\.(mp3|wav|m4a|aac|ogg|oga|opus|flac|wma)$/i
 const DOC_EXT = /\.(pdf|ppt|pptx|doc|docx|odp|odt)$/i
 
-interface Section {
+export interface Section {
   key: "video" | "audio" | "theory" | "qollanma" | "test" | "assignment"
   label: string
   item: TeacherContentRecord
 }
 
-interface Topic {
+export interface Topic {
   key: string
   title: string
   index: number
@@ -41,7 +41,7 @@ interface Topic {
   group: TeacherContentRecord[]
 }
 
-interface Course {
+export interface Course {
   groupId: number
   groupName: string
   subjectName: string
@@ -70,7 +70,7 @@ function fmtDate(iso: string | null): string {
 }
 
 /** O'qituvchining barcha fan-guruhlari, talaba ko'radigan tartib va zanjir bilan */
-async function loadCourses(teacherId: number): Promise<Course[]> {
+export async function loadCourses(teacherId: number): Promise<Course[]> {
   const mine = await listTeacherContent({ teacherUserId: teacherId })
   const pairs = new Map<string, { groupId: number; subjectName: string }>()
   for (const c of mine) {

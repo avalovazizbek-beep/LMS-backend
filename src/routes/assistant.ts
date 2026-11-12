@@ -36,7 +36,7 @@ router.get("/status", async (req: AuthRequest, res: Response): Promise<void> => 
 const MAX_TURNS = 12
 const MAX_CHARS = 2000
 // Bitta foydalanuvchidan daqiqasiga ko'pi bilan shuncha savol
-const PER_MINUTE = 12
+const PER_MINUTE = 30
 const hits = new Map<string, { count: number; resetAt: number }>()
 
 function rateLimited(userId: string): boolean {

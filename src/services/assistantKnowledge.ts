@@ -177,6 +177,101 @@ async function ownNumbers(teacherId: number, topic: GradeTopic): Promise<string>
   return `\n\nSizning fanlaringizda hozir:\n${lines.join("\n")}${more}`
 }
 
+/* ── "Qanday qilinadi" — eng ko'p so'raladigan ishlar bo'yicha aniq qo'llanma ──
+ * Model bu savollarga to'qib javob bergan ("Fan imtihonlari → Yangi imtihon" degan
+ * mavjud bo'lmagan yo'l, 2026-11-12). Tugma va bo'lim nomlari saytdagi bilan bir xil;
+ * sahifa o'zgarsa shu yerni yangilang. */
+interface HowTo { match: RegExp; page: string; text: string }
+
+const HOWTOS: HowTo[] = [
+  {
+    match: /^(?=.*test)(?=.*(yarat|tuz|qo'sh|yukla|kirit|joyla))/,
+    page: "/oqituvchi-kabineti/fan-resurslari",
+    text: [
+      "Mavzuga test qo'shish — «Mavzu va resurslar» sahifasida:",
+      "1) Guruh va fanni tanlang, kerakli mavzuni oching (mavzu yo'q bo'lsa avval \"Yangi mavzu\" bilan yarating).",
+      "2) Mavzu ichida Test bo'limini oching.",
+      "3) Savollarni ikki usuldan biri bilan kiriting: qo'lda bittalab, yoki tayyor .txt faylni shu bo'limga sudrab tashlang — savollar o'zi yuklanadi.",
+      "4) .txt fayl ko'rinishi: \"1. Savol matni\", tagida variantlar — to'g'risi oldiga \"+\", noto'g'rilari oldiga \"-\". Fayl boshida ixtiyoriy sozlamalar: \"ball: 100\", \"vaqt: 15\", \"urinish: 2\", \"test soni: 10\".",
+      "5) Vaqt, urinishlar soni, ko'rsatiladigan savollar soni va muddatni belgilab, saqlang.",
+      "Eslatma: talaba testdan 60% olsa o'tgan hisoblanadi va keyingi bo'lim ochiladi. Savoli yo'q test talabalarga ko'rinmaydi.",
+      "Oraliq yoki yakuniy nazorat testi boshqa joyda — «Imtihonlar ro'yxati» sahifasida yaratiladi.",
+      "Menga \"shu mavzudan 10 ta test tuzib ber\" desangiz, tayyor .txt fayl qilib beraman.",
+    ].join("\n"),
+  },
+  {
+    match: /^(?=.*(topshiri|vazifa))(?!.*(bahola|tekshir))(?=.*(ber|yarat|qo'sh|yukla|joyla))/,
+    page: "/oqituvchi-kabineti/fan-resurslari",
+    text: [
+      "Talabalarga topshiriq berish — «Mavzu va resurslar» sahifasida:",
+      "1) Guruh va fanni tanlang, kerakli amaliy mavzuni oching.",
+      "2) Mavzu ichida Topshiriq bo'limini oching.",
+      "3) Sarlavha, topshiriq sharti (tavsif), muddat va maksimal ballni kiriting; kerak bo'lsa namuna fayl biriktiring.",
+      "4) Saqlang — talabalar mavzuda topshiriqni ko'radi va javob faylini yuklaydi.",
+      "5) Topshirilgan ishlarni «Baholash» sahifasida ochib baholaysiz.",
+      "Eslatma: talaba fayl yuklashi bilan keyingi mavzu ochiladi (baholanishini kutmaydi). Muddat o'tgach yuklay olmaydi — muddatni uzaytirish yoki mavzuni qayta ochish kerak.",
+      "Menga \"shu mavzudan topshiriq yaratib ber\" desangiz, PDF qilib tayyorlab beraman.",
+    ].join("\n"),
+  },
+  {
+    match: /^(?=.*mavzu)(?!.*(video|audio|taqdimot|prezentatsiya|qo'llanma|test|topshiri|fayl))(?=.*(yarat|qo'sh))/,
+    page: "/oqituvchi-kabineti/fan-resurslari",
+    text: [
+      "Yangi mavzu yaratish — «Mavzu va resurslar» sahifasida:",
+      "1) Guruh va fanni tanlang.",
+      "2) \"Yangi mavzu\" tugmasini bosing, mavzu nomini yozing.",
+      "3) Turini tanlang: Ma'ruza yoki Amaliyot. Bu muhim: JN (joriy nazorat) faqat Amaliyot mavzularidan hisoblanadi, turi belgilanmagan mavzu jurnalga kirmaydi.",
+      "4) Saqlang va mavzuni ochib, bo'limlariga material qo'shing: Video, Audio, Taqdimot, Qo'llanma, Test, Topshiriq.",
+      "5) Tayyor mavzuni \"Boshqa guruhlarga tarqatish\" orqali boshqa guruhlaringizga ham nusxalash mumkin.",
+    ].join("\n"),
+  },
+  {
+    match: /^(?=.*(video|audio|taqdimot|prezentatsiya|qo'llanma|material|fayl|resurs))(?=.*(yukla|qo'sh|joyla))/,
+    page: "/oqituvchi-kabineti/fan-resurslari",
+    text: [
+      "Material yuklash — «Mavzu va resurslar» sahifasida:",
+      "1) Guruh va fanni tanlang, mavzuni oching.",
+      "2) Kerakli bo'limni tanlang va faylni yuklang (yoki sudrab tashlang):",
+      "   • Video — faqat video fayl (mp4). Telefonlarda ochilishi uchun tizim uni fonda o'zi moslaydi.",
+      "   • Audio — mp3.",
+      "   • Taqdimot va Qo'llanma — PDF, PowerPoint yoki Word.",
+      "3) Har bo'limga o'z turidagi faylni qo'ying. Masalan Video bo'limiga taqdimot yuklansa, talaba uni \"ko'rib tugata\" olmaydi va keyingi bo'limlar ochilmay qoladi.",
+      "Talaba tartibi: Video → Audio → Taqdimot → Qo'llanma → Test → Topshiriq. Oldingisini tugatmaguncha keyingisi ochilmaydi; video oxirigacha ko'rilishi, taqdimotning hamma sahifasi o'qilishi kerak.",
+    ].join("\n"),
+  },
+  {
+    match: /muddat\w*.*(uzaytir|o'zgartir|o'tib|o'tgan|tugagan)|deadline|(qayta och|qaytadan och)\w*/,
+    page: "/oqituvchi-kabineti/fan-resurslari",
+    text: [
+      "Muddati o'tgan test yoki topshiriq bo'lsa, talaba endi topshira olmaydi va keyingi mavzuga o'tmaydi. Ikki yo'l bor:",
+      "1) Muddatni uzaytirish: «Mavzu va resurslar» sahifasida mavzuni oching, test yoki topshiriqni tahrirlab, yangi muddat qo'ying.",
+      "2) Mavzuni qayta ochish: mavzu kartasida qayta topshirishga ruxsat bering — muddat o'tgan bo'lsa ham talabalar topshira oladi.",
+      "Faqat bitta talabaga imkon berish kerak bo'lsa — unga qo'shimcha urinish (qayta urinish) beriladi; buni hal qila olmasangiz, adminga murojaat qiling.",
+      "Qaysi mavzularda muddat o'tganini men tekshirib bera olaman: \"nega talabalar o'ta olmayapti\" deb so'rang.",
+    ].join("\n"),
+  },
+  {
+    match: /(qayta urinish|qo'shimcha urinish|yana urinish|urinish\w* (ber|qo'sh|tugagan|qolmagan))/,
+    page: "/oqituvchi-kabineti/natijalar",
+    text: [
+      "Talaba testdan o'ta olmay, urinishlari tugagan bo'lsa, keyingi mavzuga o'ta olmaydi. Unga qo'shimcha urinish beriladi:",
+      "1) O'qituvchi sifatida: test natijalari ro'yxatida shu talaba qatoridan qayta urinishga ruxsat bering.",
+      "2) Oraliq va yakuniy nazorat uchun qayta urinishni admin beradi (Admin panel → Qayta urinish).",
+      "Ruxsat bir martalik: talaba topshirgach sarflanadi. Jurnalga eng yuqori natija yoziladi.",
+    ].join("\n"),
+  },
+]
+
+/** "Qanday qilinadi" savoliga tayyor qo'llanma (bo'lsa) */
+export function howToAnswer(text: string): { reply: string; page: string } | null {
+  const t = norm(text)
+  // Faqat savol yoki niyat bo'lsa ("qanday", "qayerda", "...moqchiman", "kerak") — "test tuzib ber" bu emas
+  if (!/(qanday|qanaqa|qayer|moqchi|kerak|bo'ladimi|mumkinmi|nima qil|tushuntir|o'rgat)/.test(t)) return null
+  if (/(tuz|yarat|yoz|tayyorla)(ib)?\s*ber/.test(t)) return null
+  const hit = HOWTOS.find((h) => h.match.test(t))
+  return hit ? { reply: hit.text, page: hit.page } : null
+}
+
 /** Shu mavzu hozirgina to'liq tushuntirilgan bo'lsa — davom savoliga qisqa, aniq javob */
 const SHORT: Partial<Record<GradeTopic, string>> = {
   amaliyot: "Qisqasi: har bir amaliy topshiriqni uni yaratishda o'zingiz belgilagan maksimal balldan baholaysiz (odatda 100 balldan); test avtomatik 100 ballikda baholanadi. Jurnal natijani foizga aylantirib, topshiriqning JN'dagi ulushiga ko'paytiradi. Butun amaliyot qismi — 35 ball.",

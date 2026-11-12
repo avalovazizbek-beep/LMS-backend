@@ -1,6 +1,7 @@
 import { TEACHER_PAGES, type GuidePage } from "./assistantGuide"
 import { diagnoseProgress, pendingGrading, summarizeContent } from "./assistantDiagnostics"
-import { alreadyExplained, gradingAnswer, gradingQuestion } from "./assistantKnowledge"
+import { alreadyExplained, gradingAnswer, gradingQuestion, howToAnswer } from "./assistantKnowledge"
+import { createMaterialFlow, personalAnswer, personalQuestion, reviewStudentWork, wantsStudentReview } from "./assistantTasks"
 
 /* ── O'qituvchi yordamchisi: o'z serverimizdagi model (Ollama) bilan suhbat ──
  * Bepul va ma'lumot tashqariga chiqmaydi: so'rov faqat OLLAMA_URL ga ketadi.
@@ -43,6 +44,8 @@ export interface AssistantAnswer {
   reply: string
   page: string | null
   openNow: boolean
+  /** Yuklab olinadigan fayl (tuzilgan test .txt, topshiriq .pdf) */
+  file?: { name: string; mime: string; base64: string }
 }
 
 /** Javob bo'lagi kelganda chaqiriladi (oqim) */
@@ -377,6 +380,27 @@ export async function askAssistant(
 ): Promise<AssistantAnswer> {
   const text = history[history.length - 1].content
 
+  // ── Bajariladigan ishlar (services/assistantTasks.ts) ──
+  try {
+    // "Aliyevning ishiga necha baho berasan" — ishni ochib o'qiydi (kerak bo'lsa OCR) va baho tavsiya qiladi
+    if (teacherId && wantsStudentReview(text)) {
+      const reviewed = await reviewStudentWork(teacherId, text)
+      if (reviewed) return { reply: reviewed.reply, page: reviewed.page, openNow: false }
+    }
+    // Test / topshiriq yaratish: soni va mavzuni so'raydi, mavzu materialidan tuzadi, fayl beradi
+    const made = await createMaterialFlow(history, teacherId, ollamaChat, onDelta)
+    if (made) return { reply: made.reply, page: made.page, openNow: false, file: made.file }
+    // "Fanlarim", "bugungi darslarim"
+    const personal = teacherId ? personalQuestion(text) : null
+    if (personal && teacherId) {
+      const a = await personalAnswer(personal, teacherId)
+      return { reply: a.reply, page: a.page, openNow: false }
+    }
+  } catch (err) {
+    console.warn("[assistant] ishni bajarishda xato:", err instanceof Error ? err.message : err)
+    return { reply: MODEL_DOWN_REPLY, page: null, openNow: false }
+  }
+
   // Baholash qoidalari ("amaliyot qanday baholanadi", "necha ballik") — koddagi qoidadan aniq javob
   // + o'qituvchining o'z fanlaridagi sonlar. Mavzu aytilmasa, oldingi savollardan olinadi.
   const previousUser = history.slice(0, -1).filter((m) => m.role === "user").map((m) => m.content)
@@ -387,6 +411,10 @@ export async function askAssistant(
     const answer = await gradingAnswer(gradeTopic, teacherId, alreadyExplained(gradeTopic, lastAnswer))
     return { reply: answer.reply, page: answer.page, openNow: false }
   }
+
+  // "Test qanday yaratiladi", "video qanday yuklanadi" — tayyor aniq qo'llanma (model to'qimasin)
+  const howTo = howToAnswer(text)
+  if (howTo) return { reply: howTo.reply, page: howTo.page, openNow: false }
 
   // O'qituvchining o'z ma'lumotiga oid savol — bazadan tekshirib javob beriladi (modelsiz)
   if (teacherId) {
