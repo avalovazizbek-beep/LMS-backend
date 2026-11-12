@@ -1,4 +1,5 @@
 import { TEACHER_PAGES, type GuidePage } from "./assistantGuide"
+import { diagnoseProgress, pendingGrading, summarizeContent } from "./assistantDiagnostics"
 
 /* ── O'qituvchi yordamchisi: o'z serverimizdagi model (Ollama) bilan suhbat ──
  * Bepul va ma'lumot tashqariga chiqmaydi: so'rov faqat OLLAMA_URL ga ketadi.
@@ -192,6 +193,34 @@ function pageMentioned(reply: string): GuidePage | null {
   return best
 }
 
+/* ── O'qituvchining o'z ma'lumotiga oid savollar (services/assistantDiagnostics.ts) ── */
+
+type DataQuestion = "diagnose" | "content" | "pending"
+
+/** Oldingi savolda nima haqida gap ketgani ("shuni qo'yganmanmi" → topshiriq) — qisqa davom savollari uchun */
+function contextText(text: string, history: ChatTurn[]): string {
+  const prev = history.filter((m) => m.role === "user").slice(-3, -1).map((m) => m.content).join(" ")
+  return /(topshiri|test|video|taqdimot|audio)/.test(norm(text)) ? text : `${prev} ${text}`
+}
+
+function dataQuestion(text: string, history: ChatTurn[]): DataQuestion | null {
+  const t = norm(text)
+  // "nechta ish baholanmagan", "baholanmagan ishlar bormi"
+  if (/(baholanmagan|tekshirilmagan|baholash kut)/.test(t) || /(nechta|qancha).*(ish|topshiri).*(bahola|tekshir)/.test(t)) return "pending"
+  // "nega bolalar keyingi mavzuga o'ta olmayapti", "topshiriqni bajara olmayapti", "test ochilmayapti"
+  const cant = /(o'?t(a|o)?\s?ol?may|o'?tolma|otolma|bajar(a|o)?\s?ol?may|bajarolma|topshir(a|o)?\s?ol?may|topshirolma|kir(a|o)?\s?ol?may|ko'r(a|o)?\s?ol?may|och(a|o)?\s?ol?may|ochilma|ko'rinma|chiqma|qulf|yopiq|ishlama)/.test(t)
+  const who = /(talaba|bola|o'quvchi|student|guruh|ular|mavzu|topshiri|test|video|taqdimot)/.test(t)
+  if (cant && who) return "diagnose"
+  if (/^(nega|nimaga|sababi|nima uchun)/.test(t) && cant) return "diagnose"
+  // "talabadan bo'lyaptimi yoki mendanmi" — oldingi savol muammo haqida bo'lsa
+  const prev = norm(history.filter((m) => m.role === "user").slice(-3, -1).map((m) => m.content).join(" "))
+  if (/(mendanmi|menda(n)? (xato|muammo)|kimdan|kimning aybi|talabadan.*(yoki|mi))/.test(t)) return "diagnose"
+  // "topshiriq yuklaganmanmi", "test qo'yganmanmi", "shuni qo'yganmanmi tekshir"
+  const did = /(yuklaganman|yuklagan(mi| ekan)|qo'?yganman|qoyganman|qo'shganman|yaratganman|kiritganman|bormi|yo'qmi|tekshir)/.test(t)
+  if (did && /(topshiri|test|video|taqdimot|audio|material|resurs|mavzu|shuni|buni|o'shani)/.test(`${t} ${prev}`)) return "content"
+  return null
+}
+
 /* ── 2) Qo'llanmadan aynan olinadigan va tayyor javoblar ───────────── */
 
 const findPage = (path: string | null): GuidePage | null => TEACHER_PAGES.find((p) => p.path === path) ?? null
@@ -302,9 +331,27 @@ async function freeChat(history: ChatTurn[], currentPage: string | null, onDelta
  * @param onDelta  model javobi bo'laklab kelganda (oqim); tayyor javoblarda chaqirilmaydi
  */
 export async function askAssistant(
-  history: ChatTurn[], currentPage: string | null, lastPage: string | null, onDelta?: OnDelta
+  history: ChatTurn[], currentPage: string | null, lastPage: string | null, onDelta?: OnDelta, teacherId?: number
 ): Promise<AssistantAnswer> {
   const text = history[history.length - 1].content
+
+  // O'qituvchining o'z ma'lumotiga oid savol — bazadan tekshirib javob beriladi (modelsiz)
+  if (teacherId) {
+    const kind = dataQuestion(text, history)
+    if (kind) {
+      try {
+        const whose = /(mendanmi|menda(n)? (xato|muammo)|kimdan|kimning aybi|talabadan.*(yoki|mi))/.test(norm(text))
+        const reply = kind === "diagnose" ? await diagnoseProgress(teacherId, contextText(text, history), whose)
+          : kind === "pending" ? await pendingGrading(teacherId)
+          : await summarizeContent(teacherId, contextText(text, history))
+        const page = kind === "pending" ? "/oqituvchi-kabineti/baholash-page" : "/oqituvchi-kabineti/fan-resurslari"
+        return { reply, page, openNow: false }
+      } catch (err) {
+        console.warn("[assistant] ma'lumotni tekshirishda xato:", err instanceof Error ? err.message : err)
+      }
+    }
+  }
+
   const last = findPage(lastPage)
   const short = norm(text).split(" ").length <= 4
 

@@ -3,6 +3,7 @@ import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { getUserAdminRole } from "./admin"
 import { askAssistant, assistantHealth, ASSISTANT_MODEL, type ChatTurn } from "../services/assistantService"
 import { pageTitle } from "../services/assistantGuide"
+import { teacherUserId } from "../services/teachingStore"
 
 /* ── O'qituvchi yordamchisi (AI agent) ──────────────────────────────────
    GET  /api/assistant/status — shu foydalanuvchiga yordamchi ko'rinadimi
@@ -83,7 +84,7 @@ router.post("/chat", async (req: AuthRequest, res: Response): Promise<void> => {
     const send = (obj: Record<string, unknown>) => { if (!res.writableEnded) res.write(`${JSON.stringify(obj)}\n`) }
     const ping = setInterval(() => send({ type: "ping" }), 10_000)
     try {
-      const answer = await askAssistant(history, page, lastPage, (text) => send({ type: "delta", text }))
+      const answer = await askAssistant(history, page, lastPage, (text) => send({ type: "delta", text }), teacherUserId(req.user))
       send({ type: "done", ...answer, pageTitle: pageTitle(answer.page) })
     } catch (err) {
       console.warn("[assistant] model xatosi:", err instanceof Error ? err.message : err)
@@ -95,7 +96,7 @@ router.post("/chat", async (req: AuthRequest, res: Response): Promise<void> => {
     return
   }
   try {
-    const answer = await askAssistant(history, page, lastPage)
+    const answer = await askAssistant(history, page, lastPage, undefined, teacherUserId(req.user))
     res.json({ success: true, data: { ...answer, pageTitle: pageTitle(answer.page) } })
   } catch (err) {
     console.warn("[assistant] model xatosi:", err instanceof Error ? err.message : err)
