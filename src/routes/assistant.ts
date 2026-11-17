@@ -1,6 +1,7 @@
 import express, { Router, Response } from "express"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
 import { transcribeAudio } from "../services/speechToText"
+import { hasAssistantAccess } from "../services/assistantAccess"
 import { getUserAdminRole } from "./admin"
 import { askAssistant, assistantHealth, ASSISTANT_MODEL, type ChatTurn } from "../services/assistantService"
 import { pageTitle } from "../services/assistantGuide"
@@ -19,12 +20,15 @@ router.use(authMiddleware)
 
 const ALLOWED = String(process.env.ASSISTANT_USER_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean)
 
+/** Yordamchi kimga ko'rinadi: to'liq admin, admin "Sozlamalar → Yordamchiga ruxsat" da
+    belgilagan xodim, yoki .env dagi ASSISTANT_USER_IDS ro'yxati ("all" — hamma xodim). */
 export async function assistantAllowed(req: AuthRequest): Promise<boolean> {
   if (req.user?.role !== "employee") return false
   if (ALLOWED.includes("all")) return true
   const id = String(req.user?.userId ?? req.user?.id ?? "")
-  if (ALLOWED.length) return ALLOWED.includes(id)
-  return (await getUserAdminRole(req)) === "admin"
+  if (ALLOWED.includes(id)) return true
+  if ((await getUserAdminRole(req)) === "admin") return true
+  return hasAssistantAccess(teacherUserId(req.user))
 }
 
 router.get("/status", async (req: AuthRequest, res: Response): Promise<void> => {

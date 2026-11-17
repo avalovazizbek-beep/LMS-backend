@@ -1057,6 +1057,17 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_settings")
 
+  // ── O'qituvchi yordamchisi (AI): admin ruxsat bergan xodimlar (services/assistantAccess.ts) ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_assistant_access (
+      teacher_user_id INT PRIMARY KEY,
+      full_name       VARCHAR(255) NOT NULL,
+      department      VARCHAR(255) NULL,
+      created_by_name VARCHAR(255) NULL,
+      created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_assistant_access")
+
   // ── Maxsus ehtiyojli (ko'zi ojiz / zaif ko'ruvchi) talabalar — admin belgilaydi
   // (services/accessibilityStore.ts): test vaqti foizi, Face ID'siz, oynadan chiqish chegarasisiz ──
   await execSafe(`

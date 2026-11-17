@@ -43,6 +43,7 @@ import {
   listAccessibilityStudents, getAccessibilityStudent, saveAccessibilityStudent, removeAccessibilityStudent,
   searchCandidates, findCandidate, clampTimePercent,
 } from "../services/accessibilityStore"
+import { listAssistantAccess, searchTeachers, findTeacher, grantAssistantAccess, revokeAssistantAccess } from "../services/assistantAccess"
 import {
   TELEGRAM_TOKEN_KEY, TELEGRAM_CHAT_KEY, getTelegramConfig, saveTelegramToken, maskTelegramToken,
   isValidTelegramToken, isValidTelegramChatId, sendTelegramTestMessage, findTelegramChats,
@@ -1960,6 +1961,49 @@ router.delete("/accessibility-students/:id", requirePermission("students", "edit
   if (!existing) { res.status(404).json({ success: false, message: "Talaba ro'yxatda topilmadi" }); return }
   await removeAccessibilityStudent(id)
   void logAudit(req, "accessibility.unmark", "students", String(id), { fullName: existing.fullName })
+  res.json({ success: true })
+})
+
+/* ── O'qituvchi yordamchisi (AI): kimga ko'rinadi — faqat to'liq admin ───
+   GET    /assistant-access            — ruxsat berilganlar
+   GET    /assistant-access/search?q=  — xodim qidirish (ism / raqam / login)
+   PUT    /assistant-access/:id        — ruxsat berish
+   DELETE /assistant-access/:id        — ruxsatni olib tashlash
+   (services/assistantAccess.ts; routes/assistant.ts shu ro'yxatga qaraydi) ── */
+router.get("/assistant-access", requireFullAdmin, async (_req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    res.json({ success: true, teachers: await listAssistantAccess() })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err instanceof Error ? err.message : "Ro'yxatni olishda xato" })
+  }
+})
+
+router.get("/assistant-access/search", requireFullAdmin, async (req: AuthRequest, res: Response): Promise<void> => {
+  const q = typeof req.query.q === "string" ? req.query.q.slice(0, 100) : ""
+  try {
+    res.json({ success: true, teachers: await searchTeachers(q) })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err instanceof Error ? err.message : "Qidiruvda xato" })
+  }
+})
+
+router.put("/assistant-access/:id", requireFullAdmin, async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isInteger(id) || id <= 0) { res.status(400).json({ success: false, message: "Xodim ID noto'g'ri" }); return }
+  const teacher = await findTeacher(id)
+  if (!teacher) { res.status(404).json({ success: false, message: "Xodim topilmadi" }); return }
+  const row = await grantAssistantAccess(id, teacher.fullName, teacher.department, req.user?.fullName ?? null)
+  void logAudit(req, "assistant.grant", "settings", String(id), { fullName: teacher.fullName })
+  res.json({ success: true, teacher: row })
+})
+
+router.delete("/assistant-access/:id", requireFullAdmin, async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  if (!Number.isInteger(id) || id <= 0 || !(await revokeAssistantAccess(id))) {
+    res.status(404).json({ success: false, message: "Xodim ro'yxatda topilmadi" })
+    return
+  }
+  void logAudit(req, "assistant.revoke", "settings", String(id), {})
   res.json({ success: true })
 })
 
