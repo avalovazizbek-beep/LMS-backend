@@ -1,5 +1,6 @@
-import { Router, Response } from "express"
+import express, { Router, Response } from "express"
 import { authMiddleware, AuthRequest } from "../middleware/auth"
+import { transcribeAudio } from "../services/speechToText"
 import { getUserAdminRole } from "./admin"
 import { askAssistant, assistantHealth, ASSISTANT_MODEL, type ChatTurn } from "../services/assistantService"
 import { pageTitle } from "../services/assistantGuide"
@@ -49,6 +50,39 @@ function rateLimited(userId: string): boolean {
   entry.count += 1
   return entry.count > PER_MINUTE
 }
+
+/* POST /api/assistant/transcribe?lang=uz — mikrofondan yozilgan ovoz (xom audio tanasi) → matn.
+   Brauzerning o'z nutq tanishi ishlamaydigan qurilmalar (iPhone) uchun zaxira yo'l. */
+const sttHits = new Map<string, { count: number; resetAt: number }>()
+router.post("/transcribe", express.raw({ type: () => true, limit: "8mb" }), async (req: AuthRequest, res: Response): Promise<void> => {
+  if (!(await assistantAllowed(req))) {
+    res.status(403).json({ success: false, message: "Yordamchi siz uchun yoqilmagan" })
+    return
+  }
+  const uid = String(req.user?.userId ?? req.user?.id ?? "")
+  const now = Date.now()
+  const entry = sttHits.get(uid)
+  if (!entry || now > entry.resetAt) sttHits.set(uid, { count: 1, resetAt: now + 60_000 })
+  else if (++entry.count > 20) {
+    res.status(429).json({ success: false, message: "Juda ko'p urinish — bir daqiqadan keyin qayta urinib ko'ring" })
+    return
+  }
+  const audio = req.body
+  if (!Buffer.isBuffer(audio) || audio.length < 800) {
+    res.status(400).json({ success: false, message: "Ovoz juda qisqa" })
+    return
+  }
+  try {
+    const text = await transcribeAudio(audio, String(req.query.lang ?? "uz"))
+    res.set("Cache-Control", "no-store")
+    res.json({ success: true, text })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn("[assistant] transcribe xatosi:", msg)
+    if (msg === "BUSY") res.status(503).json({ success: false, message: "Ovoz tanish band — birozdan keyin urinib ko'ring" })
+    else res.status(502).json({ success: false, message: "Ovozni matnga aylantirib bo'lmadi (server sozlanmagan)" })
+  }
+})
 
 router.post("/chat", async (req: AuthRequest, res: Response): Promise<void> => {
   if (!(await assistantAllowed(req))) {
