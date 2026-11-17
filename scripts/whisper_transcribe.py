@@ -16,11 +16,21 @@ def main() -> None:
 
     from faster_whisper import WhisperModel  # noqa: E402
 
+    import wave  # noqa: E402
+
+    import numpy as np  # noqa: E402
+
+    # Backend ovozni 16 kHz mono wav'ga ffmpeg bilan o'tkazib beradi. Uni o'zimiz o'qiymiz,
+    # shunda faster-whisper'ning "av" kutubxonasi (versiya mos kelmasligi mumkin) kerak bo'lmaydi.
+    with wave.open(path, "rb") as wf:
+        raw = wf.readframes(wf.getnframes())
+    audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
     model_name = os.environ.get("WHISPER_MODEL", "small")
     threads = int(os.environ.get("WHISPER_THREADS", "0") or 0)
     model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=threads)
     segments, _info = model.transcribe(
-        path,
+        audio,
         language=lang or None,
         beam_size=1,
         vad_filter=True,
