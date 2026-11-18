@@ -149,6 +149,27 @@ const ALLOWED_EXTENSIONS = new Set([
   ".jpg", ".jpeg", ".png", ".gif", ".webp",
 ])
 
+/* Mavzu bo'limlari: Video va Audio'ga faqat o'z turidagi fayl (brauzerning
+   accept filtri sudrab tashlangan faylga ishlamaydi — Word video sifatida
+   saqlanib qolgan holat bo'lgan). Qolgan bo'limlar ALLOWED_EXTENSIONS bilan. */
+const MEDIA_KIND_EXTENSIONS: Record<string, { exts: Set<string>; label: string }> = {
+  video_lesson: { exts: new Set([".mp4", ".webm", ".mov", ".mkv", ".avi"]), label: "video (MP4, MOV, WEBM, MKV, AVI)" },
+  audio: { exts: new Set([".mp3", ".wav", ".m4a", ".ogg", ".aac"]), label: "audio (MP3, WAV, M4A, OGG, AAC)" },
+}
+
+export function mediaKindFileError(kind: string | null | undefined, filename: string): string | null {
+  const rule = kind ? MEDIA_KIND_EXTENSIONS[kind] : undefined
+  if (!rule) return null
+  const ext = path.extname(filename || "").toLowerCase()
+  return rule.exts.has(ext) ? null : `Bu bo'limga faqat ${rule.label} fayl yuklanadi`
+}
+
+/** Test/topshiriq maksimal bali: 0 (= 100) dan 100 gacha */
+export function maxScoreError(value: number | null | undefined): string | null {
+  if (value == null) return null
+  return Number.isFinite(value) && value >= 0 && value <= 100 ? null : "Maksimal ball 0 dan 100 gacha bo'lishi kerak (0 — 100 ball)"
+}
+
 /* ── kichik yordamchilar ──────────────────────────────────────────── */
 function textValue(value: unknown): string {
   if (typeof value === "string") return value.trim()
@@ -1705,6 +1726,35 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
 })
 
 /* ── GET /my-topic-scores — talabaning mavzu bo'yicha ballari ──────── */
+/* ── GET /my-roster-number?subject= — talabaning guruh ro'yxatidagi tartib
+   raqami (o'qituvchi jurnalidagi bilan bir xil: shu fanga biriktirilganlar,
+   F.I.Sh alifbo tartibida). Topshiriq variantini raqam bo'yicha berganda
+   talaba o'z raqamini shu yerdan ko'radi. ── */
+router.get("/my-roster-number", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "student") {
+    res.status(403).json({ success: false, message: "Faqat talaba uchun" })
+    return
+  }
+  const subjectName = textValue(req.query.subject)
+  const groupId = studentGroupId(req.user)
+  if (!subjectName || groupId === null) {
+    res.json({ success: true, data: null })
+    return
+  }
+  try {
+    const roster = await getGroupRoster(groupId, subjectName)
+    const myId = studentUserId(req.user)
+    const idNumbers = [req.user?.studentProfile?.student_id_number, req.user?.hemisLogin]
+      .map((v) => (v == null ? "" : String(v).trim()))
+      .filter(Boolean)
+    const index = roster.findIndex((s) => s.studentUserId === myId || (!!s.studentIdNumber && idNumbers.includes(String(s.studentIdNumber))))
+    res.json({ success: true, data: index >= 0 ? { number: index + 1, total: roster.length } : null })
+  } catch (err) {
+    console.warn("[my-roster-number]", (err as { message?: string })?.message ?? err)
+    res.json({ success: true, data: null })
+  }
+})
+
 router.get("/my-topic-scores", async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.user?.role === "employee") {
     res.status(403).json({ success: false, message: "Faqat talaba uchun" })
@@ -1932,6 +1982,20 @@ router.post("/content", async (req: AuthRequest, res: Response): Promise<void> =
   if (!meta.type) {
     res.status(400).json({ success: false, message: `type maydoni quyidagilardan biri bo'lishi kerak: ${CONTENT_TYPES.join(", ")}` })
     return
+  }
+  const scoreError = maxScoreError(meta.maxScore)
+  if (scoreError) {
+    res.status(400).json({ success: false, message: scoreError })
+    return
+  }
+  // Brauzer accept filtri sudrab tashlangan faylni tekshirmaydi — Video/Audio
+  // bo'limiga boshqa turdagi fayl (masalan Word) yozilib qolmasin
+  if (!isJson && meta.type === "mavzu") {
+    const kindError = mediaKindFileError(meta.kind, textValue(req.query.filename || req.headers["x-file-name"]))
+    if (kindError) {
+      res.status(400).json({ success: false, message: kindError })
+      return
+    }
   }
   if (meta.groupId === null) {
     res.status(400).json({ success: false, message: "groupId majburiy" })
@@ -2203,7 +2267,14 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
     }
     patch.deadline = deadline || null
   }
-  if ("maxScore" in body) patch.maxScore = numberValue(body.maxScore)
+  if ("maxScore" in body) {
+    patch.maxScore = numberValue(body.maxScore)
+    const scoreError = maxScoreError(patch.maxScore)
+    if (scoreError) {
+      res.status(400).json({ success: false, message: scoreError })
+      return
+    }
+  }
   if ("completionPoints" in body) patch.completionPoints = numberValue(body.completionPoints)
   if ("durationMinutes" in body) patch.durationMinutes = numberValue(body.durationMinutes)
   if ("trainingLoad" in body) patch.trainingLoad = numberValue(body.trainingLoad)
