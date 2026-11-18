@@ -1152,6 +1152,8 @@ export interface SubmissionRecord {
   optionPerms: Record<number, number[]> | null
   retakeGranted: boolean
   retakeGrantedAt: string | null
+  /** Yuborilgan paytdagi guruh ro'yxatidagi raqami (davomat jurnali tartibi) */
+  rosterNumber: number | null
 }
 
 function parseOptionPerms(value: unknown): Record<number, number[]> | null {
@@ -1199,6 +1201,7 @@ function mapSubmissionRow(row: mysql.RowDataPacket): SubmissionRecord {
     optionPerms: parseOptionPerms(row.option_perms),
     retakeGranted: row.active_grant_id != null,
     retakeGrantedAt: row.active_grant_at ? fromMysqlDate(row.active_grant_at) : null,
+    rosterNumber: row.roster_number == null ? null : Number(row.roster_number),
   }
 }
 
@@ -1275,6 +1278,11 @@ export async function deleteSubmission(submission: SubmissionRecord): Promise<vo
   await pool.query("DELETE FROM lms_plagiarism_checks WHERE submission_id = ?", [submission.id])
   await pool.query("DELETE FROM lms_submissions WHERE id = ?", [submission.id])
   removeStoredFile(submission.file?.relativePath)
+}
+
+/** Talabaning ro'yxat raqamini ishga yozadi (yuborilgandan keyin fonda) */
+export async function setSubmissionRosterNumber(submissionId: number, rosterNumber: number): Promise<void> {
+  await pool.query("UPDATE lms_submissions SET roster_number = ? WHERE id = ?", [rosterNumber, submissionId])
 }
 
 export async function listSubmissions(contentId: number): Promise<SubmissionRecord[]> {

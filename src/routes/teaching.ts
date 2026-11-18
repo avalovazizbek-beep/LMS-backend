@@ -42,6 +42,7 @@ import {
   getContentFile,
   removeContentFile,
   upsertSubmission,
+  setSubmissionRosterNumber,
   deleteSubmission,
   removeStoredFile,
   listSubmissions,
@@ -110,6 +111,8 @@ import {
   type AttendanceStatus,
   type AttendanceRecordInput,
   getGroupRoster,
+  getJournalRoster,
+  rosterNumberIn,
   sortByFullName,
   saveAttendance,
   getAttendanceForGroupDate,
@@ -372,6 +375,26 @@ async function employeeCanViewContent(user: AuthUser, content: TeacherContentRec
   const tId = teacherUserId(user)
   if (content.teacherUserId === tId) return true
   return (await getTeacherGroupIds(tId)).includes(content.groupId)
+}
+
+/** Talabaning HEMIS talaba ID raqamlari (ro'yxatda ID mos kelmasa ham topish uchun) */
+function studentIdNumbersOf(user: AuthRequest["user"]): string[] {
+  return [user?.studentProfile?.student_id_number, user?.hemisLogin]
+    .map((v) => (v == null ? "" : String(v).trim()))
+    .filter(Boolean)
+}
+
+/** Topshiriq yuborilganda shu paytdagi ro'yxat raqami (davomat jurnali tartibi)
+ *  ishga yoziladi — javobdan keyin fonda, yuklashni sekinlashtirmaydi.
+ *  Guruhga keyin talaba qo'shilsa ham ishdagi raqam o'zgarmaydi. */
+function recordRosterNumber(content: { type: string; groupId: number | null; subjectName: string }, submissionId: number, user: AuthRequest["user"]): void {
+  if (content.type !== "assignment" || content.groupId == null) return
+  void getJournalRoster(content.groupId, content.subjectName)
+    .then((roster) => {
+      const n = rosterNumberIn(roster, studentUserId(user), studentIdNumbersOf(user))
+      return n ? setSubmissionRosterNumber(submissionId, n) : undefined
+    })
+    .catch((err) => console.warn("[roster-number]", (err as { message?: string })?.message ?? err))
 }
 
 function receiveUploadedFile(req: AuthRequest, res: Response): Promise<ContentFile | null> {
@@ -1742,13 +1765,9 @@ router.get("/my-roster-number", async (req: AuthRequest, res: Response): Promise
     return
   }
   try {
-    const roster = await getGroupRoster(groupId, subjectName)
-    const myId = studentUserId(req.user)
-    const idNumbers = [req.user?.studentProfile?.student_id_number, req.user?.hemisLogin]
-      .map((v) => (v == null ? "" : String(v).trim()))
-      .filter(Boolean)
-    const index = roster.findIndex((s) => s.studentUserId === myId || (!!s.studentIdNumber && idNumbers.includes(String(s.studentIdNumber))))
-    res.json({ success: true, data: index >= 0 ? { number: index + 1, total: roster.length } : null })
+    const roster = await getJournalRoster(groupId, subjectName)
+    const number = rosterNumberIn(roster, studentUserId(req.user), studentIdNumbersOf(req.user))
+    res.json({ success: true, data: number ? { number, total: roster.length } : null })
   } catch (err) {
     console.warn("[my-roster-number]", (err as { message?: string })?.message ?? err)
     res.json({ success: true, data: null })
@@ -2540,6 +2559,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
     if (lateGrant) await consumeRetakeGrant(content.id, sId)
     res.status(201).json({ success: true, data: submission })
     notifyGradePending(content, fullNameOf(req.user))
+    recordRosterNumber(content, submission.id, req.user)
     return
   }
 
@@ -2618,6 +2638,7 @@ router.post("/content/:id/submit", async (req: AuthRequest, res: Response): Prom
     if (lateGrant) await consumeRetakeGrant(content.id, sId)
     res.status(201).json({ success: true, data: submission })
     notifyGradePending(content, fullNameOf(req.user))
+    recordRosterNumber(content, submission.id, req.user)
   })
 
   req.pipe(stream)
@@ -2680,6 +2701,11 @@ router.get("/content/:id/submissions", async (req: AuthRequest, res: Response): 
     return
   }
   const submissions = await listSubmissions(content.id)
+  // Raqam yuborilgan paytda yoziladi; undan oldingi ishlar uchun — hozirgi jurnal ro'yxatidan
+  if (content.type === "assignment" && content.groupId != null && submissions.some((s) => s.rosterNumber == null)) {
+    const roster = await getJournalRoster(content.groupId, content.subjectName).catch(() => [])
+    for (const s of submissions) if (s.rosterNumber == null) s.rosterNumber = rosterNumberIn(roster, s.studentUserId)
+  }
   res.json({ success: true, data: submissions })
 })
 
@@ -3575,7 +3601,8 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
   }
 
   const [hemisRoster, sheetRecords, saved, editRequest, savedTypes] = await Promise.all([
-    getGroupRoster(groupId, subjectName).catch(() => [] as import("../services/attendanceStore").RosterStudent[]),
+    // HEMIS ro'yxati, bo'lmasa davomat tarixi — talabaga ko'rsatiladigan raqam ham shundan
+    getJournalRoster(groupId, subjectName),
     getAttendanceForGroupDate(groupId, subjectName, date, trainingType),
     isAttendanceSheetSaved(groupId, subjectName, date, trainingType),
     getLatestEditRequest(groupId, subjectName, date, trainingType, tId),
@@ -3587,20 +3614,7 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
     ? await getAttendanceForGroupDate(groupId, subjectName, date, "", true)
     : sheetRecords
 
-  // If HEMIS roster is empty, fall back to students from attendance history
-  let roster = hemisRoster
-  if (!roster.length) {
-    const [attRows] = await pool.query<import("mysql2").RowDataPacket[]>(
-      `SELECT DISTINCT student_user_id, student_full_name FROM lms_attendance
-       WHERE group_id = ? AND LOWER(subject_name) = LOWER(?) ORDER BY student_full_name`,
-      [groupId, subjectName]
-    )
-    roster = sortByFullName(attRows.map(r => ({
-      studentUserId: Number(r.student_user_id),
-      fullName: String(r.student_full_name),
-      studentIdNumber: null,
-    })))
-  }
+  const roster = hemisRoster
 
   const data = roster.map((s) => {
     const record = existing.get(s.studentUserId)

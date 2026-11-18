@@ -90,6 +90,31 @@ export async function getGroupRoster(groupId: number, subjectName?: string): Pro
   })))
 }
 
+/** Davomat jurnalidagi ro'yxat: HEMIS'dan (getGroupRoster), u ishlamasa yoki
+ *  bo'sh bo'lsa — shu guruh+fan davomat tarixidagi talabalar. Jurnal, talabaning
+ *  "tartib raqamingiz" yozuvi va topshiriqdagi raqam shu bitta manbadan. */
+export async function getJournalRoster(groupId: number, subjectName: string): Promise<RosterStudent[]> {
+  const roster = await getGroupRoster(groupId, subjectName).catch(() => [] as RosterStudent[])
+  if (roster.length) return roster
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    `SELECT DISTINCT student_user_id, student_full_name FROM lms_attendance
+     WHERE group_id = ? AND LOWER(subject_name) = LOWER(?) ORDER BY student_full_name`,
+    [groupId, subjectName]
+  )
+  return sortByFullName(rows.map((r) => ({
+    studentUserId: Number(r.student_user_id),
+    fullName: String(r.student_full_name),
+    studentIdNumber: null,
+  })))
+}
+
+/** Ro'yxatdagi 1 dan boshlanuvchi raqam (ID yoki talaba ID raqami bo'yicha), topilmasa null */
+export function rosterNumberIn(roster: RosterStudent[], studentUserId: number, idNumbers: string[] = []): number | null {
+  const index = roster.findIndex((s) =>
+    s.studentUserId === studentUserId || (!!s.studentIdNumber && idNumbers.includes(String(s.studentIdNumber))))
+  return index >= 0 ? index + 1 : null
+}
+
 /* ── Davomatni saqlash ──────────────────────────────────────────────── */
 export interface AttendanceRecordInput {
   studentUserId: number

@@ -701,6 +701,9 @@ export async function initDatabase() {
   // Matn qayerdan olingani (text / ocr / none) va qaysi fayl uchun (fayl almashsa qayta o'qiladi) — services/submissionText.ts
   await ensureColumn("lms_submissions", "text_source", "VARCHAR(10) NULL DEFAULT NULL")
   await ensureColumn("lms_submissions", "text_sig", "VARCHAR(600) NULL DEFAULT NULL")
+  // Topshiriq yuborilgan paytdagi talabaning guruh ro'yxatidagi raqami (davomat
+  // jurnalidagi tartib) — variant raqam bo'yicha berilganda o'qituvchi tekshiradi
+  await ensureColumn("lms_submissions", "roster_number", "INT NULL DEFAULT NULL")
 
   // ── lms_meetings: fan nomi (subjectName) ──
   await ensureColumn("lms_meetings", "subject_name", "VARCHAR(255) NULL")
