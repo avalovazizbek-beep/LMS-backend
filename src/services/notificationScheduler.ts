@@ -1,11 +1,13 @@
 import type { RowDataPacket } from "mysql2"
 import { pool } from "./db"
 import { createNotification, studentOwnersInGroups, type NotificationOwner } from "./notificationStore"
+import { runSurveyNotifications } from "./surveyStore"
 
 /**
  * Vaqtga bog'liq eslatmalar — har daqiqada tekshiriladi:
  *  • dars (meeting) 15 daqiqadan keyin boshlanadi — o'qituvchi va guruh talabalariga;
- *  • test/topshiriq muddatiga 24 soat va 1 soat qoldi — hali topshirmagan talabalarga.
+ *  • test/topshiriq muddatiga 24 soat va 1 soat qoldi — hali topshirmagan talabalarga;
+ *  • so'rovnomalar: yangi / davriy / oxirgi 24 soat eslatmasi — javob bermaganlarga (surveyStore.ts).
  * Har eslatma dedupe_key bilan bir marta yuboriladi (server qayta ishga tushsa ham).
  * Sana-vaqtlar JS Date sifatida uzatiladi — bazaga qanday yozilgan bo'lsa
  * (server mahalliy vaqti, Asia/Tashkent), shunday solishtiriladi.
@@ -111,6 +113,7 @@ export async function runNotificationTick() {
   try {
     await meetingReminders(now)
     await deadlineReminders(now)
+    await runSurveyNotifications(now)
   } catch (err) {
     console.warn("[notif scheduler] xato:", (err as { message?: string })?.message ?? err)
   } finally {

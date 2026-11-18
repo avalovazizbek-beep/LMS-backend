@@ -1028,6 +1028,14 @@ export async function initDatabase() {
       [mod]
     )
   }
+  // So'rovnomalar: dekanat ham yaratadi va boshqaradi (o'z fakultetlari doirasida —
+  // services/surveyStore.ts). Ruxsatlar sahifasidan keyin cheklab qo'yish mumkin.
+  await pool.query(
+    `INSERT IGNORE INTO lms_role_permissions (role, module, can_view, can_create, can_edit, can_delete) VALUES ('admin', 'surveys', 1, 1, 1, 1)`
+  )
+  await pool.query(
+    `INSERT IGNORE INTO lms_role_permissions (role, module, can_view, can_create, can_edit, can_delete) VALUES ('dean', 'surveys', 1, 1, 1, 1)`
+  )
 
   // ── Audit log: kim (IP bilan) qaysi admin amalini bajardi ──
   await execSafe(`
@@ -1393,6 +1401,8 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_student_cancellations")
 
+  await initSurveyTables()
+
   // Default sozlamalar
   await pool.query(`
     INSERT IGNORE INTO lms_settings (key_name, value) VALUES
@@ -1491,6 +1501,168 @@ export function fromMysqlDate(value: unknown) {
   if (value instanceof Date) return value.toISOString()
   if (typeof value === "string") return new Date(value).toISOString()
   return new Date().toISOString()
+}
+
+/* ── So'rovnomalar (services/surveyStore.ts) ──────────────────────────
+   Qaytarish (rollback): scripts/surveys-rollback.sql — jadvallar va
+   'surveys' ruxsat qatorlarini o'chiradi, boshqa jadvallarga tegmaydi.
+   Anonim so'rovnomada javob (lms_survey_responses) foydalanuvchiga
+   bog'lanmaydi: ID — tasodifiy UUID, user_id/ism/vaqt yozilmaydi, javob
+   qatorlarida auto-increment yo'q (topshirish tartibi ham saqlanmaydi).
+   Kim qatnashgani — alohida, lms_survey_participations jadvalida. */
+export async function initSurveyTables() {
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_surveys (
+      id                     INT AUTO_INCREMENT PRIMARY KEY,
+      title                  VARCHAR(255) NOT NULL,
+      description            TEXT NULL,
+      survey_type            VARCHAR(40) NOT NULL DEFAULT 'umumiy',
+      is_anonymous           TINYINT(1) NOT NULL DEFAULT 1,
+      status                 ENUM('draft','published') NOT NULL DEFAULT 'draft',
+      is_active              TINYINT(1) NOT NULL DEFAULT 1,
+      start_at               DATETIME NOT NULL,
+      end_at                 DATETIME NOT NULL,
+      estimated_minutes      INT NULL,
+      reminder_interval_days INT NOT NULL DEFAULT 3,
+      scope_faculties        JSON NULL,
+      created_by_id          VARCHAR(64) NOT NULL,
+      created_by_name        VARCHAR(255) NULL,
+      created_by_role        VARCHAR(20) NOT NULL,
+      published_at           DATETIME NULL,
+      archived_at            DATETIME NULL,
+      audience_synced_at     DATETIME NULL,
+      created_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_surveys_state (status, is_active, start_at, end_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_survey_questions (
+      id           INT AUTO_INCREMENT PRIMARY KEY,
+      survey_id    INT NOT NULL,
+      position     INT NOT NULL DEFAULT 0,
+      type         VARCHAR(20) NOT NULL,
+      text         TEXT NOT NULL,
+      is_required  TINYINT(1) NOT NULL DEFAULT 1,
+      scale_max    INT NULL,
+      allow_other  TINYINT(1) NOT NULL DEFAULT 0,
+      INDEX idx_survey_questions (survey_id, position),
+      CONSTRAINT fk_survey_question_survey FOREIGN KEY (survey_id) REFERENCES lms_surveys(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_survey_options (
+      id           INT AUTO_INCREMENT PRIMARY KEY,
+      question_id  INT NOT NULL,
+      position     INT NOT NULL DEFAULT 0,
+      text         VARCHAR(500) NOT NULL,
+      INDEX idx_survey_options (question_id, position),
+      CONSTRAINT fk_survey_option_question FOREIGN KEY (question_id) REFERENCES lms_survey_questions(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
+  // Auditoriya qoidalari: har qator — bitta qoida (talaba yoki o'qituvchi +
+  // ixtiyoriy fakultet/yo'nalish/kurs/guruh ro'yxatlari). Qatorlar birlashadi (OR).
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_survey_targets (
+      id           INT AUTO_INCREMENT PRIMARY KEY,
+      survey_id    INT NOT NULL,
+      audience     ENUM('student','teacher') NOT NULL,
+      faculties    JSON NULL,
+      specialties  JSON NULL,
+      courses      JSON NULL,
+      group_ids    JSON NULL,
+      INDEX idx_survey_targets (survey_id),
+      CONSTRAINT fk_survey_target_survey FOREIGN KEY (survey_id) REFERENCES lms_surveys(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
+  // Maqsadli ishtirokchilar (e'lon qilinganda auditoriyadan yig'iladi) va ularning holati
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_survey_participations (
+      id            INT AUTO_INCREMENT PRIMARY KEY,
+      survey_id     INT NOT NULL,
+      user_role     VARCHAR(20) NOT NULL,
+      user_id       INT NOT NULL,
+      id_number     VARCHAR(100) NULL,
+      full_name     VARCHAR(255) NOT NULL,
+      faculty       VARCHAR(255) NULL,
+      specialty     VARCHAR(255) NULL,
+      course        VARCHAR(60) NULL,
+      group_id      INT NULL,
+      group_name    VARCHAR(120) NULL,
+      department    VARCHAR(255) NULL,
+      status        ENUM('pending','completed') NOT NULL DEFAULT 'pending',
+      opened_at     DATETIME NULL,
+      completed_at  DATETIME NULL,
+      added_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_survey_participant (survey_id, user_role, user_id),
+      INDEX idx_survey_part_user (user_role, user_id),
+      INDEX idx_survey_part_idnum (user_role, id_number),
+      INDEX idx_survey_part_status (survey_id, status),
+      CONSTRAINT fk_survey_part_survey FOREIGN KEY (survey_id) REFERENCES lms_surveys(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_survey_responses (
+      id               CHAR(36) PRIMARY KEY,
+      survey_id        INT NOT NULL,
+      respondent_role  VARCHAR(20) NOT NULL,
+      user_id          INT NULL,
+      full_name        VARCHAR(255) NULL,
+      faculty          VARCHAR(255) NULL,
+      specialty        VARCHAR(255) NULL,
+      course           VARCHAR(60) NULL,
+      group_name       VARCHAR(120) NULL,
+      department       VARCHAR(255) NULL,
+      submitted_at     DATETIME NULL,
+      INDEX idx_survey_responses (survey_id),
+      UNIQUE KEY uq_survey_response_user (survey_id, respondent_role, user_id),
+      CONSTRAINT fk_survey_response_survey FOREIGN KEY (survey_id) REFERENCES lms_surveys(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_survey_answers (
+      response_id   CHAR(36) NOT NULL,
+      question_id   INT NOT NULL,
+      option_id     INT NOT NULL DEFAULT 0,
+      value_number  INT NULL,
+      value_text    TEXT NULL,
+      PRIMARY KEY (response_id, question_id, option_id),
+      INDEX idx_survey_answers_question (question_id),
+      CONSTRAINT fk_survey_answer_response FOREIGN KEY (response_id) REFERENCES lms_survey_responses(id) ON DELETE CASCADE,
+      CONSTRAINT fk_survey_answer_question FOREIGN KEY (question_id) REFERENCES lms_survey_questions(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
+  // Kimga qaysi eslatma yuborilgani — takror yuborilmasligi uchun (server qayta ishga tushsa ham)
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_survey_notifications (
+      id         INT AUTO_INCREMENT PRIMARY KEY,
+      survey_id  INT NOT NULL,
+      user_role  VARCHAR(20) NOT NULL,
+      user_id    INT NOT NULL,
+      kind       VARCHAR(20) NOT NULL,
+      sent_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_survey_notification (survey_id, user_role, user_id, kind),
+      CONSTRAINT fk_survey_notif_survey FOREIGN KEY (survey_id) REFERENCES lms_surveys(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
+
+  // Dekanat xodimiga biriktirilgan fakultet(lar) — dekan faqat shu doirada
+  // so'rovnoma yaratadi va natijani ko'radi (lms_permissions.lms_role = 'dean')
+  await exec(`
+    CREATE TABLE IF NOT EXISTS lms_dean_faculties (
+      hemis_id      VARCHAR(255) NOT NULL,
+      faculty_name  VARCHAR(255) NOT NULL,
+      created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (hemis_id, faculty_name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `)
 }
 
 /* ── HEMIS user cache helpers ───────────────────────────────────────── */

@@ -21,6 +21,7 @@ import teachingRoutes from "./routes/teaching"
 import faceRoutes from "./routes/face"
 import adminRoutes from "./routes/admin"
 import announcementsRoutes from "./routes/announcements"
+import surveysRoutes from "./routes/surveys"
 import reeduRoutes from "./routes/reedu"
 import plagiarismRoutes from "./routes/plagiarism"
 import supportRoutes from "./routes/support"
@@ -127,6 +128,7 @@ app.use("/api/teaching", teachingRoutes)
 app.use("/api/face", faceRoutes)
 app.use("/api/admin", adminRoutes)
 app.use("/api/announcements", announcementsRoutes)
+app.use("/api/surveys", surveysRoutes)
 app.use("/api/reedu", reeduRoutes)
 app.use("/api/plagiarism", plagiarismRoutes)
 app.use("/api/support", supportRoutes)

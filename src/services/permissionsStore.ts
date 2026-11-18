@@ -3,7 +3,7 @@ import { pool } from "./db"
 
 export const ADMIN_MODULES = [
   "users", "students", "teachers", "results", "attendance",
-  "grading", "retake", "reedu", "faceid", "announcements", "settings", "permissions",
+  "grading", "retake", "reedu", "faceid", "announcements", "surveys", "settings", "permissions",
 ] as const
 export type AdminModule = typeof ADMIN_MODULES[number]
 
