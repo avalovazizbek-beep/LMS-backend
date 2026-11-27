@@ -1641,11 +1641,13 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
   })
   order.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
 
-  const topics: Array<{
+  type StudentTopicRow = {
     topicKey: string
     title: string
     locked: boolean
     completed: boolean
+    /** Talaba bajaradigan material (o'qiladigan fayl, savolli test, topshiriq) hali yo'q */
+    empty: boolean
     trainingType: string | null
     sections: {
       video: (TeacherContentRecord & { progress: ContentProgress | null; sectionLocked: boolean }) | null
@@ -1657,9 +1659,9 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
       /** Qo'shimcha YouTube video — ixtiyoriy, ketma-ket qulflash zanjiriga kirmaydi */
       youtube: (TeacherContentRecord & { sectionLocked: boolean }) | null
     }
-  }> = []
+  }
+  const built: Array<Omit<StudentTopicRow, "locked"> & { activity: boolean }> = []
 
-  let previousCompleted = true
   for (const topicKey of order) {
     const group = topicMap.get(topicKey)!
     const marker = group.find((i) => i.type === "mavzu" && i.kind === "topic")
@@ -1719,6 +1721,10 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
     const sequence = orderedSections.filter(s => s.item !== null)
 
     function computeSectionLocked(key: string): boolean {
+      // Topshiriq mavzu ochiq bo'lsa darhol yuklanadi — taqdimot/qo'llanmani
+      // oxirigacha o'qishni kutmaydi (2026-11-27: talabalar "topshiriq yuklay
+      // olmayapman" deyishardi). Keyingi mavzuga o'tish sharti o'zgarmagan.
+      if (key === "assignment") return false
       const idx = sequence.findIndex(s => s.key === key)
       if (idx <= 0) return false
       return !sequence.slice(0, idx).every(s => s.done)
@@ -1730,12 +1736,16 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
     const qollanmaSection = qollanma ? { ...presentForStudent(qollanma), progress: qollanmaProgress, sectionLocked: computeSectionLocked("qollanma") } : null
     // Qayta ochish belgisi faqat markerda — kartada qayta topshirish tugmasi chiqishi uchun ko'chiriladi
     const topicReopened = marker?.isReopened === true
-    const testSection     = test     ? { ...presentForStudent(test),     isReopened: topicReopened, submission: testSubmission, maxScore, sectionLocked: computeSectionLocked("test") }             : null
+    const testSection     = test     ? { ...presentForStudent(test),     isReopened: topicReopened, submission: testSubmission, maxScore, passed: testCompleted, sectionLocked: computeSectionLocked("test") } : null
     const assignmentSection = assignment ? { ...presentForStudent(assignment), isReopened: topicReopened, submission: assignmentSubmission, sectionLocked: computeSectionLocked("assignment") }    : null
     // Youtube — ixtiyoriy bonus material, hech qachon qulflanmaydi (ketma-ket zanjirga kirmaydi)
     const youtubeSection = youtube ? { ...presentForStudent(youtube), sectionLocked: false } : null
 
-    const completed =
+    // Bo'sh mavzu (talaba bajaradigan hech narsa yo'q) — "bajarilgan" emas:
+    // avval u bajarilgan hisoblanib keyingi mavzuni ochib yuborardi va
+    // ro'yxatda "ochiq–yopiq–ochiq" bo'lib qolardi, hisobni ham oshirardi
+    const empty = sequence.length === 0
+    const completed = !empty &&
       (!videoSection    || !!videoSection.progress?.completed) &&
       (!audioSection    || !!audioSection.progress?.completed) &&
       (!theorySection   || !!theorySection.progress?.completed) &&
@@ -1743,17 +1753,33 @@ router.get("/content/topics", async (req: AuthRequest, res: Response): Promise<v
       testCompleted &&
       assignmentCompleted
 
-    topics.push({
+    built.push({
       topicKey,
       title,
-      locked: !previousCompleted,
       completed,
+      empty,
+      // Talaba shu mavzuda biror narsa qilganmi (ko'rgan/o'qigan/topshirgan)
+      activity: !!(videoProgress || audioProgress || theoryProgress || qollanmaProgress || testSubmission || assignmentSubmission),
       trainingType: marker?.trainingType ?? null,
       sections: { video: videoSection, audio: audioSection, theory: theorySection, qollanma: qollanmaSection, test: testSection, assignment: assignmentSection, youtube: youtubeSection },
     })
-
-    previousCompleted = completed
   }
+
+  // Qulflash (2026-11-27):
+  //  • mavzu oldingi (materiali bor) mavzu bajarilgach ochiladi;
+  //  • talaba yetib kelgan joy saqlanadi — u biror narsa qilgan eng keyingi
+  //    mavzugacha hammasi ochiq: domla keyin eski mavzuga material qo'shsa
+  //    ham, o'tilgan mavzular qayta yopilmaydi;
+  //  • bo'sh mavzu hech qachon qulflanmaydi va zanjirni buzmaydi.
+  let reachedIdx = -1
+  built.forEach((topic, i) => { if (!topic.empty && topic.activity) reachedIdx = i })
+  const topics: StudentTopicRow[] = []
+  let previousCompleted = true
+  built.forEach(({ activity: _activity, ...topic }, i) => {
+    const locked = topic.empty ? false : !(previousCompleted || i <= reachedIdx)
+    if (!topic.empty) previousCompleted = topic.completed
+    topics.push({ ...topic, locked })
+  })
 
   res.json({ success: true, data: topics })
 })
