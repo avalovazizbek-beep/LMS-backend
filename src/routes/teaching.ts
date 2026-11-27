@@ -126,6 +126,7 @@ import {
   isAttendanceSheetSaved,
   getLatestEditRequest,
   createEditRequest,
+  getAttendanceWeek,
 } from "../services/attendanceStore"
 import {
   type GradeRecordInput,
@@ -3798,6 +3799,33 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
   // Saqlangan kun qulflangan: o'zgartirish faqat admin tasdiqlagan so'rov bilan
   const locked = saved && editRequest?.status !== "approved"
   res.json({ success: true, data, trainingType: trainingType || null, saved, locked, editRequest, savedTypes })
+})
+
+/* ── GET /attendance/week — haftalik davomat jurnali: haftaning dars bor
+   kunlari (HEMIS jadvali bo'yicha), har kun varag'ining holati (saqlangan /
+   qulflangan / so'rov) va talabalarning belgilari. Saqlash — har kun uchun
+   oddiy POST /attendance. ─────────────────────────────────────────────── */
+router.get("/attendance/week", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  const groupId = numberValue(req.query.groupId)
+  const subjectName = textValue(req.query.subject)
+  const weekStart = textValue(req.query.weekStart) || todayDateOnly()
+  const trainingType = normalizeTrainingType(req.query.trainingType)
+  if (groupId === null || !subjectName || !isValidDateOnly(weekStart)) {
+    res.status(400).json({ success: false, message: "groupId, subject va weekStart (YYYY-MM-DD) majburiy" })
+    return
+  }
+  const tId = teacherUserId(req.user)
+  const ownGroupIds = await getTeacherGroupIds(tId)
+  if (!ownGroupIds.includes(groupId)) {
+    res.status(403).json({ success: false, message: "Bu guruh sizga HEMIS orqali biriktirilmagan" })
+    return
+  }
+  const data = await getAttendanceWeek({ groupId, subjectName, trainingType, weekStart, teacherUserId: tId })
+  res.json({ success: true, data })
 })
 
 /* ── POST /attendance — davomatni saqlash ──────────────────────────── */

@@ -3,6 +3,7 @@ import { pool, withHemisCache } from "./db"
 import { studentUserId } from "./teachingStore"
 import { SINOV_GROUP_ID } from "./sinovIds"
 import { fetchGroupRoster, type GroupRosterStudent } from "../routes/hemis"
+import { normalizeTrainingType as normalizeType } from "./trainingType"
 
 export { normalizeTrainingType } from "./trainingType"
 
@@ -359,6 +360,181 @@ export async function reviewEditRequest(
   )
   if (!result.affectedRows) return null
   return getEditRequest(id)
+}
+
+/* ── Haftalik davomat jurnali (2026-11-27) ──────────────────────────────
+   Ustunlar — haftaning faqat dars bor kunlari: o'qituvchining HEMIS dars
+   jadvalida (lms_teacher_schedule) shu guruh + fan + mashg'ulot turi bo'lgan
+   kunlar, shuningdek shu haftada allaqachon saqlangan varaqlar. Jadvalda bu
+   guruh+fan umuman topilmasa — Dushanba–Juma. Har kun — alohida varaq
+   (saqlanganda qulflanadi, o'zgartirish faqat admin ruxsati bilan). */
+export const HOURS_PER_PAIR = 2
+
+export interface AttendanceWeekCell {
+  status: AttendanceStatus
+  comment: string | null
+  /** Meeting'dan avtomatik (Face ID) — o'qituvchi hali saqlamagan */
+  auto: boolean
+}
+
+export interface AttendanceWeekDay {
+  date: string
+  /** Shu kungi akademik soat: juftliklar soni × 2 */
+  hours: number
+  /** HEMIS dars jadvalida bormi */
+  scheduled: boolean
+  future: boolean
+  saved: boolean
+  locked: boolean
+  editRequest: AttendanceEditRequest | null
+  cells: Record<number, AttendanceWeekCell>
+}
+
+export interface AttendanceWeekStudent extends RosterStudent {
+  /** Saqlangan barcha varaqlar bo'yicha kelmagan soatlar (shu tur) */
+  totalAbsentHours: number
+  totalExcusedHours: number
+}
+
+export interface AttendanceWeek {
+  weekStart: string
+  weekEnd: string
+  today: string
+  /** O'qituvchi jadvalida shu guruh+fan bormi (yo'q bo'lsa Du–Ju ko'rsatiladi) */
+  scheduleFound: boolean
+  days: AttendanceWeekDay[]
+  students: AttendanceWeekStudent[]
+}
+
+function addDaysDateOnly(date: string, days: number): string {
+  const d = new Date(`${date}T00:00:00`)
+  d.setDate(d.getDate() + days)
+  return toDateOnly(d)
+}
+
+/** Berilgan sana tushgan haftaning dushanbasi */
+export function mondayOf(date: string): string {
+  const d = new Date(`${date}T00:00:00`)
+  return addDaysDateOnly(date, -((d.getDay() + 6) % 7))
+}
+
+export async function getAttendanceWeek(input: {
+  groupId: number
+  subjectName: string
+  trainingType: string
+  weekStart: string
+  teacherUserId: number
+}): Promise<AttendanceWeek> {
+  const { groupId, teacherUserId: tId } = input
+  const subject = input.subjectName.trim()
+  const type = input.trainingType
+  const weekStart = mondayOf(input.weekStart)
+  const weekDates = Array.from({ length: 7 }, (_, i) => addDaysDateOnly(weekStart, i))
+  const weekEnd = weekDates[6]
+  const today = todayDateOnly()
+
+  const [roster, [scheduleRows], [rows]] = await Promise.all([
+    getJournalRoster(groupId, subject),
+    pool.query<mysql.RowDataPacket[]>(
+      `SELECT DATE_FORMAT(lesson_date, '%Y-%m-%d') AS d, subject_name,
+              JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.trainingType.name')) AS tt
+       FROM lms_teacher_schedule
+       WHERE teacher_user_id = ? AND group_id = ? AND lesson_date IS NOT NULL`,
+      [tId, groupId]
+    ),
+    // Shu turdagi barcha yozuvlar (jami soatlar uchun) + shu haftadagi turi
+    // noma'lum avtomatik (Face ID) belgilar — hali saqlanmagan varaqni to'ldirish uchun
+    pool.query<mysql.RowDataPacket[]>(
+      `SELECT DATE_FORMAT(lesson_date, '%Y-%m-%d') AS d, training_type, student_user_id, status, comment, marked_by_user_id
+       FROM lms_attendance
+       WHERE group_id = ? AND subject_name = ?
+         AND (training_type = ? OR (training_type = '' AND marked_by_user_id = 0 AND lesson_date BETWEEN ? AND ?))`,
+      [groupId, subject, type, weekStart, weekEnd]
+    ),
+  ])
+
+  const wanted = normalizeSubject(subject)
+  const subjectSchedule = scheduleRows.filter((r) => normalizeSubject(String(r.subject_name ?? "")) === wanted)
+  const scheduleFound = subjectSchedule.length > 0
+  const pairsByDate = new Map<string, number>()
+  if (type) {
+    for (const r of subjectSchedule) {
+      if (normalizeType(r.tt) !== type) continue
+      const d = String(r.d)
+      pairsByDate.set(d, (pairsByDate.get(d) ?? 0) + 1)
+    }
+  }
+  const hoursOf = (date: string) => HOURS_PER_PAIR * Math.max(1, pairsByDate.get(date) ?? 1)
+
+  // Varaqlar: shu tur (saqlangan yoki avtomatik) va turi noma'lum avtomatik
+  const typed = new Map<string, mysql.RowDataPacket[]>()
+  const untypedAuto = new Map<string, mysql.RowDataPacket[]>()
+  const savedDates = new Set<string>()
+  for (const r of rows) {
+    const d = String(r.d)
+    const isTyped = String(r.training_type ?? "") === type
+    const bucket = isTyped ? typed : untypedAuto
+    if (!bucket.has(d)) bucket.set(d, [])
+    bucket.get(d)!.push(r)
+    if (isTyped && Number(r.marked_by_user_id) !== 0) savedDates.add(d)
+  }
+
+  // Ustunlar: jadvaldagi darslar + saqlangan/avtomatik belgilangan kunlar;
+  // jadvalda bu fan umuman yo'q bo'lsa — Du–Ju
+  const dayDates = weekDates.filter((d, i) =>
+    pairsByDate.has(d) || savedDates.has(d) || typed.has(d) ||
+    (!!type && !scheduleFound && i < 5)
+  )
+
+  const days: AttendanceWeekDay[] = []
+  for (const date of dayDates) {
+    const saved = savedDates.has(date)
+    const editRequest = saved ? await getLatestEditRequest(groupId, subject, date, type, tId) : null
+    const source = typed.get(date) ?? (type ? untypedAuto.get(date) : undefined) ?? []
+    const cells: Record<number, AttendanceWeekCell> = {}
+    for (const r of source) {
+      cells[Number(r.student_user_id)] = {
+        status: r.status as AttendanceStatus,
+        comment: r.comment ?? null,
+        auto: Number(r.marked_by_user_id) === 0,
+      }
+    }
+    days.push({
+      date,
+      hours: hoursOf(date),
+      scheduled: pairsByDate.has(date),
+      future: date > today,
+      saved,
+      locked: saved && editRequest?.status !== "approved",
+      editRequest,
+      cells,
+    })
+  }
+
+  // Jami kelmagan soatlar — saqlangan barcha varaqlar bo'yicha
+  const absent = new Map<number, number>()
+  const excused = new Map<number, number>()
+  for (const [date, list] of typed) {
+    if (!savedDates.has(date)) continue
+    for (const r of list) {
+      const sid = Number(r.student_user_id)
+      if (r.status === "absent") absent.set(sid, (absent.get(sid) ?? 0) + hoursOf(date))
+      else if (r.status === "excused") excused.set(sid, (excused.get(sid) ?? 0) + hoursOf(date))
+    }
+  }
+
+  return {
+    weekStart,
+    weekEnd,
+    today,
+    scheduleFound,
+    days,
+    students: roster.map((s) => ({
+      ...s,
+      totalAbsentHours: absent.get(s.studentUserId) ?? 0,
+      totalExcusedHours: excused.get(s.studentUserId) ?? 0,
+    })),
+  }
 }
 
 /* ── Bir kunlik davomat (o'qituvchi uchun roster bilan birlashtirish) ── */
