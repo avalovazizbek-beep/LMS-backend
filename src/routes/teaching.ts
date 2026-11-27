@@ -126,7 +126,7 @@ import {
   isAttendanceSheetSaved,
   getLatestEditRequest,
   createEditRequest,
-  getAttendanceWeek,
+  getAttendanceMonth,
 } from "../services/attendanceStore"
 import {
   type GradeRecordInput,
@@ -3801,21 +3801,21 @@ router.get("/attendance/roster", async (req: AuthRequest, res: Response): Promis
   res.json({ success: true, data, trainingType: trainingType || null, saved, locked, editRequest, savedTypes })
 })
 
-/* ── GET /attendance/week — haftalik davomat jurnali: haftaning dars bor
-   kunlari (HEMIS jadvali bo'yicha), har kun varag'ining holati (saqlangan /
-   qulflangan / so'rov) va talabalarning belgilari. Saqlash — har kun uchun
-   oddiy POST /attendance. ─────────────────────────────────────────────── */
-router.get("/attendance/week", async (req: AuthRequest, res: Response): Promise<void> => {
+/* ── GET /attendance/month — oylik davomat jurnali: oyning barcha kunlari,
+   belgilash faqat HEMIS dars jadvalidagi kunlarda; har kun varag'ining
+   holati (saqlangan / qulflangan / so'rov) va talabalarning belgilari.
+   Saqlash — har kun uchun oddiy POST /attendance. ──────────────────── */
+router.get("/attendance/month", async (req: AuthRequest, res: Response): Promise<void> => {
   if (req.user?.role !== "employee") {
     res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
     return
   }
   const groupId = numberValue(req.query.groupId)
   const subjectName = textValue(req.query.subject)
-  const weekStart = textValue(req.query.weekStart) || todayDateOnly()
+  const month = textValue(req.query.month) || todayDateOnly().slice(0, 7)
   const trainingType = normalizeTrainingType(req.query.trainingType)
-  if (groupId === null || !subjectName || !isValidDateOnly(weekStart)) {
-    res.status(400).json({ success: false, message: "groupId, subject va weekStart (YYYY-MM-DD) majburiy" })
+  if (groupId === null || !subjectName || !/^\d{4}-\d{2}$/.test(month)) {
+    res.status(400).json({ success: false, message: "groupId, subject va month (YYYY-MM) majburiy" })
     return
   }
   const tId = teacherUserId(req.user)
@@ -3824,7 +3824,7 @@ router.get("/attendance/week", async (req: AuthRequest, res: Response): Promise<
     res.status(403).json({ success: false, message: "Bu guruh sizga HEMIS orqali biriktirilmagan" })
     return
   }
-  const data = await getAttendanceWeek({ groupId, subjectName, trainingType, weekStart, teacherUserId: tId })
+  const data = await getAttendanceMonth({ groupId, subjectName, trainingType, month, teacherUserId: tId })
   res.json({ success: true, data })
 })
 

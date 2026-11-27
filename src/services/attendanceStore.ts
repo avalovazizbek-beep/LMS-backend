@@ -362,48 +362,50 @@ export async function reviewEditRequest(
   return getEditRequest(id)
 }
 
-/* ── Haftalik davomat jurnali (2026-11-27) ──────────────────────────────
-   Ustunlar — haftaning faqat dars bor kunlari: o'qituvchining HEMIS dars
-   jadvalida (lms_teacher_schedule) shu guruh + fan + mashg'ulot turi bo'lgan
-   kunlar, shuningdek shu haftada allaqachon saqlangan varaqlar. Jadvalda bu
-   guruh+fan umuman topilmasa — Dushanba–Juma. Har kun — alohida varaq
-   (saqlanganda qulflanadi, o'zgartirish faqat admin ruxsati bilan). */
+/* ── Oylik davomat jurnali (2026-11-27) ─────────────────────────────────
+   Ustunlar — oyning barcha kunlari. Belgilash faqat dars bor kunlarda:
+   o'qituvchining HEMIS dars jadvalida (lms_teacher_schedule) shu guruh +
+   fan + mashg'ulot turi bo'lgan kunlar. Qolgan kunlar bosilmaydi (saqlangan
+   eski yozuv bo'lsa ko'rinadi). Har kun — alohida varaq: saqlanganda
+   qulflanadi, o'zgartirish faqat admin ruxsati bilan. */
 export const HOURS_PER_PAIR = 2
 
-export interface AttendanceWeekCell {
+export interface AttendanceJournalCell {
   status: AttendanceStatus
   comment: string | null
   /** Meeting'dan avtomatik (Face ID) — o'qituvchi hali saqlamagan */
   auto: boolean
 }
 
-export interface AttendanceWeekDay {
+export interface AttendanceJournalDay {
   date: string
   /** Shu kungi akademik soat: juftliklar soni × 2 */
   hours: number
-  /** HEMIS dars jadvalida bormi */
-  scheduled: boolean
+  /** HEMIS dars jadvalida shu tur bo'yicha dars bormi — faqat shunda belgilanadi */
+  lesson: boolean
   future: boolean
   saved: boolean
   locked: boolean
   editRequest: AttendanceEditRequest | null
-  cells: Record<number, AttendanceWeekCell>
+  cells: Record<number, AttendanceJournalCell>
 }
 
-export interface AttendanceWeekStudent extends RosterStudent {
+export interface AttendanceJournalStudent extends RosterStudent {
   /** Saqlangan barcha varaqlar bo'yicha kelmagan soatlar (shu tur) */
   totalAbsentHours: number
   totalExcusedHours: number
 }
 
-export interface AttendanceWeek {
-  weekStart: string
-  weekEnd: string
+export interface AttendanceMonth {
+  /** YYYY-MM */
+  month: string
+  from: string
+  to: string
   today: string
-  /** O'qituvchi jadvalida shu guruh+fan bormi (yo'q bo'lsa Du–Ju ko'rsatiladi) */
+  /** O'qituvchi jadvalida shu guruh + fan + tur bormi (umuman) */
   scheduleFound: boolean
-  days: AttendanceWeekDay[]
-  students: AttendanceWeekStudent[]
+  days: AttendanceJournalDay[]
+  students: AttendanceJournalStudent[]
 }
 
 function addDaysDateOnly(date: string, days: number): string {
@@ -412,25 +414,30 @@ function addDaysDateOnly(date: string, days: number): string {
   return toDateOnly(d)
 }
 
-/** Berilgan sana tushgan haftaning dushanbasi */
-export function mondayOf(date: string): string {
-  const d = new Date(`${date}T00:00:00`)
-  return addDaysDateOnly(date, -((d.getDay() + 6) % 7))
+/** "YYYY-MM" (yoki istalgan sana) → oyning birinchi va oxirgi kuni */
+export function monthRange(value: string): { month: string; from: string; to: string } {
+  const m = /^(\d{4})-(\d{2})/.exec(value)
+  const now = new Date()
+  const year = m ? Number(m[1]) : now.getFullYear()
+  const month = m ? Number(m[2]) : now.getMonth() + 1
+  const from = toDateOnly(new Date(year, month - 1, 1))
+  const to = toDateOnly(new Date(year, month, 0))
+  return { month: from.slice(0, 7), from, to }
 }
 
-export async function getAttendanceWeek(input: {
+export async function getAttendanceMonth(input: {
   groupId: number
   subjectName: string
   trainingType: string
-  weekStart: string
+  month: string
   teacherUserId: number
-}): Promise<AttendanceWeek> {
+}): Promise<AttendanceMonth> {
   const { groupId, teacherUserId: tId } = input
   const subject = input.subjectName.trim()
   const type = input.trainingType
-  const weekStart = mondayOf(input.weekStart)
-  const weekDates = Array.from({ length: 7 }, (_, i) => addDaysDateOnly(weekStart, i))
-  const weekEnd = weekDates[6]
+  const { month, from, to } = monthRange(input.month)
+  const dates: string[] = []
+  for (let d = from; d <= to; d = addDaysDateOnly(d, 1)) dates.push(d)
   const today = todayDateOnly()
 
   const [roster, [scheduleRows], [rows]] = await Promise.all([
@@ -442,24 +449,22 @@ export async function getAttendanceWeek(input: {
        WHERE teacher_user_id = ? AND group_id = ? AND lesson_date IS NOT NULL`,
       [tId, groupId]
     ),
-    // Shu turdagi barcha yozuvlar (jami soatlar uchun) + shu haftadagi turi
+    // Shu turdagi barcha yozuvlar (jami soatlar uchun) + shu oydagi turi
     // noma'lum avtomatik (Face ID) belgilar — hali saqlanmagan varaqni to'ldirish uchun
     pool.query<mysql.RowDataPacket[]>(
       `SELECT DATE_FORMAT(lesson_date, '%Y-%m-%d') AS d, training_type, student_user_id, status, comment, marked_by_user_id
        FROM lms_attendance
        WHERE group_id = ? AND subject_name = ?
          AND (training_type = ? OR (training_type = '' AND marked_by_user_id = 0 AND lesson_date BETWEEN ? AND ?))`,
-      [groupId, subject, type, weekStart, weekEnd]
+      [groupId, subject, type, from, to]
     ),
   ])
 
   const wanted = normalizeSubject(subject)
-  const subjectSchedule = scheduleRows.filter((r) => normalizeSubject(String(r.subject_name ?? "")) === wanted)
-  const scheduleFound = subjectSchedule.length > 0
   const pairsByDate = new Map<string, number>()
   if (type) {
-    for (const r of subjectSchedule) {
-      if (normalizeType(r.tt) !== type) continue
+    for (const r of scheduleRows) {
+      if (normalizeSubject(String(r.subject_name ?? "")) !== wanted || normalizeType(r.tt) !== type) continue
       const d = String(r.d)
       pairsByDate.set(d, (pairsByDate.get(d) ?? 0) + 1)
     }
@@ -479,30 +484,27 @@ export async function getAttendanceWeek(input: {
     if (isTyped && Number(r.marked_by_user_id) !== 0) savedDates.add(d)
   }
 
-  // Ustunlar: jadvaldagi darslar + saqlangan/avtomatik belgilangan kunlar;
-  // jadvalda bu fan umuman yo'q bo'lsa — Du–Ju
-  const dayDates = weekDates.filter((d, i) =>
-    pairsByDate.has(d) || savedDates.has(d) || typed.has(d) ||
-    (!!type && !scheduleFound && i < 5)
-  )
-
-  const days: AttendanceWeekDay[] = []
-  for (const date of dayDates) {
+  const days: AttendanceJournalDay[] = []
+  for (const date of dates) {
+    const lesson = pairsByDate.has(date)
     const saved = savedDates.has(date)
     const editRequest = saved ? await getLatestEditRequest(groupId, subject, date, type, tId) : null
-    const source = typed.get(date) ?? (type ? untypedAuto.get(date) : undefined) ?? []
-    const cells: Record<number, AttendanceWeekCell> = {}
-    for (const r of source) {
-      cells[Number(r.student_user_id)] = {
-        status: r.status as AttendanceStatus,
-        comment: r.comment ?? null,
-        auto: Number(r.marked_by_user_id) === 0,
+    // Dars yo'q kunda faqat saqlangan eski yozuv ko'rsatiladi
+    const source = typed.get(date) ?? (lesson && type ? untypedAuto.get(date) : undefined) ?? []
+    const cells: Record<number, AttendanceJournalCell> = {}
+    if (lesson || saved) {
+      for (const r of source) {
+        cells[Number(r.student_user_id)] = {
+          status: r.status as AttendanceStatus,
+          comment: r.comment ?? null,
+          auto: Number(r.marked_by_user_id) === 0,
+        }
       }
     }
     days.push({
       date,
       hours: hoursOf(date),
-      scheduled: pairsByDate.has(date),
+      lesson,
       future: date > today,
       saved,
       locked: saved && editRequest?.status !== "approved",
@@ -524,10 +526,11 @@ export async function getAttendanceWeek(input: {
   }
 
   return {
-    weekStart,
-    weekEnd,
+    month,
+    from,
+    to,
     today,
-    scheduleFound,
+    scheduleFound: pairsByDate.size > 0,
     days,
     students: roster.map((s) => ({
       ...s,
