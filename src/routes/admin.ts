@@ -561,6 +561,7 @@ async function sendRoleMembers(req: AuthRequest, res: Response): Promise<void> {
   const [memberRows] = await pool.query<RowDataPacket[]>(
     `SELECT p.hemis_id, COALESCE(NULLIF(TRIM(hu.full_name), ''), NULLIF(TRIM(p.full_name), ''), p.hemis_id) AS full_name,
             p.granted_by, p.granted_at,
+            COALESCE(hu.teacher_user_id, CAST(p.hemis_id AS SIGNED)) AS dir_id,
             (SELECT hed.position FROM hemis_employees_directory hed
               WHERE hed.hemis_id = COALESCE(hu.teacher_user_id, CAST(p.hemis_id AS SIGNED)) LIMIT 1) AS position,
             (SELECT hed.department FROM hemis_employees_directory hed
@@ -573,14 +574,26 @@ async function sendRoleMembers(req: AuthRequest, res: Response): Promise<void> {
   )
   const memberIds = new Set(memberRows.map((r) => String(r.hemis_id)))
 
-  // Tavsiyalar: faol xodimlar katalogidan lavozim/bo'lim bo'yicha (JS'da
-  // filtrlanadi), keyin ularning LMS kirish ID'si (teacher_user_id yoki o'sha ID)
+  // Tavsiyalar: faol xodimlarning BARCHA ish joylari bo'yicha (HEMIS bitta
+  // xodimga bir nechta yozuv beradi — katalogda faqat bittasi; qolganlari
+  // hemis_employee_positions'da). Mos kelgan ish joyi ko'rsatiladi.
   const rule = ROLE_SUGGEST_RULES[managed]
+  const matches = (p: RowDataPacket | { position?: unknown; department?: unknown }) =>
+    (!!rule.position && rule.position.test(String(p.position ?? ""))) ||
+    (!!rule.department && rule.department.test(String(p.department ?? "")))
   const [dirAll] = await pool.query<RowDataPacket[]>(
     "SELECT hemis_id, full_name, position, department FROM hemis_employees_directory WHERE is_active = 1"
   )
-  const dirRows = dirAll.filter((r) => (rule.position && rule.position.test(String(r.position ?? ""))) ||
-                                       (rule.department && rule.department.test(String(r.department ?? ""))))
+  const [posAll] = await pool.query<RowDataPacket[]>(
+    "SELECT hemis_id, position, department FROM hemis_employee_positions WHERE is_active = 1"
+  ).catch(() => [[] as RowDataPacket[]] as const)
+  const matchedPos = new Map<string, { position: string | null; department: string | null }>()
+  for (const p of posAll) if (matches(p) && !matchedPos.has(String(p.hemis_id))) {
+    matchedPos.set(String(p.hemis_id), { position: p.position ?? null, department: p.department ?? null })
+  }
+  const dirRows = dirAll
+    .filter((r) => matches(r) || matchedPos.has(String(r.hemis_id)))
+    .map((r) => matches(r) ? r : { ...r, ...matchedPos.get(String(r.hemis_id)) })
   const loginByDir = new Map<string, string>()
   if (dirRows.length) {
     const dirIds = dirRows.map((r) => Number(r.hemis_id))
@@ -618,14 +631,18 @@ async function sendRoleMembers(req: AuthRequest, res: Response): Promise<void> {
   res.json({
     success: true,
     data: {
-      members: memberRows.map((r) => ({
+      members: memberRows.map((r) => {
+        // Rolga mos ish joyi bo'lsa — o'sha (masalan o'rindoshlikdagi dotsentlik emas)
+        const own = matches(r) ? null : matchedPos.get(String(r.dir_id))
+        return {
         hemisId: String(r.hemis_id),
         fullName: String(r.full_name ?? ""),
-        position: r.position ? String(r.position) : null,
-        department: r.department ? String(r.department) : null,
+        position: (own?.position ?? r.position) ? String(own?.position ?? r.position) : null,
+        department: (own?.department ?? r.department) ? String(own?.department ?? r.department) : null,
         grantedBy: r.granted_by ? String(r.granted_by) : null,
         grantedAt: r.granted_at ?? null,
-      })),
+        }
+      }),
       suggestions,
     },
   })

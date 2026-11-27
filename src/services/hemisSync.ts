@@ -8,6 +8,9 @@ import {
   upsertSemesterDirectory,
   deactivateStaleStudents,
   deactivateStaleEmployees,
+  upsertEmployeePositions,
+  deactivateStalePositions,
+  type EmployeePositionRow,
   markHemisSyncStarted,
   markHemisSyncFinished,
   markHemisSyncFailed,
@@ -318,6 +321,22 @@ export async function syncEmployeeDirectory(): Promise<number> {
   }).filter((r) => r.hemis_id > 0)
 
   await upsertEmployeeDirectory(rows)
+  // Har bir ish joyi alohida (bitta xodimda bir nechta bo'lishi mumkin) —
+  // katalog qatori faqat bittasini saqlaydi
+  const positions: EmployeePositionRow[] = items.map((raw) => {
+    const r = asRecord(raw)
+    const hemisId = numberValue(r.id) ?? 0
+    return {
+      hemis_id: hemisId,
+      meta_id: numberValue(r.meta_id) ?? hemisId,
+      department: textValue(asRecord(r.department).name) ?? null,
+      position: textValue(asRecord(r.staffPosition).name) ?? null,
+      employment_form: textValue(asRecord(r.employmentForm).name) ?? null,
+      employee_type: textValue(asRecord(r.employeeType).name) ?? null,
+    }
+  }).filter((p) => p.hemis_id > 0)
+  await upsertEmployeePositions(positions)
+  await deactivateStalePositions(runStartedAt)
   const deactivated = await deactivateStaleEmployees(runStartedAt)
   if (deactivated > 0) console.log(`[hemisSync] ${deactivated} xodim endi HEMIS faol ro'yxatida yo'q — inactive qilindi`)
   return rows.length

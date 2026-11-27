@@ -1293,6 +1293,26 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "hemis_employees_directory")
   await execIgnoreDuplicate(`ALTER TABLE hemis_employees_directory ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER position`)
+
+  // ── Xodimning BARCHA ish joylari (2026-11-27). HEMIS employee-list bitta
+  // xodim uchun har bir ish joyini alohida yozuv qilib beradi (id bir xil,
+  // meta_id har xil — masalan asosiy: O'quv-uslubiy boshqarma / Bo'lim
+  // boshlig'i, o'rindoshlik: Oliy matematika / Dotsent). Katalog qatori esa
+  // bitta — shu jadval qolganlarini saqlaydi (rollar tavsiyasi shundan). ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS hemis_employee_positions (
+      hemis_id        INT NOT NULL,
+      meta_id         INT NOT NULL,
+      department      VARCHAR(255) NULL,
+      position        VARCHAR(255) NULL,
+      employment_form VARCHAR(120) NULL,
+      employee_type   VARCHAR(160) NULL,
+      is_active       TINYINT(1) NOT NULL DEFAULT 1,
+      synced_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (hemis_id, meta_id),
+      INDEX idx_emp_pos_active (is_active)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "hemis_employee_positions")
   await execIgnoreDuplicate(`ALTER TABLE hemis_employees_directory ADD INDEX idx_employees_dir_active (is_active)`)
 
   // ── Fakultet/Kafedra (HEMIS'da bitta resurs — /v1/data/department-list,
@@ -1960,6 +1980,41 @@ export async function upsertEmployeeDirectory(rows: EmployeeDirectoryRow[]) {
 export async function deactivateStaleStudents(runStartedAt: Date): Promise<number> {
   const [result] = await pool.query(
     "UPDATE hemis_students_directory SET is_active = 0 WHERE is_active = 1 AND synced_at < ?",
+    [toMysqlDate(runStartedAt)]
+  )
+  return (result as mysql.ResultSetHeader).affectedRows
+}
+
+export interface EmployeePositionRow {
+  hemis_id: number
+  meta_id: number
+  department: string | null
+  position: string | null
+  employment_form: string | null
+  employee_type: string | null
+}
+
+/** Xodimning har bir ish joyi (HEMIS employee-list'dagi har bir yozuv) */
+export async function upsertEmployeePositions(rows: EmployeePositionRow[]) {
+  for (const r of rows) {
+    await pool.query(
+      `INSERT INTO hemis_employee_positions (hemis_id, meta_id, department, position, employment_form, employee_type, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, 1)
+       ON DUPLICATE KEY UPDATE
+         department      = VALUES(department),
+         position        = VALUES(position),
+         employment_form = VALUES(employment_form),
+         employee_type   = VALUES(employee_type),
+         is_active       = 1,
+         synced_at       = CURRENT_TIMESTAMP`,
+      [r.hemis_id, r.meta_id, r.department, r.position, r.employment_form, r.employee_type]
+    )
+  }
+}
+
+export async function deactivateStalePositions(runStartedAt: Date): Promise<number> {
+  const [result] = await pool.query(
+    "UPDATE hemis_employee_positions SET is_active = 0 WHERE is_active = 1 AND synced_at < ?",
     [toMysqlDate(runStartedAt)]
   )
   return (result as mysql.ResultSetHeader).affectedRows
