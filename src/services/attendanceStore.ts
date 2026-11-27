@@ -364,8 +364,8 @@ export async function reviewEditRequest(
 
 /* ── Oylik davomat jurnali (2026-11-27) ─────────────────────────────────
    Ustunlar — oyning barcha kunlari. Belgilash faqat dars bor kunlarda:
-   o'qituvchining HEMIS dars jadvalida (lms_teacher_schedule) shu guruh +
-   fan + mashg'ulot turi bo'lgan kunlar. Qolgan kunlar bosilmaydi (saqlangan
+   GURUHNING HEMIS dars jadvalida (lms_teacher_schedule — kirgan barcha
+   o'qituvchilarning jadvalidan) shu fan + mashg'ulot turi bo'lgan kunlar. Qolgan kunlar bosilmaydi (saqlangan
    eski yozuv bo'lsa ko'rinadi). Har kun — alohida varaq: saqlanganda
    qulflanadi, o'zgartirish faqat admin ruxsati bilan. */
 export const HOURS_PER_PAIR = 2
@@ -443,11 +443,12 @@ export async function getAttendanceMonth(input: {
   const [roster, [scheduleRows], [rows]] = await Promise.all([
     getJournalRoster(groupId, subject),
     pool.query<mysql.RowDataPacket[]>(
-      `SELECT DATE_FORMAT(lesson_date, '%Y-%m-%d') AS d, subject_name,
+      // Guruh bo'yicha: shu guruhning darslari qaysi o'qituvchi jadvalida bo'lmasin
+      `SELECT DATE_FORMAT(lesson_date, '%Y-%m-%d') AS d, subject_name, IFNULL(start_time, '') AS st,
               JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.trainingType.name')) AS tt
        FROM lms_teacher_schedule
-       WHERE teacher_user_id = ? AND group_id = ? AND lesson_date IS NOT NULL`,
-      [tId, groupId]
+       WHERE group_id = ? AND lesson_date IS NOT NULL`,
+      [groupId]
     ),
     // Shu turdagi barcha yozuvlar (jami soatlar uchun) + shu oydagi turi
     // noma'lum avtomatik (Face ID) belgilar — hali saqlanmagan varaqni to'ldirish uchun
@@ -461,14 +462,18 @@ export async function getAttendanceMonth(input: {
   ])
 
   const wanted = normalizeSubject(subject)
-  const pairsByDate = new Map<string, number>()
+  // Bir dars bir necha o'qituvchi jadvalida takrorlanishi mumkin — juftlik
+  // (sana + boshlanish vaqti) bir marta sanaladi
+  const pairKeys = new Map<string, Set<string>>()
   if (type) {
     for (const r of scheduleRows) {
       if (normalizeSubject(String(r.subject_name ?? "")) !== wanted || normalizeType(r.tt) !== type) continue
       const d = String(r.d)
-      pairsByDate.set(d, (pairsByDate.get(d) ?? 0) + 1)
+      if (!pairKeys.has(d)) pairKeys.set(d, new Set())
+      pairKeys.get(d)!.add(String(r.st ?? ""))
     }
   }
+  const pairsByDate = new Map([...pairKeys].map(([d, set]) => [d, set.size]))
   const hoursOf = (date: string) => HOURS_PER_PAIR * Math.max(1, pairsByDate.get(date) ?? 1)
 
   // Varaqlar: shu tur (saqlangan yoki avtomatik) va turi noma'lum avtomatik
