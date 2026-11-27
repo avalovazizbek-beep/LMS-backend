@@ -1,7 +1,7 @@
 import type { RowDataPacket, ResultSetHeader } from "mysql2"
 import { pool } from "./db"
 import { teacherUserId, studentUserId } from "./teachingStore"
-import { hasPermission, type AdminModule } from "./permissionsStore"
+import { hasPermission, MANAGED_ROLES, type AdminModule } from "./permissionsStore"
 import type { AuthRequest } from "../middleware/auth"
 
 /**
@@ -122,12 +122,16 @@ export function bumpGroupedSafe(input: Parameters<typeof bumpGroupedNotification
  */
 export async function adminOwnersFor(module: AdminModule): Promise<NotificationOwner[]> {
   const owners = new Map<string, NotificationOwner>()
-  const deanCanView = await hasPermission("dean", module, "view").catch(() => false)
+  // Admin — hammasi; dekan, prorektor, ta'lim sifati, o'quv-uslubiy bo'lim —
+  // shu bo'limni ko'rish huquqi bo'lsa
+  const canView = new Map<string, boolean>()
+  for (const role of MANAGED_ROLES) canView.set(role, await hasPermission(role, module, "view").catch(() => false))
   const [rows] = await pool.query<RowDataPacket[]>(
-    "SELECT hemis_id, hemis_role, lms_role FROM lms_permissions WHERE lms_role IN ('admin','dean')"
+    "SELECT hemis_id, hemis_role, lms_role FROM lms_permissions WHERE lms_role IN (?)",
+    [["admin", ...MANAGED_ROLES]]
   )
   for (const r of rows) {
-    if (r.lms_role === "dean" && !deanCanView) continue
+    if (r.lms_role !== "admin" && !canView.get(String(r.lms_role))) continue
     const userId = Number(r.hemis_id)
     if (!Number.isFinite(userId) || userId <= 0) continue
     const role = r.hemis_role === "student" ? "student" : "employee"

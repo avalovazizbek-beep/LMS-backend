@@ -98,7 +98,10 @@ const manage = Router()
 /** Boshqaruvchini aniqlaydi: admin — cheklovsiz, dekan — o'z fakultetlari bilan */
 async function loadManager(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const role = await getUserAdminRole(req)
+    const panelRole = await getUserAdminRole(req)
+    // So'rovnomani faqat admin va dekanat boshqaradi — prorektor, ta'lim
+    // sifati, o'quv-uslubiy bo'lim admin paneliga kirsa ham bu yerga emas
+    const role = panelRole === "admin" || panelRole === "dean" ? panelRole : null
     if (!role) {
       res.status(403).json({ success: false, message: "So'rovnomalarni faqat admin yoki dekanat boshqaradi" })
       return

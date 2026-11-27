@@ -44,10 +44,15 @@ import {
 } from "../services/studentCancellationStore"
 import {
   getManagedRolePermissions,
+  getRolePermissions,
   setRolePermission,
   hasPermission,
   ADMIN_MODULES,
+  MANAGED_ROLES,
+  isAdminPanelRole,
   type AdminModule,
+  type AdminPanelRole,
+  type ManagedRole,
   type PermissionAction,
 } from "../services/permissionsStore"
 import { logAudit, listAuditLog } from "../services/auditLog"
@@ -145,7 +150,7 @@ function classifyLmsRole(hemisRole: unknown, explicitLmsRole: unknown): { role: 
 /** Foydalanuvchining admin panelidagi rolini qaytaradi: 'admin' (to'liq huquqli),
     'dean' (kengaytirilgan boshqaruv — lms_role_permissions jadvali bo'yicha
     cheklangan) yoki null (admin panelga umuman kirolmaydi). */
-export async function getUserAdminRole(req: AuthRequest): Promise<"admin" | "dean" | null> {
+export async function getUserAdminRole(req: AuthRequest): Promise<AdminPanelRole | null> {
   const user = req.user
   if (!user) return null
 
@@ -172,7 +177,8 @@ export async function getUserAdminRole(req: AuthRequest): Promise<"admin" | "dea
   // hisoblanadi: aks holda xuddi shu raqamli ID'li talaba admin/dekan bo'lib
   // qolardi (admin panel, dekanat/admin murojaatlari).
   if (isStudent ? grantedRole !== "student" : grantedRole === "student") return null
-  return role === "admin" || role === "dean" ? role : null
+  // admin, dekan va 2026-11-27 dan prorektor / ta'lim sifati / o'quv-uslubiy bo'lim
+  return isAdminPanelRole(role) ? role : null
 }
 
 /** Admin panelga kirish huquqi bor-yo'qligi (admin YOKI dean). Modul ichidagi
@@ -235,10 +241,17 @@ router.get("/check", async (req: AuthRequest, res: Response): Promise<void> => {
   // Bu yerda dean'ni chetlab o'tish uni admin/layout.tsx va Sidebar.tsx'dagi
   // `isAdmin` tekshiruvidan o'tkazmay, butunlay /dashboard'ga qaytarib
   // yuborardi — "Rol berish"dan keyin dean umuman panelni ko'rmasdi.
-  const isAdmin = isAutoAdmin || dbRole === "admin" || dbRole === "dean"
+  const isAdmin = isAutoAdmin || isAdminPanelRole(dbRole)
+  // Menyuda faqat ko'rish huquqi bor bo'limlar chiqishi uchun — joriy rolning
+  // modul bo'yicha "Ko'rish" huquqi (admin — hammasi)
+  const panelRole: AdminPanelRole | null = isAutoAdmin ? "admin" : isAdminPanelRole(dbRole) ? dbRole : null
+  const viewable = panelRole === "admin"
+    ? [...ADMIN_MODULES]
+    : panelRole ? (await getRolePermissions(panelRole)).filter((p) => p.canView).map((p) => p.module) : []
   res.json({
     success: true,
     isAdmin,
+    viewableModules: viewable,
     // Faqat FIXED_ADMIN_HEMIS_ID — "Rol berish" orqali admin huquqi olgan
     // boshqa hech kim emas. Faqat shu odamgagina ko'rinadigan (masalan
     // "Talaba sifatida ko'rish") imkoniyatlarni frontend shu bilan boshqaradi.
@@ -352,6 +365,9 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
       `SELECT
          SUM(CASE WHEN ${EFFECTIVE_ROLE_SQL} = 'admin' OR hu.hemis_id = ? THEN 1 ELSE 0 END) AS admin_count,
          SUM(CASE WHEN ${EFFECTIVE_ROLE_SQL} = 'dean' THEN 1 ELSE 0 END) AS dean_count,
+         SUM(CASE WHEN ${EFFECTIVE_ROLE_SQL} = 'prorector' THEN 1 ELSE 0 END) AS prorector_count,
+         SUM(CASE WHEN ${EFFECTIVE_ROLE_SQL} = 'quality' THEN 1 ELSE 0 END) AS quality_count,
+         SUM(CASE WHEN ${EFFECTIVE_ROLE_SQL} = 'methodist' THEN 1 ELSE 0 END) AS methodist_count,
          SUM(CASE WHEN hu.hemis_id <> ? AND ${EFFECTIVE_ROLE_SQL} = 'teacher' THEN 1 ELSE 0 END) AS teacher_count,
          SUM(CASE WHEN hu.hemis_id <> ? AND ${EFFECTIVE_ROLE_SQL} = 'student' THEN 1 ELSE 0 END) AS student_count,
          SUM(CASE WHEN ${EFFECTIVE_ROLE_SQL} = 'blocked' THEN 1 ELSE 0 END) AS blocked_count,
@@ -442,6 +458,9 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
     roleCounts: {
       admin: Number(rc.admin_count ?? 0),
       dean: Number(rc.dean_count ?? 0),
+      prorector: Number(rc.prorector_count ?? 0),
+      quality: Number(rc.quality_count ?? 0),
+      methodist: Number(rc.methodist_count ?? 0),
       teacher: Number(rc.teacher_count ?? 0),
       student: Number(rc.student_count ?? 0),
       blocked: Number(rc.blocked_count ?? 0),
@@ -456,7 +475,7 @@ router.get("/users", adminOnly, async (req: AuthRequest, res: Response): Promise
 router.patch("/users/:hemisId/role", requireFullAdmin, async (req: AuthRequest, res: Response): Promise<void> => {
   const { hemisId } = req.params
   const { lmsRole, note } = req.body as { lmsRole: string; note?: string }
-  const validRoles = ["admin", "dean", "teacher", "student", "blocked", "pending"]
+  const validRoles = ["admin", ...MANAGED_ROLES, "teacher", "student", "blocked", "pending"]
   if (!validRoles.includes(lmsRole)) {
     res.status(400).json({ success: false, message: "Noto'g'ri rol" }); return
   }
@@ -492,8 +511,8 @@ router.put("/permissions", requireFullAdmin, async (req: AuthRequest, res: Respo
   const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
   const role = textVal(String(body.role ?? ""))
   const module = textVal(String(body.module ?? ""))
-  if (role !== "dean" && role !== "admin") {
-    res.status(400).json({ success: false, message: "role faqat 'admin' yoki 'dean' bo'lishi mumkin" }); return
+  if (!isAdminPanelRole(role)) {
+    res.status(400).json({ success: false, message: "Noto'g'ri rol" }); return
   }
   if (!(ADMIN_MODULES as readonly string[]).includes(module)) {
     res.status(400).json({ success: false, message: "Noto'g'ri modul" }); return
@@ -507,6 +526,142 @@ router.put("/permissions", requireFullAdmin, async (req: AuthRequest, res: Respo
   await setRolePermission(role, module, perm)
   void logAudit(req, "permissions.update", "permissions", `${role}:${module}`, perm)
   res.json({ success: true, message: "Ruxsatlar saqlandi" })
+})
+
+/* ── GET /api/admin/role-members?role=… — Ruxsatlar sahifasidagi har rol
+   uchun: shu roldagi xodimlar va HEMIS lavozimi/bo'limi bo'yicha tavsiyalar.
+   HEMIS'da prorektor, ta'lim sifati va o'quv-uslubiy bo'lim alohida ROL
+   emas — lavozim (staffPosition) va bo'lim (department). Rolni admin o'zi
+   beradi (PATCH /users/:hemisId/role); tavsiya faqat LMS'ga kamida bir marta
+   kirgan xodim uchun beriladi — huquq uning kirish ID'siga yozilishi kerak. ── */
+const ROLE_SUGGEST_RULES: Record<ManagedRole, { position?: RegExp; department?: RegExp }> = {
+  dean: { position: /^dekan$/i },
+  prorector: { position: /prorektor/i },
+  quality: { department: /ta.?lim sifati/i },
+  methodist: { department: /o.?quv[- ]?(uslubiy|metodik)/i },
+}
+
+router.get("/role-members", requirePermission("permissions", "view"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    await sendRoleMembers(req, res)
+  } catch (err) {
+    console.error("[role-members]", (err as { message?: string })?.message ?? err)
+    res.status(500).json({ success: false, message: "Server xatosi" })
+  }
+})
+
+async function sendRoleMembers(req: AuthRequest, res: Response): Promise<void> {
+  const role = textVal(String(req.query.role ?? ""))
+  if (!(MANAGED_ROLES as readonly string[]).includes(role)) {
+    res.status(400).json({ success: false, message: "Noto'g'ri rol" }); return
+  }
+  const managed = role as ManagedRole
+
+  // Shu roldagilar (lavozim/bo'lim katalogdan, kirish ID'si yoki teacher_user_id orqali)
+  const [memberRows] = await pool.query<RowDataPacket[]>(
+    `SELECT p.hemis_id, COALESCE(NULLIF(TRIM(hu.full_name), ''), NULLIF(TRIM(p.full_name), ''), p.hemis_id) AS full_name,
+            p.granted_by, p.granted_at,
+            (SELECT hed.position FROM hemis_employees_directory hed
+              WHERE hed.hemis_id = COALESCE(hu.teacher_user_id, CAST(p.hemis_id AS SIGNED)) LIMIT 1) AS position,
+            (SELECT hed.department FROM hemis_employees_directory hed
+              WHERE hed.hemis_id = COALESCE(hu.teacher_user_id, CAST(p.hemis_id AS SIGNED)) LIMIT 1) AS department
+     FROM lms_permissions p
+     LEFT JOIN hemis_users hu ON hu.hemis_id = p.hemis_id AND hu.role = 'employee'
+     WHERE p.lms_role = ?
+     ORDER BY full_name`,
+    [managed]
+  )
+  const memberIds = new Set(memberRows.map((r) => String(r.hemis_id)))
+
+  // Tavsiyalar: faol xodimlar katalogidan lavozim/bo'lim bo'yicha (JS'da
+  // filtrlanadi), keyin ularning LMS kirish ID'si (teacher_user_id yoki o'sha ID)
+  const rule = ROLE_SUGGEST_RULES[managed]
+  const [dirAll] = await pool.query<RowDataPacket[]>(
+    "SELECT hemis_id, full_name, position, department FROM hemis_employees_directory WHERE is_active = 1"
+  )
+  const dirRows = dirAll.filter((r) => (rule.position && rule.position.test(String(r.position ?? ""))) ||
+                                       (rule.department && rule.department.test(String(r.department ?? ""))))
+  const loginByDir = new Map<string, string>()
+  if (dirRows.length) {
+    const dirIds = dirRows.map((r) => Number(r.hemis_id))
+    const [huRows] = await pool.query<RowDataPacket[]>(
+      `SELECT hemis_id, teacher_user_id FROM hemis_users
+       WHERE role = 'employee' AND (teacher_user_id IN (?) OR hemis_id IN (?))
+       ORDER BY updated_at ASC`,
+      [dirIds, dirIds.map(String)]
+    )
+    // updated_at ASC — eng so'nggi kirish oxirida yozilib, oldingisini bosadi
+    for (const h of huRows) {
+      const dirKey = h.teacher_user_id != null ? String(h.teacher_user_id) : String(h.hemis_id)
+      loginByDir.set(dirKey, String(h.hemis_id))
+      if (dirIds.includes(Number(h.hemis_id))) loginByDir.set(String(h.hemis_id), String(h.hemis_id))
+    }
+  }
+  const [permRows] = await pool.query<RowDataPacket[]>("SELECT hemis_id, lms_role FROM lms_permissions")
+  const roleById = new Map(permRows.map((r) => [String(r.hemis_id), String(r.lms_role)]))
+  const suggestions = dirRows
+    .map((r) => {
+      const loginId = loginByDir.get(String(r.hemis_id)) ?? null
+      return {
+        hemisId: loginId,
+        fullName: String(r.full_name ?? ""),
+        position: r.position ? String(r.position) : null,
+        department: r.department ? String(r.department) : null,
+        // LMS'ga hali kirmagan — rol berib bo'lmaydi (kirish ID'si noma'lum)
+        loggedIn: !!loginId,
+        currentRole: loginId ? roleById.get(loginId) ?? null : null,
+      }
+    })
+    .filter((s) => !s.hemisId || !memberIds.has(s.hemisId))
+    .sort((a, b) => a.fullName.localeCompare(b.fullName))
+
+  res.json({
+    success: true,
+    data: {
+      members: memberRows.map((r) => ({
+        hemisId: String(r.hemis_id),
+        fullName: String(r.full_name ?? ""),
+        position: r.position ? String(r.position) : null,
+        department: r.department ? String(r.department) : null,
+        grantedBy: r.granted_by ? String(r.granted_by) : null,
+        grantedAt: r.granted_at ?? null,
+      })),
+      suggestions,
+    },
+  })
+}
+
+/* ── GET /api/admin/role-candidates?q=… — rol berish uchun xodim qidirish
+   (LMS'ga kirgan xodimlar; lavozimi va bo'limi bilan) ── */
+router.get("/role-candidates", requireFullAdmin, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const q = textVal(String(req.query.q ?? ""))
+    if (q.length < 2) { res.json({ success: true, data: [] }); return }
+    const like = `%${q}%`
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT hu.hemis_id, hu.full_name, p.lms_role,
+              hed.position, hed.department
+       FROM hemis_users hu
+       LEFT JOIN lms_permissions p ON p.hemis_id = hu.hemis_id
+       LEFT JOIN hemis_employees_directory hed ON hed.hemis_id = COALESCE(hu.teacher_user_id, CAST(hu.hemis_id AS SIGNED))
+       WHERE hu.role = 'employee' AND (hu.full_name LIKE ? OR hu.username LIKE ? OR hu.hemis_id LIKE ?)
+       ORDER BY hu.full_name LIMIT 20`,
+      [like, like, like]
+    )
+    res.json({
+      success: true,
+      data: rows.map((r) => ({
+        hemisId: String(r.hemis_id),
+        fullName: String(r.full_name ?? ""),
+        position: r.position ? String(r.position) : null,
+        department: r.department ? String(r.department) : null,
+        currentRole: r.lms_role ? String(r.lms_role) : null,
+      })),
+    })
+  } catch (err) {
+    console.error("[role-candidates]", (err as { message?: string })?.message ?? err)
+    res.status(500).json({ success: false, message: "Server xatosi" })
+  }
 })
 
 /* ── GET /api/admin/audit-log — kim (IP bilan) qaysi amalni bajargani ── */

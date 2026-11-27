@@ -1010,7 +1010,7 @@ export async function initDatabase() {
       hemis_id    VARCHAR(255) NOT NULL,
       full_name   VARCHAR(255),
       hemis_role  VARCHAR(100),
-      lms_role    ENUM('admin','dean','teacher','student','blocked','pending') NOT NULL DEFAULT 'pending',
+      lms_role    ENUM('admin','dean','prorector','quality','methodist','teacher','student','blocked','pending') NOT NULL DEFAULT 'pending',
       granted_by  VARCHAR(255),
       granted_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -1019,10 +1019,11 @@ export async function initDatabase() {
       INDEX idx_perm_lms_role (lms_role)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_permissions")
-  // Eski o'rnatishlarda lms_role ENUM'ga 'dean' qo'shib qo'yish
+  // Eski o'rnatishlarda lms_role ENUM'ga 'dean' va (2026-11-27) prorektor,
+  // ta'lim sifati, o'quv-uslubiy bo'lim rollarini qo'shib qo'yish
   await execIgnoreDuplicate(`
     ALTER TABLE lms_permissions
-      MODIFY COLUMN lms_role ENUM('admin','dean','teacher','student','blocked','pending') NOT NULL DEFAULT 'pending'
+      MODIFY COLUMN lms_role ENUM('admin','dean','prorector','quality','methodist','teacher','student','blocked','pending') NOT NULL DEFAULT 'pending'
   `)
 
   // ── Kengaytirilgan boshqaruv: rol × modul bo'yicha Ko'rish/Yaratish/
@@ -1063,6 +1064,21 @@ export async function initDatabase() {
   await pool.query(
     `INSERT IGNORE INTO lms_role_permissions (role, module, can_view, can_create, can_edit, can_delete) VALUES ('dean', 'surveys', 1, 1, 1, 1)`
   )
+  // Yangi rollar (2026-11-27): boshlang'ich huquqlar dekanatnikidek — faqat
+  // so'rovnomalar yo'q (so'rovnomani faqat admin va dekanat boshqaradi).
+  // INSERT IGNORE: admin keyin Ruxsatlar sahifasida o'zgartirsa, qayta yozilmaydi.
+  for (const role of ["prorector", "quality", "methodist"]) {
+    await pool.query(
+      `INSERT IGNORE INTO lms_role_permissions (role, module, can_view, can_create, can_edit, can_delete)
+       SELECT ?, module, can_view, can_create, can_edit, can_delete FROM lms_role_permissions
+       WHERE role = 'dean' AND module <> 'surveys'`,
+      [role]
+    )
+    await pool.query(
+      `INSERT IGNORE INTO lms_role_permissions (role, module, can_view, can_create, can_edit, can_delete) VALUES (?, 'surveys', 0, 0, 0, 0)`,
+      [role]
+    )
+  }
 
   // ── Audit log: kim (IP bilan) qaysi admin amalini bajardi ──
   await execSafe(`

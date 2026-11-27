@@ -9,6 +9,18 @@ export type AdminModule = typeof ADMIN_MODULES[number]
 
 export type PermissionAction = "view" | "create" | "edit" | "delete"
 
+/** Admin paneliga kiradigan, huquqlari Ruxsatlar sahifasida sozlanadigan rollar.
+    2026-11-27: dekanatdan tashqari prorektor, ta'lim sifati va o'quv-uslubiy
+    bo'lim qo'shildi (HEMIS'da bular rol emas — lavozim/bo'lim; rolni admin beradi). */
+export const MANAGED_ROLES = ["dean", "prorector", "quality", "methodist"] as const
+export type ManagedRole = typeof MANAGED_ROLES[number]
+export const ADMIN_PANEL_ROLES = ["admin", ...MANAGED_ROLES] as const
+export type AdminPanelRole = typeof ADMIN_PANEL_ROLES[number]
+
+export function isAdminPanelRole(value: unknown): value is AdminPanelRole {
+  return typeof value === "string" && (ADMIN_PANEL_ROLES as readonly string[]).includes(value)
+}
+
 export interface ModulePermission {
   module: AdminModule
   canView: boolean
@@ -38,14 +50,13 @@ export async function getRolePermissions(role: string): Promise<ModulePermission
   return ADMIN_MODULES.map((mod) => mapRow(byModule.get(mod), mod))
 }
 
-/** Boshqaruv (Ruxsatlar) sahifasi uchun — 'admin' va 'dean' rollari, hammasi bir so'rovda. */
-export async function getManagedRolePermissions(): Promise<Record<"admin" | "dean", ModulePermission[]>> {
-  const [rows] = await pool.query<RowDataPacket[]>("SELECT * FROM lms_role_permissions WHERE role IN ('admin','dean')")
+/** Boshqaruv (Ruxsatlar) sahifasi uchun — admin va boshqariladigan barcha rollar, bitta so'rovda. */
+export async function getManagedRolePermissions(): Promise<Record<AdminPanelRole, ModulePermission[]>> {
+  const [rows] = await pool.query<RowDataPacket[]>("SELECT * FROM lms_role_permissions WHERE role IN (?)", [[...ADMIN_PANEL_ROLES]])
   const find = (role: string, mod: AdminModule) => rows.find((r) => String(r.role) === role && String(r.module) === mod)
-  return {
-    admin: ADMIN_MODULES.map((mod) => mapRow(find("admin", mod), mod)),
-    dean: ADMIN_MODULES.map((mod) => mapRow(find("dean", mod), mod)),
-  }
+  return Object.fromEntries(
+    ADMIN_PANEL_ROLES.map((role) => [role, ADMIN_MODULES.map((mod) => mapRow(find(role, mod), mod))])
+  ) as Record<AdminPanelRole, ModulePermission[]>
 }
 
 export async function setRolePermission(
