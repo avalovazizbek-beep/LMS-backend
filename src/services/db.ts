@@ -836,6 +836,30 @@ export async function initDatabase() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `, "lms_exam_retake_grants")
 
+  // ── Oraliq nazorat / mustaqil ishni qayta ochish so'rovi (2026-11-27):
+  // o'qituvchi talabalarni belgilab so'raydi, admin tasdiqlasa ularga
+  // lms_exam_retake_grants yoziladi. Muddatdan keyin 5 kun ichida. ──
+  await execSafe(`
+    CREATE TABLE IF NOT EXISTS lms_reopen_requests (
+      id                INT AUTO_INCREMENT PRIMARY KEY,
+      content_id        INT NOT NULL,
+      teacher_user_id   INT NOT NULL,
+      teacher_name      VARCHAR(255) NOT NULL,
+      students          TEXT NOT NULL,
+      reason            TEXT NOT NULL,
+      status            ENUM('pending','approved','rejected','cancelled','expired') NOT NULL DEFAULT 'pending',
+      admin_note        TEXT NULL,
+      reviewed_by_name  VARCHAR(255) NULL,
+      reviewed_at       TIMESTAMP NULL,
+      granted_count     INT NOT NULL DEFAULT 0,
+      created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_reopen_content (content_id, status),
+      INDEX idx_reopen_teacher (teacher_user_id, created_at),
+      INDEX idx_reopen_status (status, created_at),
+      CONSTRAINT fk_reopen_content FOREIGN KEY (content_id) REFERENCES lms_teacher_content(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `, "lms_reopen_requests")
+
   // ── O'qituvchi tashakkurnomasi: 15 ta mavzuni to'liq to'ldirganda bir marta
   // beriladi (certificateStore.ts). Sana berilgan kunida qotadi — keyin mavzu
   // o'chirilsa ham tashakkurnoma qaytib olinmaydi. ──

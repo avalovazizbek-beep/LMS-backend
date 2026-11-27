@@ -8,6 +8,18 @@ import { pool } from "../services/db"
 import { listTeacherContent, getTeacherContent, updateTeacherContent, listSubmissions, privateStorageRoot, storedFilePath, teacherUserId, studentUserId, safeMimeType, findTopicMarker, setTopicReopen, getTeacherGroupIds, effectiveTopicDeadline, setTopicDeadline, findTopicMarkers, isControlExam } from "../services/teachingStore"
 import { listQuestions, isExamPassed, getExamViolationsSummary } from "../services/examStore"
 import { grantRetakesForContent, revokeRetakeGrant, getActiveGrantKeys } from "../services/retakeStore"
+import {
+  reopenWindow,
+  REOPEN_WINDOW_DAYS,
+  REOPEN_STATUSES,
+  type ReopenStatus,
+  listReopenRequests,
+  listReopenRequestsForContent,
+  countPendingReopenRequests,
+  pendingReopenCounts,
+  getReopenRequest,
+  setReopenRequestStatus,
+} from "../services/reopenRequestStore"
 import { computeMiScores, computePeriodCells, pickPeriodExams, MUSTAQIL_CONTROL, type PeriodKey } from "../services/periodGrades"
 import {
   listAllForAdmin as listAllAnnouncements,
@@ -2550,8 +2562,10 @@ router.get("/exams", adminOnly, async (req: AuthRequest, res: Response): Promise
     WHERE ${where.join(" AND ")}
     ORDER BY tc.available_from DESC, tc.id DESC
   `, params)
+  const pendingByContent = withTasks ? await pendingReopenCounts(rows.map(r => Number(r.id))) : new Map<number, number>()
 
   res.json({ success: true, data: rows.map(r => ({
+    pendingRequests: pendingByContent.get(Number(r.id)) ?? 0,
     id: Number(r.id), type: String(r.type), title: String(r.title), subjectName: String(r.subject_name),
     groupId: Number(r.group_id), groupName: r.group_name ? String(r.group_name) : `Guruh ${r.group_id}`,
     controlType: r.control_type ?? null, teacherName: String(r.teacher_name),
@@ -2591,11 +2605,14 @@ router.get("/oraliq/:id/students", requirePermission("retake", "view"), async (r
   for (const s of roster) people.set(s.studentUserId, s.fullName)
   for (const s of submissions) if (!people.has(s.studentUserId)) people.set(s.studentUserId, s.studentFullName)
   const ids = [...people.keys()]
-  const [grants, cells, miScores] = await Promise.all([
+  const [grants, cells, miScores, requests] = await Promise.all([
     getActiveGrantKeys([exam.id]),
     computePeriodCells(exam.groupId, exam.subjectName, allContent, ids),
     isMi ? computeMiScores(allContent, ids) : Promise.resolve(null),
+    isScoredControl(exam) ? listReopenRequestsForContent(exam.id) : Promise.resolve([]),
   ])
+  // O'qituvchi so'rovida turgan talabalar (admin tasdiqlashini kutmoqda)
+  const pendingIds = new Set(requests.filter(r => r.status === "pending").flatMap(r => r.students.map(s => s.userId)))
   const slot = isMi ? "MI" : (["ON1", "ON2", "YN"] as PeriodKey[]).find((k) => pickPeriodExams(allContent)[k]?.id === exam.id) ?? null
   const subBy = new Map(submissions.map((s) => [s.studentUserId, s]))
   const violBy = new Map(violations.map((v) => [v.studentUserId, v.counts]))
@@ -2615,6 +2632,7 @@ router.get("/oraliq/:id/students", requirePermission("retake", "view"), async (r
       submittedAt: sub?.submittedAt ?? null,
       passed: sub ? isExamPassed(sub.grade, exam.maxScore) : false,
       retakeGranted: grants.has(`${exam.id}:${userId}`),
+      reopenPending: pendingIds.has(userId),
       // Jurnaldagi qiymat (foiz) va manbasi — qo'lda yozilgan bo'lishi ham mumkin
       journalPct: cell?.pct ?? null,
       journalSource: cell?.source ?? null,
@@ -2633,6 +2651,10 @@ router.get("/oraliq/:id/students", requirePermission("retake", "view"), async (r
         availableFrom: exam.availableFrom, deadline: exam.deadline, status: exam.status,
         questionCount: exam.questionCount, isActive: exam.isActive,
       },
+      // Oraliq / mustaqil ish: faqat o'qituvchi so'rovi orqali qayta ochiladi
+      reopenByRequest: isScoredControl(exam),
+      reopenWindow: reopenWindow(exam.deadline),
+      requests,
       students,
     },
   })
@@ -2652,6 +2674,11 @@ router.post("/content/:id/retake-grants", requirePermission("retake", "create"),
   const id = Number(req.params.id)
   const content = Number.isFinite(id) ? await getTeacherContent(id) : null
   if (!content || !(content.type === "exam" || isScoredControl(content))) { res.status(404).json({ success: false, message: "Imtihon topilmadi" }); return }
+  // Oraliq va mustaqil ishni admin o'zi ochmaydi — o'qituvchi so'rovini tasdiqlaydi
+  if (isScoredControl(content)) {
+    res.status(403).json({ success: false, message: "Oraliq nazorat va mustaqil ish faqat o'qituvchi so'rovi orqali qayta ochiladi — «Qayta ochish so'rovlari»da tasdiqlang" })
+    return
+  }
 
   const body = req.body as { studentUserIds?: unknown; reason?: string }
   const ids = Array.isArray(body.studentUserIds) ? body.studentUserIds.map(Number).filter(Number.isFinite) : []
@@ -2671,6 +2698,84 @@ router.delete("/content/:id/retake-grants/:studentUserId", requirePermission("re
   await revokeRetakeGrant(id, studentUserId)
   void logAudit(req, "retake.revoke", "retake", String(id), { studentUserId })
   res.json({ success: true, message: "Ruxsat bekor qilindi" })
+})
+
+/* ── GET /api/admin/reopen-requests — o'qituvchilarning oraliq / mustaqil
+   ishni qayta ochish so'rovlari (status: pending | approved | rejected |
+   cancelled | expired | all) ─────────────────────────────────────────── */
+router.get("/reopen-requests", requirePermission("retake", "view"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const raw = typeof req.query.status === "string" ? req.query.status : "pending"
+  const status: ReopenStatus | "all" = raw === "all" ? "all" : REOPEN_STATUSES.find((s) => s === raw) ?? "pending"
+  const [data, pendingCount] = await Promise.all([listReopenRequests(status), countPendingReopenRequests()])
+  res.json({ success: true, data, pendingCount, windowDays: REOPEN_WINDOW_DAYS })
+})
+
+/* ── PATCH /api/admin/reopen-requests/:id — tasdiqlash / rad etish.
+   Tasdiqlansa so'rovdagi talabalarga bir martalik ruxsat yoziladi
+   (o'tib bo'lganlar o'tkazib yuboriladi). Muddatdan keyin 5 kun o'tgan
+   bo'lsa tasdiqlab bo'lmaydi — so'rov "muddati o'tdi" bo'ladi. ── */
+router.patch("/reopen-requests/:id", requirePermission("retake", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = Number(req.params.id)
+  const body = (req.body ?? {}) as { action?: string; note?: string }
+  const action = body.action === "approve" || body.action === "reject" ? body.action : null
+  if (!Number.isFinite(id) || !action) {
+    res.status(400).json({ success: false, message: "action approve yoki reject bo'lishi kerak" })
+    return
+  }
+  const note = typeof body.note === "string" && body.note.trim() ? body.note.trim().slice(0, 1000) : null
+  const reviewer = textVal(req.user?.fullName, req.user?.username) || "Admin"
+
+  const request = await getReopenRequest(id)
+  if (!request || request.status !== "pending") {
+    res.status(409).json({ success: false, message: "So'rov topilmadi yoki allaqachon ko'rib chiqilgan" })
+    return
+  }
+  const content = await getTeacherContent(request.contentId)
+  if (!content) {
+    res.status(404).json({ success: false, message: "Nazorat topilmadi" })
+    return
+  }
+
+  let granted = 0
+  if (action === "approve") {
+    if (!reopenWindow(content.deadline).open) {
+      await setReopenRequestStatus(id, "expired")
+      res.status(409).json({ success: false, message: `Qayta ochish muddati tugagan: nazorat muddatidan keyin ${REOPEN_WINDOW_DAYS} kun o'tdi` })
+      return
+    }
+    // Avval holat (bir vaqtda ikki admin bossa ham bir marta), keyin ruxsatlar
+    if (!(await setReopenRequestStatus(id, "approved", { note, reviewer }))) {
+      res.status(409).json({ success: false, message: "So'rov allaqachon ko'rib chiqilgan" })
+      return
+    }
+    granted = await grantRetakesForContent(content, request.students.map((s) => s.userId), reviewer, request.reason)
+    await pool.query("UPDATE lms_reopen_requests SET granted_count = ? WHERE id = ?", [granted, id])
+  } else if (!(await setReopenRequestStatus(id, "rejected", { note, reviewer }))) {
+    res.status(409).json({ success: false, message: "So'rov allaqachon ko'rib chiqilgan" })
+    return
+  }
+  void logAudit(req, action === "approve" ? "reopen.approve" : "reopen.reject", "retake", String(content.id), {
+    requestId: id, studentIds: request.students.map((s) => s.userId), note, granted,
+  })
+
+  const approved = action === "approve"
+  const params = { title: content.title, group: request.content.groupName, n: approved ? granted : request.students.length }
+  notifySafe({
+    role: "employee",
+    userId: request.teacherUserId,
+    type: "system",
+    title: approved ? "Qayta ochish so'rovi tasdiqlandi" : "Qayta ochish so'rovi rad etildi",
+    body: `${params.title} · ${params.group}${approved ? ` — ${granted} ta talabaga ochildi` : ""}${note ? ` — ${note}` : ""}`,
+    link: "/oqituvchi-kabineti/oraliq-nazorat",
+    i18nKey: approved ? "reopenApproved" : "reopenRejected",
+    i18nParams: params,
+  })
+
+  res.json({
+    success: true,
+    message: approved ? `Tasdiqlandi — ${granted} ta talabaga qayta ochildi` : "Rad etildi",
+    data: { granted },
+  })
 })
 
 /* ── E'lonlar (admin panel: yaratish/tahrirlash/o'chirish) ────────────── */

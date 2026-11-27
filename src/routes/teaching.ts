@@ -134,6 +134,15 @@ import {
   getGroupGradeHistory,
 } from "../services/gradeStore"
 import { getActiveRetakeGrant, getActiveGrantKeys, consumeRetakeGrant, grantRetakesForContent, revokeRetakeGrant } from "../services/retakeStore"
+import {
+  reopenWindow,
+  REOPEN_WINDOW_DAYS,
+  listReopenRequestsForContent,
+  listReopenRequestsForTeacher,
+  createReopenRequest,
+  getReopenRequest,
+  setReopenRequestStatus,
+} from "../services/reopenRequestStore"
 import { isAdminUser } from "./admin"
 import { logAudit } from "../services/auditLog"
 import { syncTopicToGroups } from "../services/topicSync"
@@ -2258,6 +2267,14 @@ router.put("/content/:id", async (req: AuthRequest, res: Response): Promise<void
     res.status(403).json({ success: false, message: "Mavzu muddati tugagan — test parametrlarini o'zgartirish uchun avval mavzu muddatini uzaytiring" })
     return
   }
+  // Oraliq / mustaqil ish: muddatdan keyin 5 kun o'tgach qayta ochib bo'lmaydi —
+  // muddatni o'zgartirish ham (u nazoratni butun guruhga qayta ochib yuborardi)
+  if ((isOraliqItem(existing) || isMustaqilControlItem(existing)) && requestedDeadline && isValidDate(requestedDeadline) &&
+      existing.deadline && Math.abs(new Date(requestedDeadline).getTime() - new Date(existing.deadline).getTime()) > 60_000 &&
+      !reopenWindow(existing.deadline).open) {
+    res.status(403).json({ success: false, message: `Qayta ochish muddati tugagan: nazorat muddatidan keyin ${REOPEN_WINDOW_DAYS} kun o'tdi, muddatni o'zgartirib bo'lmaydi` })
+    return
+  }
   const isTopicMarker = existing.type === "mavzu" && existing.kind === "topic"
 
   if (typeof body.title === "string" && body.title.trim()) patch.title = body.title
@@ -2723,8 +2740,9 @@ router.post("/content/:id/retake-grants", async (req: AuthRequest, res: Response
     res.status(404).json({ success: false, message: "Test topilmadi" })
     return
   }
-  if (content.controlType === "oraliq") {
-    res.status(403).json({ success: false, message: "Oraliq nazoratni qayta ochishni admin \"Oraliqlar\" bo'limidan qiladi" })
+  // Oraliq va mustaqil ish faqat so'rov orqali ochiladi (admin tasdiqlaydi)
+  if (content.controlType === "oraliq" || content.controlType === MUSTAQIL_CONTROL) {
+    res.status(403).json({ success: false, message: "Oraliq nazorat va mustaqil ishni qayta ochish — Imtihonlar ro'yxatida «Qayta ochish so'rovi» orqali, admin tasdiqlaydi" })
     return
   }
   const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
@@ -2737,6 +2755,156 @@ router.post("/content/:id/retake-grants", async (req: AuthRequest, res: Response
   }
   const granted = await grantRetakesForContent(content, ids, fullNameOf(req.user) || null, textValue(body.reason) || null)
   res.json({ success: true, data: { granted }, message: `${granted} ta talabaga qayta urinish ruxsati berildi` })
+})
+
+/* ── Oraliq nazorat / mustaqil ishni qayta ochish so'rovi (2026-11-27) ──
+   Muddat tugagach 5 kun ichida o'qituvchi talabalarni belgilab so'rov
+   yuboradi, admin tasdiqlasa o'shalarga bir martalik ruxsat beriladi.
+   5 kundan keyin qayta ochib bo'lmaydi. ─────────────────────────────── */
+async function ownReopenableContent(req: AuthRequest, res: Response): Promise<TeacherContentRecord | null> {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return null
+  }
+  const id = numberValue(req.params.id)
+  const content = id !== null ? await getTeacherContent(id) : null
+  if (!content || content.teacherUserId !== teacherUserId(req.user) || !(isOraliqItem(content) || isMustaqilControlItem(content))) {
+    res.status(404).json({ success: false, message: "Nazorat topilmadi" })
+    return null
+  }
+  return content
+}
+
+/** Guruh ro'yxati + natijalar: kimni qayta ochish mumkin (o'tmagan, ruxsati
+    yo'q, kutilayotgan so'rovda yo'q) */
+async function reopenStudentRows(content: TeacherContentRecord, pendingIds: Set<number>) {
+  const [roster, submissions, grants] = await Promise.all([
+    getJournalRoster(content.groupId, content.subjectName).catch(() => []),
+    listSubmissions(content.id),
+    getActiveGrantKeys([content.id]),
+  ])
+  const people = new Map<number, string>()
+  for (const s of roster) people.set(s.studentUserId, s.fullName)
+  for (const s of submissions) if (!people.has(s.studentUserId)) people.set(s.studentUserId, s.studentFullName)
+  const subBy = new Map(submissions.map((s) => [s.studentUserId, s]))
+  return sortByFullName([...people.entries()].map(([userId, fullName]) => {
+    const sub = subBy.get(userId)
+    const passed = sub ? isExamPassed(sub.grade, content.maxScore) : false
+    const retakeGranted = grants.has(`${content.id}:${userId}`)
+    const pending = pendingIds.has(userId)
+    return {
+      userId,
+      fullName,
+      grade: sub?.grade ?? null,
+      attemptsUsed: sub?.attemptsUsed ?? 0,
+      submittedAt: sub?.submittedAt ?? null,
+      passed,
+      retakeGranted,
+      pending,
+      eligible: !passed && !retakeGranted && !pending,
+    }
+  }))
+}
+
+/* ── GET /reopen-requests — o'qituvchining so'rovlari (kartalardagi holat) ── */
+router.get("/reopen-requests", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  res.json({ success: true, data: await listReopenRequestsForTeacher(teacherUserId(req.user)) })
+})
+
+/* ── GET /content/:id/reopen — oyna holati, talabalar va so'rovlar tarixi ── */
+router.get("/content/:id/reopen", async (req: AuthRequest, res: Response): Promise<void> => {
+  const content = await ownReopenableContent(req, res)
+  if (!content) return
+  const requests = await listReopenRequestsForContent(content.id)
+  const pendingIds = new Set(requests.filter((r) => r.status === "pending").flatMap((r) => r.students.map((s) => s.userId)))
+  const students = await reopenStudentRows(content, pendingIds)
+  res.json({ success: true, data: { window: reopenWindow(content.deadline), windowDays: REOPEN_WINDOW_DAYS, students, requests } })
+})
+
+/* ── POST /content/:id/reopen-requests — adminga so'rov ─────────────── */
+router.post("/content/:id/reopen-requests", async (req: AuthRequest, res: Response): Promise<void> => {
+  const content = await ownReopenableContent(req, res)
+  if (!content) return
+  const window = reopenWindow(content.deadline)
+  if (!window.open) {
+    res.status(403).json({ success: false, message: `Qayta ochish muddati tugagan: nazorat muddatidan keyin ${REOPEN_WINDOW_DAYS} kun o'tdi` })
+    return
+  }
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {}
+  const reason = textValue(body.reason).slice(0, 1000)
+  const ids = Array.isArray(body.studentUserIds)
+    ? [...new Set(body.studentUserIds.map((v) => numberValue(v)).filter((n): n is number => n !== null))]
+    : []
+  if (!ids.length) {
+    res.status(400).json({ success: false, message: "Talaba tanlanmagan" })
+    return
+  }
+  if (!reason) {
+    res.status(400).json({ success: false, message: "Qayta ochish sababini yozing" })
+    return
+  }
+  const requests = await listReopenRequestsForContent(content.id)
+  if (requests.some((r) => r.status === "pending")) {
+    res.status(409).json({ success: false, message: "Bu nazorat bo'yicha so'rov allaqachon yuborilgan — admin javobini kuting yoki so'rovni bekor qiling" })
+    return
+  }
+  const rows = await reopenStudentRows(content, new Set())
+  const byId = new Map(rows.map((r) => [r.userId, r]))
+  const students = ids
+    .map((id) => byId.get(id))
+    .filter((r): r is NonNullable<typeof r> => !!r && r.eligible)
+    .map((r) => ({ userId: r.userId, fullName: r.fullName }))
+  if (!students.length) {
+    res.status(400).json({ success: false, message: "Tanlanganlar orasida qayta ochiladigan talaba yo'q (o'tgan yoki ruxsati bor)" })
+    return
+  }
+
+  const created = await createReopenRequest({
+    contentId: content.id,
+    teacherUserId: content.teacherUserId,
+    teacherName: fullNameOf(req.user),
+    students,
+    reason,
+  })
+
+  // Qayta urinish bo'limiga ruxsati bor adminlarga — bitta yig'ma xabar
+  adminOwnersFor("retake").then((owners) => {
+    for (const owner of owners) {
+      bumpGroupedSafe({
+        ...owner,
+        type: "system",
+        groupKey: "reopen-requests",
+        link: "/admin/oraliqlar?tab=requests",
+        i18nKey: "reopenRequests",
+        text: (n) => ({ title: "Qayta ochish so'rovlari", body: `${n} ta so'rov ko'rib chiqilishini kutmoqda` }),
+      })
+    }
+  }).catch(() => { /* best-effort */ })
+
+  res.json({ success: true, message: `So'rov adminga yuborildi (${students.length} ta talaba)`, data: created })
+})
+
+/* ── DELETE /reopen-requests/:id — javobsiz so'rovni bekor qilish ───── */
+router.delete("/reopen-requests/:id", async (req: AuthRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== "employee") {
+    res.status(403).json({ success: false, message: "Faqat o'qituvchi uchun" })
+    return
+  }
+  const id = numberValue(req.params.id)
+  const request = id !== null ? await getReopenRequest(id) : null
+  if (!request || request.teacherUserId !== teacherUserId(req.user)) {
+    res.status(404).json({ success: false, message: "So'rov topilmadi" })
+    return
+  }
+  if (!(await setReopenRequestStatus(request.id, "cancelled"))) {
+    res.status(409).json({ success: false, message: "So'rov allaqachon ko'rib chiqilgan" })
+    return
+  }
+  res.json({ success: true, message: "So'rov bekor qilindi" })
 })
 
 /* ── POST /content/:id/copy-to-groups — oraliq/yakuniy nazoratni savollari
